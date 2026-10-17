@@ -4,43 +4,76 @@ MCP Server for Remote Server Management
 SECURITY MODEL:
 - NO generic command execution
 - ONLY specific, safe operations
-- All paths restricted to /srv/* and explicit safe paths
+- All paths restricted to the configured services directory
 - No access to credentials, keys, or sensitive system files
 - Docker operations limited to service management (not arbitrary commands)
 
 Design Principle: Whitelist operations, don't blacklist commands.
 """
 
+import argparse
 import asyncio
 import logging
+import os
+import shlex
 from pathlib import Path
 
-from mcp.server.fastmcp import FastMCP
+from mcp.server.mcpserver import MCPServer
 
 from server_management_lib import (
+    ConfigNotFoundError,
     InfluxDBClient,
     PrometheusClient,
     SecurityValidator,
     SSHManager,
     load_config,
+    resolve_config_path,
 )
 
-# Configure logging
-logging.basicConfig(level=logging.INFO)
+APP_NAME = "remote-server-mcp"
+CONFIG_ENV_VAR = "REMOTE_SERVER_MCP_CONFIG"
+
 logger = logging.getLogger(__name__)
 
-# Load configuration
-config_path = Path(__file__).parent.parent.parent / "config.yaml"
-config = load_config(config_path)
-
-# Initialize security validator
+# Best-effort load so the module stays importable (tests, tooling). The server
+# itself refuses to start without a real configuration file (see main()).
+config = load_config(env_var=CONFIG_ENV_VAR, app_name=APP_NAME, log_missing=False)
 security = SecurityValidator(config)
-
-# Initialize SSH manager
 ssh_manager = SSHManager(config, security)
 
-# Create MCP server
-mcp = FastMCP("remote-server-mcp")
+mcp = MCPServer("remote-server-mcp")
+
+
+def configure_logging() -> None:
+    """Configure logging from MCP_LOG_LEVEL (called at startup, not on import)."""
+    level_name = os.environ.get("MCP_LOG_LEVEL", "INFO").upper()
+    level = getattr(logging, level_name, logging.INFO)
+    logging.basicConfig(level=level)
+
+
+def apply_config(config_path: Path | None = None) -> Path:
+    """(Re)load configuration and rebuild the dependent objects in place."""
+    global security, ssh_manager
+
+    resolved = resolve_config_path(
+        config_path, env_var=CONFIG_ENV_VAR, app_name=APP_NAME
+    )
+    if resolved is None:
+        # Raises ConfigNotFoundError with an actionable message.
+        load_config(
+            config_path,
+            env_var=CONFIG_ENV_VAR,
+            app_name=APP_NAME,
+            required=True,
+        )
+        raise ConfigNotFoundError("No configuration file found")
+
+    new_config = load_config(resolved, required=True)
+    config.clear()
+    config.update(new_config)
+    security = SecurityValidator(config)
+    ssh_manager = SSHManager(config, security)
+    return resolved
 
 
 @mcp.tool()
@@ -51,8 +84,9 @@ async def list_services() -> str:
         List of service directories and their status
     """
     try:
+        base_path = security.services_base_path.rstrip("/") + "/"
         cmd = (
-            "ls -1 /srv/ 2>&1 && "
+            f"ls -1 {shlex.quote(base_path)} 2>&1 && "
             "echo '---DOCKER STATUS---' && "
             "docker ps --format '{{.Names}}\t{{.Status}}' 2>&1"
         )
@@ -84,15 +118,17 @@ async def get_service_logs(service: str, lines: int = 100) -> str:
     # Check service exists
     exists = await ssh_manager.check_service_exists(service)
     if not exists:
-        return f"❌ Service '{service}' does not exist in /srv/"
+        return (
+            f"❌ Service '{service}' does not exist in {security.services_base_path}/"
+        )
 
     # Limit lines to prevent abuse
-    lines = min(lines, 1000)
+    lines = max(1, min(lines, 1000))
 
     try:
         # Use '--' to prevent Docker option injection even if service
         # validation is somehow bypassed (defense in depth)
-        cmd = f"docker logs --tail {lines} -- {service} 2>&1"
+        cmd = f"docker logs --tail {lines} -- {shlex.quote(service)} 2>&1"
         result = await ssh_manager.execute_safe_command(cmd)
         return result
     except Exception as e:
@@ -114,7 +150,9 @@ async def get_service_status(service: str) -> str:
 
     exists = await ssh_manager.check_service_exists(service)
     if not exists:
-        return f"❌ Service '{service}' does not exist in /srv/"
+        return (
+            f"❌ Service '{service}' does not exist in {security.services_base_path}/"
+        )
 
     try:
         # Use '--' to prevent Docker option injection (defense in depth)
@@ -130,9 +168,9 @@ async def get_service_status(service: str) -> str:
         results.append(f"=== Docker Status ===\n{output}")
 
         cmd = (
-            f"docker stats --no-stream -- {service} "
+            f"docker stats --no-stream "
             f"--format='CPU: {{{{.CPUPerc}}}}\nMemory: {{{{.MemUsage}}}}\n"
-            f"Net I/O: {{{{.NetIO}}}}' 2>&1"
+            f"Net I/O: {{{{.NetIO}}}}' -- {service} 2>&1"
         )
         output = await ssh_manager.execute_safe_command(cmd)
         results.append(f"=== Resource Usage ===\n{output}")
@@ -161,11 +199,13 @@ async def restart_service(service: str) -> str:
 
     exists = await ssh_manager.check_service_exists(service)
     if not exists:
-        return f"❌ Service '{service}' does not exist in /srv/"
+        return (
+            f"❌ Service '{service}' does not exist in {security.services_base_path}/"
+        )
 
     try:
         # Use '--' to prevent Docker option injection (defense in depth)
-        cmd = f"docker restart -- {service} 2>&1"
+        cmd = f"docker restart -- {shlex.quote(service)} 2>&1"
         result = await ssh_manager.execute_safe_command(cmd)
         return f"✅ Service '{service}' restarted\n{result}"
     except Exception as e:
@@ -187,11 +227,13 @@ async def start_service(service: str) -> str:
 
     exists = await ssh_manager.check_service_exists(service)
     if not exists:
-        return f"❌ Service '{service}' does not exist in /srv/"
+        return (
+            f"❌ Service '{service}' does not exist in {security.services_base_path}/"
+        )
 
     try:
         # Use '--' to prevent Docker option injection (defense in depth)
-        cmd = f"docker start -- {service} 2>&1"
+        cmd = f"docker start -- {shlex.quote(service)} 2>&1"
         result = await ssh_manager.execute_safe_command(cmd)
         return f"✅ Service '{service}' started\n{result}"
     except Exception as e:
@@ -213,11 +255,13 @@ async def stop_service(service: str) -> str:
 
     exists = await ssh_manager.check_service_exists(service)
     if not exists:
-        return f"❌ Service '{service}' does not exist in /srv/"
+        return (
+            f"❌ Service '{service}' does not exist in {security.services_base_path}/"
+        )
 
     try:
         # Use '--' to prevent Docker option injection (defense in depth)
-        cmd = f"docker stop -- {service} 2>&1"
+        cmd = f"docker stop -- {shlex.quote(service)} 2>&1"
         result = await ssh_manager.execute_safe_command(cmd)
         return f"✅ Service '{service}' stopped\n{result}"
     except Exception as e:
@@ -241,14 +285,19 @@ async def get_service_file(service: str, file_path: str) -> str:
     # Construct and validate full path
     full_path = security.validate_service_file_path(service, file_path)
     if full_path is None:
-        return f"❌ Invalid file path: {file_path}\nFile must be within /srv/{service}/"
+        return (
+            f"❌ Invalid file path: {file_path}\n"
+            f"File must be within {security.services_base_path}/{service}/"
+        )
 
     exists = await ssh_manager.check_service_exists(service)
     if not exists:
-        return f"❌ Service '{service}' does not exist in /srv/"
+        return (
+            f"❌ Service '{service}' does not exist in {security.services_base_path}/"
+        )
 
     try:
-        cmd = f"cat {full_path} 2>&1"
+        cmd = f"cat {shlex.quote(full_path)} 2>&1"
         result = await ssh_manager.execute_safe_command(cmd)
         return result
     except Exception as e:
@@ -275,17 +324,20 @@ async def list_service_files(service: str, subdirectory: str = "") -> str:
         if full_path is None:
             return (
                 f"❌ Invalid subdirectory: {subdirectory}\n"
-                f"Must be within /srv/{service}/"
+                f"Must be within {security.services_base_path}/{service}/"
             )
     else:
-        full_path = f"/srv/{service}"
+        base_path = security.services_base_path.rstrip("/")
+        full_path = f"{base_path}/{service}"
 
     exists = await ssh_manager.check_service_exists(service)
     if not exists:
-        return f"❌ Service '{service}' does not exist in /srv/"
+        return (
+            f"❌ Service '{service}' does not exist in {security.services_base_path}/"
+        )
 
     try:
-        cmd = f"ls -lah {full_path} 2>&1"
+        cmd = f"ls -lah {shlex.quote(full_path)} 2>&1"
         result = await ssh_manager.execute_safe_command(cmd)
         return result
     except Exception as e:
@@ -314,12 +366,12 @@ async def search_service_logs(service: str, pattern: str, lines: int = 1000) -> 
         return f"❌ Invalid search pattern: {e}"
 
     # Limit lines
-    lines = min(lines, 5000)
+    lines = max(1, min(lines, 5000))
 
     try:
         # Use grep with fixed strings (no regex) for safety
         cmd = (
-            f"docker logs --tail {lines} -- {service} 2>&1 | "
+            f"docker logs --tail {lines} -- {shlex.quote(service)} 2>&1 | "
             f"grep -F '{sanitized_pattern}'"
         )
         result = await ssh_manager.execute_safe_command(cmd)
@@ -456,7 +508,8 @@ async def get_server_health() -> str:
         commands = [
             "echo '=== System Uptime ===' && uptime",
             "echo '=== Memory Usage ===' && free -h",
-            "echo '=== Disk Usage ===' && df -h /srv",
+            "echo '=== Disk Usage ===' && "
+            f"df -h {shlex.quote(security.services_base_path)}",
             (
                 "echo '=== Running Services ===' && docker ps "
                 "--format '{{.Names}} ({{.Status}})'"
@@ -473,9 +526,17 @@ async def get_server_health() -> str:
         return f"❌ Error getting server health: {e}"
 
 
-async def main():
+async def main(config_path: Path | None = None) -> None:
     """Run the MCP server."""
-    # Test SSH connection on startup
+    configure_logging()
+
+    try:
+        resolved = apply_config(config_path)
+    except ConfigNotFoundError as e:
+        logger.error("%s", e)
+        raise SystemExit(2) from e
+
+    logger.info("Using configuration: %s", resolved)
     logger.info("Testing SSH connection...")
     try:
         result = await ssh_manager.execute_safe_command("echo 'Connection successful'")
@@ -496,5 +557,18 @@ async def main():
     await mcp.run_stdio_async()
 
 
+def cli() -> None:
+    """Console entry point."""
+    parser = argparse.ArgumentParser(description="Remote Server MCP server")
+    parser.add_argument(
+        "--config",
+        type=Path,
+        default=None,
+        help=f"Path to config.yaml (default: ${CONFIG_ENV_VAR} or XDG config)",
+    )
+    args = parser.parse_args()
+    asyncio.run(main(args.config))
+
+
 if __name__ == "__main__":
-    asyncio.run(main())
+    cli()

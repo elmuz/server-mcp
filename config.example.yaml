@@ -13,13 +13,17 @@ ssh:
   
   # Option 2: SSH key authentication (recommended)
   key_path: "~/.ssh/id_rsa"
+  # Or leave key_path/password unset to use ssh-agent and ~/.ssh/config.
+
+  # Host key verification (do not disable on a real server)
+  known_hosts: "~/.ssh/known_hosts"
+  connect_timeout: 10
 
 security:
   # Service directory base path - all operations restricted to this path
   services_path: "/srv"
 
-  # NEVER allow generic command execution (recommended: false)
-  # If set to true, DANGEROUS - only enable if you absolutely must
+  # Generic command execution is never implemented; this key is reserved.
   allow_generic_commands: false
 
 # Database query configuration (optional)

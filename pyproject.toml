@@ -6,7 +6,7 @@ readme = "README.md"
 license = "MIT"
 requires-python = ">=3.11"
 dependencies = [
-    "mcp>=1.0.0",
+    "mcp>=2.3,<3",
     "server-management-lib @ git+https://github.com/elmuz/server-management-lib.git",
 ]
 
@@ -14,6 +14,7 @@ dependencies = [
 dev = [
     # Testing
     "pytest>=8.0.0",
+    "pytest-cov>=6.0.0",
     # Linting
     "ruff>=0.9.0",
     # Type checking
@@ -25,7 +26,12 @@ dev = [
 ]
 
 [project.scripts]
-remote-server-mcp = "remote_server_mcp:main"
+remote-server-mcp = "remote_server_mcp:cli"
+
+# Development override: use the sibling checkout until server-management-lib is
+# released. Remove this block when depending on a published/tagged version.
+[tool.uv.sources]
+server-management-lib = { path = "../server-management-lib", editable = true }
 
 [build-system]
 requires = ["setuptools>=61.0"]
@@ -37,8 +43,11 @@ python_files = ["test_*.py"]
 python_classes = ["Test*"]
 python_functions = ["test_*"]
 markers = [
-    "integration: marks integration tests that require real SSH connection",
+    "integration: marks integration tests that require real SSH/DB access",
 ]
+# Keep the default suite deterministic. Run integration tests explicitly with:
+#   uv run pytest -m integration
+addopts = "-m 'not integration'"
 
 [tool.ruff]
 target-version = "py311"
