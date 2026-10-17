@@ -362,102 +362,127 @@ class TestFilePathValidation:
 
 
 class TestInfluxDBQueryValidation:
-    """Test InfluxDB SQL query validation."""
+    """InfluxDB SQL validation is semantic, not a shell-character blacklist."""
 
     def setup_method(self):
         self.security = SecurityValidator({})
 
-    def test_valid_queries(self):
+    def test_valid_selects(self):
         valid = [
             "SELECT * FROM cpu WHERE time > now() - INTERVAL '1 hour' LIMIT 5",
             "SELECT mean(value) FROM metrics GROUP BY host",
+            "WITH recent AS (SELECT * FROM cpu) SELECT * FROM recent",
         ]
-        for q in valid:
-            assert self.security.validate_influxdb_query(q) is not None
+        for query in valid:
+            assert self.security.validate_influxdb_query(query) is not None
+
+    def test_trailing_semicolon_is_accepted(self):
+        result = self.security.validate_influxdb_query("SELECT * FROM cpu;")
+        assert result == "SELECT * FROM cpu"
+
+    def test_quotes_identifiers_and_operators_are_accepted(self):
+        queries = [
+            'SELECT * FROM "cpu load" WHERE usage >= 0.9',
+            "SELECT * FROM cpu WHERE host = 'server-1'",
+        ]
+        for query in queries:
+            assert self.security.validate_influxdb_query(query) is not None
+
+    def test_comments_are_accepted(self):
+        queries = [
+            "SELECT * FROM cpu -- operator note",
+            "SELECT * FROM cpu /* operator note */",
+        ]
+        for query in queries:
+            assert self.security.validate_influxdb_query(query) is not None
+
+    def test_multiple_statements_blocked(self):
+        injections = [
+            "SELECT * FROM cpu; DROP TABLE metrics",
+            "SELECT * FROM cpu\nDELETE FROM metrics",
+        ]
+        for query in injections:
+            assert self.security.validate_influxdb_query(query) is None
 
     def test_write_ops_blocked(self):
         write_ops = [
             "DROP MEASUREMENT cpu",
             "DELETE FROM metrics",
             "INSERT INTO cpu VALUES (1)",
+            "UPDATE metrics SET value = 100",
+            "ALTER TABLE cpu ADD COLUMN x INT",
+            "CREATE DATABASE testdb",
+            "TRUNCATE TABLE logs",
+            "GRANT ALL TO admin",
+            "REVOKE READ FROM user",
+            "KILL QUERY 12345",
+            "SET PASSWORD FOR user = 'pass'",
+            "SELECT * FROM cpu INTO other",
         ]
-        for q in write_ops:
-            assert self.security.validate_influxdb_query(q) is None
+        for query in write_ops:
+            assert self.security.validate_influxdb_query(query) is None, query
 
-    def test_injection_blocked(self):
-        injections = [
-            "SELECT * FROM cpu; DROP TABLE metrics",
-            "SELECT * FROM cpu -- comment",
-            "SELECT * FROM cpu `whoami`",
-        ]
-        for q in injections:
-            assert self.security.validate_influxdb_query(q) is None
+    def test_null_byte_blocked(self):
+        assert self.security.validate_influxdb_query("SELECT * FROM cpu\x00") is None
 
-    def test_none_input(self):
+    def test_none_and_empty_input(self):
         assert self.security.validate_influxdb_query(None) is None
-
-    def test_empty_input(self):
         assert self.security.validate_influxdb_query("") is None
+
+    def test_non_string_input(self):
+        assert self.security.validate_influxdb_query(123) is None
 
     def test_too_long(self):
         assert self.security.validate_influxdb_query("SELECT " + "a" * 5000) is None
 
-    def test_not_select(self):
-        assert (
-            self.security.validate_influxdb_query("INSERT INTO cpu VALUES (1)") is None
-        )
-
-    def test_dangerous_chars_blocked(self):
-        """InfluxDB queries with dangerous characters should be blocked."""
-        dangerous = [
-            "SELECT * FROM cpu; DROP TABLE metrics",  # semicolon
-            "SELECT * FROM cpu -- comment",  # SQL comment
-            "SELECT * FROM cpu /* block */",  # block comment
-            "SELECT * FROM cpu `whoami`",  # command substitution
-            "SELECT * FROM cpu $var",  # variable expansion
-            "SELECT * FROM cpu | cat",  # pipe
-            "SELECT * FROM cpu & bg",  # background
-            "SELECT * FROM cpu {brace}",  # brace expansion
-            "SELECT * FROM cpu \\n",  # escape
-            "SELECT * FROM cpu \n newline",  # newline
-            "SELECT * FROM cpu \r cr",  # carriage return
-            "SELECT * FROM cpu \x00 null",  # null byte
-        ]
-        for q in dangerous:
-            assert self.security.validate_influxdb_query(q) is None, (
-                f"Should block: {q[:50]}"
-            )
-
 
 class TestPrometheusQueryValidation:
-    """Test PromQL query validation."""
+    """PromQL is sent over HTTP: quotes, braces and comparisons are valid."""
 
     def setup_method(self):
         self.security = SecurityValidator({})
 
-    def test_valid_queries(self):
-        valid = [
-            "up",
+    def test_label_matchers_accepted(self):
+        queries = [
+            'up{job="node"}',
+            'node_filesystem_avail_bytes{device="/dev/sda1"}',
+            "up{job='node'}",
+        ]
+        for query in queries:
+            assert self.security.validate_prometheus_query(query) is not None
+
+    def test_comparisons_accepted(self):
+        queries = ["up > 0", "up == 0", "node_load1 >= 2"]
+        for query in queries:
+            assert self.security.validate_prometheus_query(query) is not None
+
+    def test_functions_accepted(self):
+        queries = [
             "rate(http_requests_total[5m])",
+            "histogram_quantile(0.95, rate(bucket[5m]))",
         ]
-        for q in valid:
-            assert self.security.validate_prometheus_query(q) is not None
+        for query in queries:
+            assert self.security.validate_prometheus_query(query) is not None
 
-    def test_injection_blocked(self):
-        injections = [
-            "up; cat /etc/passwd",
-            "`whoami`",
-            "$(rm -rf /)",
-            "up{job='test'}",
-        ]
-        for q in injections:
-            assert self.security.validate_prometheus_query(q) is None
+    def test_shell_metacharacters_are_not_interpreted(self):
+        # These are invalid PromQL, but they are just HTTP query text; the
+        # Prometheus API will reject them. They are never executed by a shell.
+        assert (
+            self.security.validate_prometheus_query("up; cat /etc/passwd") is not None
+        )
 
-    def test_none_input(self):
+    def test_null_byte_blocked(self):
+        assert self.security.validate_prometheus_query("up\x00") is None
+
+    def test_control_characters_blocked(self):
+        assert self.security.validate_prometheus_query("up\x01") is None
+
+    def test_none_and_empty_input(self):
         assert self.security.validate_prometheus_query(None) is None
-
-    def test_empty_input(self):
         assert self.security.validate_prometheus_query("") is None
+
+    def test_non_string_input(self):
+        assert self.security.validate_prometheus_query(123) is None
 
     def test_too_long(self):
         assert self.security.validate_prometheus_query("up" + "a" * 5000) is None

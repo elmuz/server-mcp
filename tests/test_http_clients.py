@@ -614,3 +614,32 @@ class TestPrometheusClientTargets:
                 assert "Unexpected response" in result
 
         asyncio.run(run())
+
+
+class TestQueryHelpers:
+    def test_ensure_limit_appends_when_missing(self):
+        from server_management_lib.http_clients import _ensure_limit
+
+        assert _ensure_limit("SELECT * FROM cpu", 10) == ("SELECT * FROM cpu\nLIMIT 10")
+
+    def test_ensure_limit_keeps_existing_limit(self):
+        from server_management_lib.http_clients import _ensure_limit
+
+        query = "SELECT * FROM cpu LIMIT 5"
+        assert _ensure_limit(query, 10) == query
+
+    def test_ensure_limit_after_line_comment(self):
+        from server_management_lib.http_clients import _ensure_limit
+
+        result = _ensure_limit("SELECT * FROM cpu -- note", 10)
+        assert result.endswith("\nLIMIT 10")
+        assert "-- note" in result
+
+    def test_parse_duration(self):
+        from server_management_lib.http_clients import parse_duration
+
+        assert parse_duration("30s") == 30
+        assert parse_duration("1m") == 60
+        assert parse_duration("500ms") == 0.5
+        assert parse_duration("15") == 15
+        assert parse_duration("bogus") == 30

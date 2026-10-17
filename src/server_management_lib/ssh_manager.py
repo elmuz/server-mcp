@@ -11,10 +11,14 @@ Handles SSH connections with strict security:
 import logging
 import os
 import shlex
+import time
+from dataclasses import dataclass
 from pathlib import Path
 
 import asyncssh
 
+from .audit import AuditLogger
+from .output import DEFAULT_MAX_OUTPUT_BYTES, sanitize_output
 from .security import SecurityValidator
 
 logger = logging.getLogger(__name__)
@@ -25,6 +29,28 @@ DISABLED_KNOWN_HOSTS = {"", "none", "false", "off"}
 
 class SSHConfigurationError(RuntimeError):
     """Raised when SSH settings cannot be turned into a safe connection."""
+
+
+class RemotePathError(RuntimeError):
+    """Raised when a remote path escapes its allowed base directory."""
+
+
+class RemoteFileError(RuntimeError):
+    """Raised when a remote file cannot be read safely."""
+
+
+@dataclass(frozen=True)
+class RemoteDirEntry:
+    """A single entry returned by :meth:`SSHManager.list_remote_dir`."""
+
+    name: str
+    longname: str
+    size: int
+
+
+def _is_within(path: str, base: str) -> bool:
+    base = base.rstrip("/")
+    return path == base or path.startswith(base + "/")
 
 
 def _load_known_hosts(path: Path) -> str | bytes:
@@ -102,6 +128,16 @@ class SSHManager:
         self._connected = False
         self._known_hosts_cache: str | bytes | None = None
         self._known_hosts_loaded = False
+
+        output_config = config.get("output", {}) or {}
+        self.max_output_bytes = int(
+            output_config.get("max_bytes", DEFAULT_MAX_OUTPUT_BYTES)
+        )
+        audit_config = config.get("audit", {}) or {}
+        self.audit = AuditLogger(
+            audit_config.get("path"),
+            enabled=audit_config.get("enabled", False),
+        )
 
     # ------------------------------------------------------------------
     # Connection setup
@@ -215,6 +251,7 @@ class SSHManager:
         """
         if not self.security.is_command_safe(command):
             logger.error("Attempted to execute unsafe command: %s", command)
+            self.audit.log("command_blocked", command=command)
             return "❌ Security violation: Command blocked by security policy"
 
         if not self._connected or not self.connection:
@@ -223,6 +260,7 @@ class SSHManager:
         if self.connection is None:
             return "❌ Connection failed"
 
+        started = time.monotonic()
         try:
             result = await self.connection.run(
                 command,
@@ -241,18 +279,105 @@ class SSHManager:
             if result.exit_status != 0:
                 output += f"\n\n⚠️ Exit code: {result.exit_status}"
 
-            return output
+            sanitized = sanitize_output(
+                output, self.max_output_bytes, label="command output"
+            )
+            self.audit.log(
+                "command",
+                command=command,
+                exit_status=result.exit_status,
+                duration_ms=round((time.monotonic() - started) * 1000, 1),
+                output_bytes=len(output.encode("utf-8")),
+                truncated=sanitized != output,
+            )
+            return sanitized
         except (asyncssh.ConnectionLost, asyncssh.DisconnectError) as e:
             # Drop the dead connection so the next call reconnects.
             self.connection = None
             self._connected = False
+            self.audit.log("command_connection_lost", command=command, error=str(e))
             return f"❌ SSH connection lost: {e}"
         except asyncssh.Error as e:
+            self.audit.log("command_error", command=command, error=str(e))
             return f"❌ SSH error: {e}"
         except TimeoutError:
+            self.audit.log("command_timeout", command=command, timeout=timeout)
             return f"❌ Command timed out after {timeout}s"
         except Exception as e:
+            self.audit.log("command_error", command=command, error=str(e))
             return f"❌ Error executing command: {e}"
+
+    # ------------------------------------------------------------------
+    # Remote files (SFTP; no shell involved)
+    # ------------------------------------------------------------------
+
+    async def _get_sftp(self) -> asyncssh.SFTPClient:
+        if not self._connected or not self.connection:
+            await self.connect()
+        if self.connection is None:
+            raise RemoteFileError("SSH connection failed")
+        return await self.connection.start_sftp_client()
+
+    async def read_remote_file(
+        self,
+        path: str,
+        *,
+        allowed_base: str | None = None,
+        max_bytes: int | None = None,
+    ) -> str:
+        """Read a remote file over SFTP with an optional base-path check."""
+        limit = max_bytes or self.max_output_bytes
+        async with await self._get_sftp() as sftp:
+            real_path = str(await sftp.realpath(path))
+            if allowed_base is not None and not _is_within(real_path, allowed_base):
+                self.audit.log("file_read_blocked", path=path, resolved=real_path)
+                raise RemotePathError(
+                    f"Remote path escapes the allowed directory: {real_path}"
+                )
+
+            attrs = await sftp.stat(real_path)
+            size = attrs.size or 0
+            async with sftp.open(real_path, "rb") as handle:
+                data = await handle.read(limit + 1)
+
+        text = data.decode("utf-8", errors="replace")
+        sanitized = sanitize_output(text, limit, label="file contents")
+        self.audit.log(
+            "file_read",
+            path=real_path,
+            size=size,
+            truncated=len(data) > limit or sanitized != text,
+        )
+        return sanitized
+
+    async def list_remote_dir(
+        self,
+        path: str,
+        *,
+        allowed_base: str | None = None,
+    ) -> list[RemoteDirEntry]:
+        """List a remote directory over SFTP with an optional base-path check."""
+        async with await self._get_sftp() as sftp:
+            real_path = str(await sftp.realpath(path))
+            if allowed_base is not None and not _is_within(real_path, allowed_base):
+                self.audit.log("dir_list_blocked", path=path, resolved=real_path)
+                raise RemotePathError(
+                    f"Remote path escapes the allowed directory: {real_path}"
+                )
+            names = await sftp.readdir(real_path)
+
+        entries = [
+            RemoteDirEntry(
+                name=entry.filename,
+                longname=entry.longname,
+                size=entry.attrs.size or 0,
+            )
+            for entry in names
+            if entry.filename not in {".", ".."}
+        ]
+        entries.sort(key=lambda entry: entry.name)
+        self.audit.log("dir_list", path=real_path, entries=len(entries))
+        return entries
 
     async def check_service_exists(self, service: str) -> bool:
         """

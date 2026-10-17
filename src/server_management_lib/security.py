@@ -16,6 +16,9 @@ Design: Whitelist specific safe operations, don't try to blacklist dangerous one
 import logging
 import re
 
+import sqlparse
+from sqlparse import tokens as sql_tokens
+
 logger = logging.getLogger(__name__)
 
 # ============================================================================
@@ -93,36 +96,29 @@ UNICODE_DOT_VARIANTS = [
 # Database query validation
 # ============================================================================
 
-WRITE_QUERY_PATTERNS = [
-    "drop ",
-    "delete ",
-    "insert ",
-    "update ",
-    "alter ",
-    "create ",
-    "truncate ",
-    "grant ",
-    "revoke ",
-    "set password",
-    "kill ",
-]
-
-DANGEROUS_QUERY_CHARS = [
-    ";",  # Statement terminator (SQL injection)
-    "--",  # SQL comment
-    "/*",  # Block comment start
-    "*/",  # Block comment end
-    "`",  # Command substitution
-    "$",  # Variable expansion
-    "|",  # Pipe
-    "&",  # Background
-    "{",  # Brace expansion
-    "}",  # Brace expansion
-    "\\",  # Escape
-    "\n",  # Newline
-    "\r",  # Carriage return
-    "\x00",  # Null byte
-]
+# Keywords that turn a SELECT into a write or administrative statement.
+# Validation is semantic: parse the SQL instead of blacklisting shell characters
+# (the query is sent over HTTP, never through a shell).
+WRITE_KEYWORDS = frozenset(
+    {
+        "ALTER",
+        "CREATE",
+        "DELETE",
+        "DROP",
+        "GRANT",
+        "INSERT",
+        "INTO",
+        "KILL",
+        "MERGE",
+        "RENAME",
+        "REPLACE",
+        "REVOKE",
+        "SET",
+        "TRUNCATE",
+        "UPDATE",
+        "UPSERT",
+    }
+)
 
 # ============================================================================
 # Sensitive file patterns (remote-server-mcp)
@@ -468,22 +464,41 @@ class SecurityValidator:
             logger.warning(f"InfluxDB query too long: {len(query)} chars")
             return None
 
-        query_lower = query.lower()
-        for pattern in WRITE_QUERY_PATTERNS:
-            if pattern in query_lower:
-                logger.warning(f"InfluxDB query contains write operation: {pattern}")
-                return None
-
-        for char in DANGEROUS_QUERY_CHARS:
-            if char in query:
-                logger.warning(f"InfluxDB query contains dangerous character: {char!r}")
-                return None
-
-        if not query_lower.strip().startswith("select"):
-            logger.warning(f"InfluxDB query must start with SELECT: {query[:50]}")
+        if "\x00" in query:
+            logger.warning("InfluxDB query contains a null byte")
             return None
 
-        return query
+        try:
+            statements = [
+                statement
+                for statement in sqlparse.parse(query)
+                if str(statement).strip()
+            ]
+        except Exception as e:  # pragma: no cover - sqlparse is defensive
+            logger.warning(f"Could not parse InfluxDB query: {e}")
+            return None
+
+        if len(statements) != 1:
+            logger.warning("InfluxDB query must be a single statement")
+            return None
+
+        statement = statements[0]
+        if statement.get_type().upper() != "SELECT":
+            logger.warning(
+                "InfluxDB query must be a SELECT, got %s", statement.get_type()
+            )
+            return None
+
+        for token in statement.flatten():
+            if (
+                token.ttype in sql_tokens.Keyword
+                and token.value.upper() in WRITE_KEYWORDS
+            ):
+                logger.warning("InfluxDB query contains write keyword: %s", token.value)
+                return None
+
+        # A single trailing semicolon is harmless; drop it before sending.
+        return query.strip().rstrip(";").rstrip()
 
     def validate_prometheus_query(self, query: str) -> str | None:
         """
@@ -503,26 +518,16 @@ class SecurityValidator:
             logger.warning(f"PromQL query too long: {len(query)} chars")
             return None
 
-        shell_injection_chars = [
-            ";",
-            "`",
-            "$",
-            "|",
-            "&",
-            ">",
-            "<",
-            "\\",
-            "\n",
-            "\r",
-            "\x00",
-            "'",
-            '"',
-        ]
-        for char in shell_injection_chars:
-            if char in query:
-                logger.warning(
-                    f"PromQL query contains shell injection character: {char!r}"
-                )
+        if "\x00" in query:
+            logger.warning("PromQL query contains a null byte")
+            return None
+
+        # PromQL is sent over HTTP, never through a shell. Quotes, braces and
+        # comparison operators are valid and required for real queries. Only
+        # reject control characters that cannot appear in a PromQL expression.
+        for char in query:
+            if ord(char) < 0x20 and char not in "\n\r\t":
+                logger.warning("PromQL query contains control character: %r", char)
                 return None
 
         return query

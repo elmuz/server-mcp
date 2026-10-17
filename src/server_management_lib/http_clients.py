@@ -7,8 +7,11 @@ with built-in security validation.
 
 import json
 import logging
+import re
 
 import aiohttp
+
+from .output import DEFAULT_MAX_OUTPUT_BYTES, sanitize_output
 
 logger = logging.getLogger(__name__)
 
@@ -36,6 +39,8 @@ class InfluxDBClient:
         database: str | None = None,
         token: str | None = None,
         query_limit: int = 1000,
+        max_output_bytes: int = DEFAULT_MAX_OUTPUT_BYTES,
+        timeout: float = 30,
     ):
         self.host = host
         self.port = port
@@ -43,6 +48,8 @@ class InfluxDBClient:
         self.database = database
         self.token = token
         self.query_limit = min(query_limit, 10000)
+        self.max_output_bytes = max_output_bytes
+        self.timeout = timeout
         self.scheme = "https" if use_https else "http"
 
     async def query(self, sql_query: str, database: str | None = None) -> str:
@@ -66,13 +73,15 @@ class InfluxDBClient:
         path = "/api/v3/query_sql"
         url = f"{self.scheme}://{self.host}:{self.port}{path}"
 
+        # InfluxDB v3 has no server-side row limit parameter; enforce it in SQL.
+        sql_query = _ensure_limit(sql_query, self.query_limit)
+
         if path not in INFLUXDB_ALLOWED_ENDPOINTS:
             return f"❌ Blocked: endpoint '{path}' is not in the allowed whitelist"
 
         params = {
             "db": db,
             "q": sql_query,
-            "limit": self.query_limit,
         }
 
         headers: dict[str, str] = {"Content-Type": "application/json"}
@@ -82,14 +91,24 @@ class InfluxDBClient:
         try:
             async with aiohttp.ClientSession() as session:
                 async with session.post(
-                    url, json=params, headers=headers, timeout=30
+                    url,
+                    json=params,
+                    headers=headers,
+                    timeout=self.timeout,
                 ) as response:
                     if response.status == 200:
                         data = await response.json()
                         formatted = json.dumps(data, indent=2)
+                        formatted = sanitize_output(
+                            formatted, self.max_output_bytes, label="InfluxDB result"
+                        )
                         return f"✅ Query successful\n\n{formatted}"
                     else:
-                        error_body = await response.text()
+                        error_body = sanitize_output(
+                            await response.text(),
+                            self.max_output_bytes,
+                            label="InfluxDB error",
+                        )
 
                         hint = ""
                         query_lower = sql_query.lower()
@@ -107,12 +126,12 @@ class InfluxDBClient:
                         return (
                             f"{hint}"
                             f"❌ InfluxDB query failed (HTTP {response.status})\n"
-                            f"{error_body[:2000]}"
+                            f"{error_body}"
                         )
         except aiohttp.ClientError as e:
             return f"❌ Connection error: {e}"
         except TimeoutError:
-            return "❌ Query timed out after 30 seconds"
+            return f"❌ Query timed out after {self.timeout} seconds"
 
 
 class PrometheusClient:
@@ -124,11 +143,15 @@ class PrometheusClient:
         port: int = 9090,
         use_https: bool = False,
         token: str | None = None,
+        max_output_bytes: int = DEFAULT_MAX_OUTPUT_BYTES,
+        timeout: float = 30,
     ):
         self.host = host
         self.port = port
         self.use_https = use_https
         self.token = token
+        self.max_output_bytes = max_output_bytes
+        self.timeout = timeout
         self.scheme = "https" if use_https else "http"
 
     async def query(self, promql: str, time: str | None = None) -> str:
@@ -155,12 +178,20 @@ class PrometheusClient:
         try:
             async with aiohttp.ClientSession() as session:
                 async with session.get(
-                    url, params=params, headers=headers, timeout=30
+                    url,
+                    params=params,
+                    headers=headers,
+                    timeout=self.timeout,
                 ) as response:
                     if response.status == 200:
                         data = await response.json()
                         if data.get("status") == "success":
                             formatted = json.dumps(data["data"], indent=2)
+                            formatted = sanitize_output(
+                                formatted,
+                                self.max_output_bytes,
+                                label="Prometheus result",
+                            )
                             return f"✅ Query successful\n\n{formatted}"
                         else:
                             error_type = data.get("errorType", "unknown")
@@ -171,15 +202,19 @@ class PrometheusClient:
                                 f"Error: {error_msg}"
                             )
                     else:
-                        error_body = await response.text()
+                        error_body = sanitize_output(
+                            await response.text(),
+                            self.max_output_bytes,
+                            label="Prometheus error",
+                        )
                         return (
                             f"❌ Prometheus query failed (HTTP {response.status})\n"
-                            f"{error_body[:2000]}"
+                            f"{error_body}"
                         )
         except aiohttp.ClientError as e:
             return f"❌ Connection error: {e}"
         except TimeoutError:
-            return "❌ Query timed out after 30 seconds"
+            return f"❌ Query timed out after {self.timeout} seconds"
 
     async def get_targets(self) -> str:
         """Get scrape targets from Prometheus."""
@@ -191,7 +226,9 @@ class PrometheusClient:
 
         try:
             async with aiohttp.ClientSession() as session:
-                async with session.get(url, headers=headers, timeout=30) as response:
+                async with session.get(
+                    url, headers=headers, timeout=self.timeout
+                ) as response:
                     if response.status == 200:
                         data = await response.json()
                         if data.get("status") == "success":
@@ -216,12 +253,43 @@ class PrometheusClient:
                                 f"❌ Unexpected response: {json.dumps(data, indent=2)}"
                             )
                     else:
-                        error_body = await response.text()
+                        error_body = sanitize_output(
+                            await response.text(),
+                            self.max_output_bytes,
+                            label="Prometheus error",
+                        )
                         return (
                             f"❌ Failed to get targets (HTTP {response.status})\n"
-                            f"{error_body[:2000]}"
+                            f"{error_body}"
                         )
         except aiohttp.ClientError as e:
             return f"❌ Connection error: {e}"
         except TimeoutError:
-            return "❌ Request timed out after 30 seconds"
+            return f"❌ Request timed out after {self.timeout} seconds"
+
+
+def _ensure_limit(sql_query: str, limit: int) -> str:
+    """Append a LIMIT clause when the query does not already constrain rows."""
+    query = sql_query.strip().rstrip(";").rstrip()
+    if re.search(r"\blimit\b", query, re.IGNORECASE):
+        return query
+    # Use a newline so a trailing line comment cannot swallow the LIMIT clause.
+    return f"{query}\nLIMIT {int(limit)}"
+
+
+def parse_duration(value: str | int | float, default: float = 30) -> float:
+    """Parse ``30``, ``"30s"``, ``"1m"`` or ``"500ms"`` into seconds."""
+    if isinstance(value, int | float):
+        return float(value)
+    text = str(value).strip().lower()
+    units = {"ms": 0.001, "s": 1.0, "m": 60.0, "h": 3600.0}
+    for suffix, factor in units.items():
+        if text.endswith(suffix):
+            try:
+                return float(text[: -len(suffix)]) * factor
+            except ValueError:
+                return default
+    try:
+        return float(text)
+    except ValueError:
+        return default

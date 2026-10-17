@@ -487,3 +487,189 @@ class TestConnectionLifecycle:
             assert manager.connection is None
 
         asyncio.run(run())
+
+
+class FakeFile:
+    def __init__(self, data: bytes):
+        self.data = data
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return False
+
+    async def read(self, size: int = -1) -> bytes:
+        return self.data if size < 0 else self.data[:size]
+
+
+class FakeSFTP:
+    def __init__(self, files, realpaths=None, entries=None):
+        self.files = files
+        self.realpaths = realpaths or {}
+        self.entries = entries or []
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return False
+
+    async def realpath(self, path):
+        return self.realpaths.get(path, path)
+
+    async def stat(self, path, follow_symlinks=True):
+        from types import SimpleNamespace
+
+        return SimpleNamespace(size=len(self.files.get(path, b"")))
+
+    def open(self, path, mode="rb"):
+        return FakeFile(self.files[path])
+
+    async def readdir(self, path):
+        return self.entries
+
+
+def _manager_with_sftp(security, sftp, config=None):
+    config = config or {
+        "ssh": {"host": "example.com", "known_hosts": "none"},
+        "security": {"services_path": "/srv"},
+    }
+    manager = SSHManager(config, security)
+    manager._connected = True
+    manager.connection = AsyncMock()
+    manager.connection.start_sftp_client = AsyncMock(return_value=sftp)
+    return manager
+
+
+class TestRemoteFiles:
+    def test_read_file_within_base(self, security):
+        sftp = FakeSFTP({"/srv/app/config.yml": b"hello"})
+        manager = _manager_with_sftp(security, sftp)
+
+        result = asyncio.run(
+            manager.read_remote_file("/srv/app/config.yml", allowed_base="/srv/app")
+        )
+        assert result == "hello"
+
+    def test_read_file_escape_blocked(self, security):
+        from server_management_lib import RemotePathError
+
+        sftp = FakeSFTP(
+            {"/srv/app/link": b"root:x:0:0"},
+            realpaths={"/srv/app/link": "/etc/passwd"},
+        )
+        manager = _manager_with_sftp(security, sftp)
+
+        with pytest.raises(RemotePathError, match="escapes the allowed"):
+            asyncio.run(
+                manager.read_remote_file("/srv/app/link", allowed_base="/srv/app")
+            )
+
+    def test_read_file_truncated(self, security):
+        sftp = FakeSFTP({"/srv/app/log.txt": b"abcdefghij"})
+        manager = _manager_with_sftp(security, sftp)
+
+        result = asyncio.run(
+            manager.read_remote_file(
+                "/srv/app/log.txt", allowed_base="/srv/app", max_bytes=5
+            )
+        )
+        assert result.startswith("abcde")
+        assert "truncated to 5 bytes" in result
+
+    def test_list_dir_sorted_without_dot_entries(self, security):
+        from types import SimpleNamespace
+
+        def entry(name, size):
+            return SimpleNamespace(
+                filename=name,
+                longname=f"-rw-r--r-- 1 app app {size} Jan  1 00:00 {name}",
+                attrs=SimpleNamespace(size=size),
+            )
+
+        sftp = FakeSFTP(
+            {},
+            entries=[
+                entry(".", 0),
+                entry("..", 0),
+                entry("b.txt", 2),
+                entry("a.txt", 1),
+            ],
+        )
+        manager = _manager_with_sftp(security, sftp)
+
+        entries = asyncio.run(
+            manager.list_remote_dir("/srv/app", allowed_base="/srv/app")
+        )
+        assert [item.name for item in entries] == ["a.txt", "b.txt"]
+        assert entries[0].size == 1
+
+    def test_list_dir_escape_blocked(self, security):
+        from server_management_lib import RemotePathError
+
+        sftp = FakeSFTP(
+            {},
+            realpaths={"/srv/app/../../etc": "/etc"},
+        )
+        manager = _manager_with_sftp(security, sftp)
+
+        with pytest.raises(RemotePathError):
+            asyncio.run(
+                manager.list_remote_dir("/srv/app/../../etc", allowed_base="/srv/app")
+            )
+
+
+class TestCommandAudit:
+    def test_command_is_audited(self, tmp_path, security):
+        import json
+
+        audit_path = tmp_path / "audit.jsonl"
+        config = {
+            "ssh": {"host": "example.com", "known_hosts": "none"},
+            "security": {"services_path": "/srv"},
+            "audit": {"enabled": True, "path": str(audit_path)},
+        }
+        manager = SSHManager(config, security)
+        manager._connected = True
+        manager.connection = AsyncMock()
+        manager.connection.run.return_value = MagicMock(
+            stdout="ok", stderr="", exit_status=0
+        )
+
+        asyncio.run(manager.execute_safe_command("echo hi"))
+
+        record = json.loads(audit_path.read_text())
+        assert record["event"] == "command"
+        assert record["command"] == "echo hi"
+        assert record["exit_status"] == 0
+
+    def test_blocked_command_is_audited(self, tmp_path, security):
+        import json
+
+        audit_path = tmp_path / "audit.jsonl"
+        config = {
+            "ssh": {"host": "example.com", "known_hosts": "none"},
+            "security": {"services_path": "/srv"},
+            "audit": {"enabled": True, "path": str(audit_path)},
+        }
+        manager = SSHManager(config, security)
+        manager._connected = True
+        manager.connection = AsyncMock()
+
+        result = asyncio.run(manager.execute_safe_command("rm -rf /"))
+
+        assert "Security violation" in result
+        record = json.loads(audit_path.read_text())
+        assert record["event"] == "command_blocked"
+
+    def test_command_output_is_sanitized(self, config, security):
+        manager = SSHManager(config, security)
+        manager._connected = True
+        manager.connection = AsyncMock()
+        manager.connection.run.return_value = MagicMock(
+            stdout="\x1b[31mred\x1b[0m\x00", stderr="", exit_status=0
+        )
+
+        result = asyncio.run(manager.execute_safe_command("echo hi"))
+        assert result == "red"

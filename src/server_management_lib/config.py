@@ -65,6 +65,14 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "token": None,
         "query_timeout": "30s",
     },
+    "output": {
+        # Maximum bytes returned to the model per command/file/query.
+        "max_bytes": 64000,
+    },
+    "audit": {
+        "enabled": False,
+        "path": "~/.local/state/server-management/audit.jsonl",
+    },
 }
 
 # Environment variable -> (section, key, converter)
@@ -84,6 +92,9 @@ ENV_OVERRIDES: dict[str, tuple[str, str, type]] = {
     "PROMETHEUS_PORT": ("prometheus", "port", int),
     "PROMETHEUS_USE_HTTPS": ("prometheus", "use_https", bool),
     "PROMETHEUS_TOKEN": ("prometheus", "token", str),
+    "OUTPUT_MAX_BYTES": ("output", "max_bytes", int),
+    "AUDIT_ENABLED": ("audit", "enabled", bool),
+    "AUDIT_LOG_PATH": ("audit", "path", str),
 }
 
 
