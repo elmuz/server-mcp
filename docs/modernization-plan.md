@@ -43,6 +43,9 @@ Constraints that changed since the original design:
 
 ## 2. Verified findings
 
+> All P0/P1/P2 items below were resolved in `0.2.0`. This section is kept as the audit
+> trail; the checkboxes in sections 3, 4 and 6 show the current state.
+
 ### P0 — broken or dangerous now
 
 1. DHM rewrites its own source at startup (`smartdb.refresh_if_stale`). The rewrite drops
@@ -149,8 +152,8 @@ MCP servers importable with `mcp` 2.3.x, no startup network access in DHM, no ha
 - Console entry points work: `remote-server-mcp --help` / `disk-health-mcp --help`;
   a missing config exits 2 with an actionable message.
 - DHM no longer performs any network access at startup and `smartdb.py` is stable.
-- Both apps temporarily depend on the sibling checkout via `[tool.uv.sources]`
-  (`path = "../server-management-lib"`). Remove this override when SML is released.
+- Both apps temporarily depended on the sibling checkout via `[tool.uv.sources]`
+  (`path = "../server-management-lib"`). This is superseded by the uv workspace.
 - The local `~/.ssh/known_hosts` contains one legacy DSA entry that modern
   cryptography rejects. The loader now keeps verification enabled and skips only
   the unreadable lines (warning per skipped entry). Consider a single summary log.
@@ -159,9 +162,10 @@ MCP servers importable with `mcp` 2.3.x, no startup network access in DHM, no ha
 
 Remaining P0-adjacent follow-ups:
 
-- [ ] Documentation still references Qwen and the old config resolution.
-- [ ] Operation catalog / output caps / command policy (P1).
-- [ ] SML release and removal of the path override.
+- [x] Documentation is harness-agnostic and uses the new config resolution.
+- [x] Operation catalog, output caps and command policy (P1).
+- [x] Path override removed by the uv workspace; PyPI publication is optional (see
+      [releasing.md](releasing.md)).
 
 ## 4. P1 backlog
 
