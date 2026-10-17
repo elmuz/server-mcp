@@ -22,6 +22,7 @@ def config():
             "port": 22,
             "username": "test",
             "key_path": None,
+            "known_hosts": "none",
         },
         "security": {"services_path": "/srv"},
     }
@@ -36,6 +37,7 @@ def config_with_key():
             "port": 22,
             "username": "test",
             "key_path": "~/.ssh/id_rsa",
+            "known_hosts": "none",
         },
         "security": {"services_path": "/srv"},
     }
@@ -50,6 +52,7 @@ def config_with_password():
             "port": 22,
             "username": "test",
             "password": "secret",
+            "known_hosts": "none",
         },
         "security": {"services_path": "/srv"},
     }

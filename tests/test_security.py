@@ -15,7 +15,6 @@ import pytest
 
 from server_management_lib.security import SecurityValidator
 
-
 # ============================================================================
 # Device Name Validation
 # ============================================================================
@@ -333,9 +332,7 @@ class TestFilePathValidation:
         assert result is None
 
     def test_url_encoded_traversal(self):
-        result = self.security.validate_service_file_path(
-            "myapp", "%2e%2e/etc/passwd"
-        )
+        result = self.security.validate_service_file_path("myapp", "%2e%2e/etc/passwd")
         assert result is None
 
     def test_unicode_variants(self):

@@ -12,10 +12,8 @@ import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import aiohttp
-import pytest
 
 from server_management_lib.http_clients import InfluxDBClient, PrometheusClient
-
 
 # ============================================================================
 # InfluxDBClient Tests
@@ -597,9 +595,7 @@ class TestPrometheusClientTargets:
         async def run():
             mock_response = MagicMock()
             mock_response.status = 200
-            mock_response.json = AsyncMock(
-                return_value={"status": "error", "data": {}}
-            )
+            mock_response.json = AsyncMock(return_value={"status": "error", "data": {}})
 
             mock_cm = MagicMock()
             mock_cm.__aenter__ = AsyncMock(return_value=mock_response)

@@ -1,5 +1,7 @@
 # Server Management Library - Project Context
 
+> Roadmap / modernization plan: `~/code/remote-server-mcp/docs/modernization-plan.md`
+
 ## Project Overview
 
 **server-management-lib** is the **central shared security layer** for multiple server management MCP (Model Context Protocol) servers.
@@ -232,6 +234,7 @@ This ensures:
    - Test descriptions - if test behavior changes
 
 **Example commit checklist:**
+
 ```
 ☐ Code passes all pre-commit hooks
 ☐ Tests cover new code (90%+ coverage enforced)
