@@ -38,6 +38,9 @@ server-management-lib = { path = "../server-management-lib", editable = true }
 requires = ["setuptools>=61.0"]
 build-backend = "setuptools.build_meta"
 
+[tool.setuptools.package-data]
+disk_health_mcp = ["py.typed"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 python_files = ["test_*.py"]
@@ -47,13 +50,14 @@ markers = [
     "integration: marks integration tests that require real SSH connection",
 ]
 asyncio_mode = "auto"
+addopts = "--cov=src/disk_health_mcp --cov-report=term-missing"
 
 [tool.coverage.run]
 source = ["disk_health_mcp"]
 branch = true
 
 [tool.coverage.report]
-fail_under = 44
+fail_under = 55
 show_missing = true
 skip_covered = true
 exclude_lines = [

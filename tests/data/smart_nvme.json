@@ -1,0 +1,23 @@
+{
+  "device": {
+    "name": "/dev/nvme0",
+    "info_name": "/dev/nvme0",
+    "type": "nvme",
+    "protocol": "NVMe"
+  },
+  "model_name": "CT1000P2SSD8",
+  "serial_number": "2146E5E54409",
+  "firmware_version": "P2CR033",
+  "user_capacity": {"bytes": 1000204886016, "string": "1.00 TB"},
+  "smart_support": {"available": true, "enabled": true},
+  "smart_status": {"passed": true},
+  "power_on_time": {"hours": 32881},
+  "power_cycle_count": 210,
+  "temperature": {"current": 40},
+  "nvme_smart_health_information_log": {
+    "percentage_used": 7,
+    "available_spare": 100,
+    "media_errors": 0,
+    "unsafe_shutdowns": 128
+  }
+}

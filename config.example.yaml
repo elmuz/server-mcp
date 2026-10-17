@@ -58,3 +58,12 @@ influxdb:
   database: "telegraf"  # Default database (Telegraf collects smart/diskio)
   token: "your-api-token"
   query_limit: 1000  # Maximum rows returned per query
+
+# Output safety limits (applies to command output, files and query results)
+output:
+  max_bytes: 64000
+
+# Append-only JSONL audit log for commands and file reads
+audit:
+  enabled: false
+  path: "~/.local/state/disk-health-mcp/audit.jsonl"

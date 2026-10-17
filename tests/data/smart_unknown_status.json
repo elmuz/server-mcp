@@ -1,0 +1,15 @@
+{
+  "device": {
+    "name": "/dev/sdb",
+    "info_name": "/dev/sdb",
+    "type": "ata",
+    "protocol": "ATA"
+  },
+  "model_name": "GenericDrive XYZ123",
+  "serial_number": "UNKNOWN",
+  "smart_support": {"available": false, "enabled": false},
+  "power_on_time": {"hours": 0},
+  "power_cycle_count": 0,
+  "ata_smart_attributes": {"table": []},
+  "ata_smart_error_log": {"count": 0}
+}

@@ -484,3 +484,59 @@ class TestSummaryFormatting:
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
+
+
+class TestSmartctlFixtures:
+    """Parse captured smartctl JSON shapes instead of hand-built dicts."""
+
+    def _load(self, name):
+        import json
+        from pathlib import Path
+
+        path = Path(__file__).parent / "data" / name
+        return json.loads(path.read_text())
+
+    def test_ata_seagate_smart_support_and_status(self):
+        device = parse_smart_json(self._load("smart_ata_seagate.json"))
+
+        assert device.device_type == "ATA"
+        assert device.smart_supported is True
+        assert device.smart_enabled is True
+        assert device.overall_health == "PASSED"
+        assert device.temperature == 35
+        assert device.power_cycle_count == 42
+        assert device.is_seagate is True
+
+    def test_ata_critical_and_healthy_attributes(self):
+        device = parse_smart_json(self._load("smart_ata_seagate.json"))
+        by_id = {attr.attr_id: attr for attr in device.attributes}
+
+        assert by_id[5].severity == "ok"
+        assert by_id[197].severity == "critical"
+        assert by_id[194].severity == "ok"
+
+    def test_nvme_device_type(self):
+        device = parse_smart_json(self._load("smart_nvme.json"))
+
+        assert device.device_type == "NVMe"
+        assert device.smart_supported is True
+        assert device.overall_health == "PASSED"
+
+    def test_missing_smart_status_is_unknown_not_failed(self):
+        device = parse_smart_json(self._load("smart_unknown_status.json"))
+
+        assert device.overall_health == "UNKNOWN"
+        assert device.health_score == 100
+        assert device.smart_supported is False
+        assert device.warnings == []
+
+    def test_zero_threshold_does_not_false_positive(self):
+        attr = SmartAttribute(
+            attr_id=9,
+            name="Power_On_Hours",
+            value=0,
+            worst=0,
+            thresh=0,
+            raw_value=0,
+        )
+        assert assess_attribute_severity(attr, False) == "ok"

@@ -23,14 +23,17 @@ import os
 from pathlib import Path
 
 from mcp.server.mcpserver import MCPServer
+from mcp.types import ToolAnnotations
 
 from server_management_lib import (
+    DEFAULT_MAX_OUTPUT_BYTES,
     ConfigNotFoundError,
     InfluxDBClient,
     PrometheusClient,
     SecurityValidator,
     SSHManager,
     load_config,
+    parse_duration,
     resolve_config_path,
 )
 
@@ -53,6 +56,19 @@ security = SecurityValidator(config)
 ssh_manager = SSHManager(config, security)
 
 mcp = MCPServer("disk-health-mcp")
+
+READ_ONLY = ToolAnnotations(
+    read_only_hint=True,
+    destructive_hint=False,
+    idempotent_hint=True,
+    open_world_hint=False,
+)
+WRITE_ACTION = ToolAnnotations(
+    read_only_hint=False,
+    destructive_hint=False,
+    idempotent_hint=False,
+    open_world_hint=False,
+)
 
 
 def configure_logging() -> None:
@@ -93,14 +109,11 @@ def apply_config(config_path: Path | None = None) -> Path:
 
 
 async def _run_ssh(cmd: str) -> str:
-    """Execute a command over SSH, managing connection lifecycle."""
+    """Execute a command over the shared (lazily connected) SSH session."""
     try:
-        await ssh_manager.connect()
         return await ssh_manager.execute_safe_command(cmd)
     except Exception as e:
         return f"❌ SSH error: {e}"
-    finally:
-        await ssh_manager.disconnect()
 
 
 def _enrich_error_output(raw_output: str, device: str = "") -> str:
@@ -277,7 +290,7 @@ def _format_influxdb_device_health(row: dict) -> str:
     return "\n".join(lines)
 
 
-@mcp.tool()
+@mcp.tool(annotations=READ_ONLY)
 async def list_disks() -> str:
     """List all storage devices on the host.
 
@@ -299,7 +312,7 @@ async def list_disks() -> str:
     return await _run_ssh(cmd)
 
 
-@mcp.tool()
+@mcp.tool(annotations=READ_ONLY)
 async def get_disk_health(device: str) -> str:
     """Get a comprehensive health analysis for a specific disk.
 
@@ -350,7 +363,7 @@ async def get_disk_health(device: str) -> str:
         return _enrich_error_output(raw_text, device)
 
 
-@mcp.tool()
+@mcp.tool(annotations=READ_ONLY)
 async def get_smart_attributes(device: str) -> str:
     """Get raw SMART attributes for a specific disk.
 
@@ -483,7 +496,7 @@ async def get_smart_attributes(device: str) -> str:
         return _enrich_error_output(result, device)
 
 
-@mcp.tool()
+@mcp.tool(annotations=READ_ONLY)
 async def get_nvme_health(device: str) -> str:
     """Get NVMe SMART health log for an NVMe device.
 
@@ -524,7 +537,7 @@ async def get_nvme_health(device: str) -> str:
     return _enrich_error_output(result, device)
 
 
-@mcp.tool()
+@mcp.tool(annotations=WRITE_ACTION)
 async def run_smart_test(device: str, test_type: str = "short") -> str:
     """Run a SMART self-test on a disk.
 
@@ -561,7 +574,7 @@ async def run_smart_test(device: str, test_type: str = "short") -> str:
     return await _run_ssh(cmd)
 
 
-@mcp.tool()
+@mcp.tool(annotations=READ_ONLY)
 async def get_zfs_status() -> str:
     """Get ZFS pool status, health, and capacity.
 
@@ -586,7 +599,7 @@ async def get_zfs_status() -> str:
     return await _run_ssh(cmd)
 
 
-@mcp.tool()
+@mcp.tool(annotations=READ_ONLY)
 async def get_raid_status() -> str:
     """Get mdadm software RAID status.
 
@@ -608,7 +621,7 @@ async def get_raid_status() -> str:
     return await _run_ssh(cmd)
 
 
-@mcp.tool()
+@mcp.tool(annotations=READ_ONLY)
 async def get_io_stats() -> str:
     """Get disk I/O statistics.
 
@@ -645,6 +658,9 @@ def _make_influxdb_client() -> InfluxDBClient:
         database=cfg.get("database"),
         token=cfg.get("token"),
         query_limit=cfg.get("query_limit", 1000),
+        max_output_bytes=config.get("output", {}).get(
+            "max_bytes", DEFAULT_MAX_OUTPUT_BYTES
+        ),
     )
 
 
@@ -656,10 +672,14 @@ def _make_prometheus_client() -> PrometheusClient:
         port=cfg.get("port", 9090),
         use_https=cfg.get("use_https", False),
         token=cfg.get("token"),
+        max_output_bytes=config.get("output", {}).get(
+            "max_bytes", DEFAULT_MAX_OUTPUT_BYTES
+        ),
+        timeout=parse_duration(cfg.get("query_timeout", "30s")),
     )
 
 
-@mcp.tool()
+@mcp.tool(annotations=READ_ONLY)
 async def query_prometheus_disk(query: str) -> str:
     """Query Prometheus for disk-related metrics.
 
@@ -691,7 +711,7 @@ async def query_prometheus_disk(query: str) -> str:
     return await client.query(query)
 
 
-@mcp.tool()
+@mcp.tool(annotations=READ_ONLY)
 async def query_influxdb_disk(query: str, database: str | None = None) -> str:
     """Query InfluxDB for historical disk metrics.
 
@@ -729,7 +749,7 @@ async def query_influxdb_disk(query: str, database: str | None = None) -> str:
 # ============================================================================
 
 
-@mcp.tool()
+@mcp.tool(annotations=READ_ONLY)
 async def get_full_disk_report(device: str | None = None) -> str:
     """Get a comprehensive disk health report combining multiple data sources.
 

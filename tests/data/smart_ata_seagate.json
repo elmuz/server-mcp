@@ -1,0 +1,53 @@
+{
+  "device": {
+    "name": "/dev/sda",
+    "info_name": "/dev/sda",
+    "type": "ata",
+    "protocol": "ATA"
+  },
+  "model_name": "ST4000VN008-2DR166",
+  "serial_number": "ZDH12345",
+  "firmware_version": "SC60",
+  "user_capacity": {"blocks": 7814037168, "bytes": 4000787030016, "string": "4.00 TB"},
+  "smart_support": {"available": true, "enabled": true},
+  "smart_status": {"passed": true},
+  "power_on_time": {"hours": 15000},
+  "power_cycle_count": 42,
+  "temperature": {"current": 35},
+  "ata_smart_attributes": {
+    "table": [
+      {
+        "id": 5,
+        "name": "Reallocated_Sector_Ct",
+        "flags": {"string": "PO--CK"},
+        "value": 100,
+        "worst": 100,
+        "thresh": 10,
+        "when_failed": "",
+        "raw": {"value": 0}
+      },
+      {
+        "id": 197,
+        "name": "Current_Pending_Sector",
+        "flags": {"string": "-O--CK"},
+        "value": 100,
+        "worst": 100,
+        "thresh": 0,
+        "when_failed": "",
+        "raw": {"value": 2}
+      },
+      {
+        "id": 194,
+        "name": "Temperature_Celsius",
+        "flags": {"string": "-O---K"},
+        "value": 65,
+        "worst": 45,
+        "thresh": 0,
+        "when_failed": "",
+        "raw": {"value": 35}
+      }
+    ]
+  },
+  "ata_smart_self_test_log": {"standard": []},
+  "ata_smart_error_log": {"count": 3}
+}
