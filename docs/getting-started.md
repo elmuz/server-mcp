@@ -140,6 +140,7 @@ uv run --directory apps/remote-server-mcp python -c \
 | `Permission denied (publickey)` | `ssh -v HOST true`, check `key_path` and agent |
 | `smartctl` permission errors | Run the MCP as a user with device access, or configure sudoers |
 | `Service ... does not exist` | `services_path` must contain one directory per service |
+| `Error reading file` / SFTP errors | The SSH server must allow the SFTP subsystem |
 | Docker commands fail | The container name is assumed to match the service directory name |
 | InfluxDB HTTP 500 | Add a `WHERE time > ...` clause; InfluxDB 3 has a file-scan limit |
 | Truncated output | Raise `output.max_bytes` (default 64 KiB) deliberately |
