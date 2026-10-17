@@ -1,0 +1,73 @@
+# Disk Health MCP Configuration
+# Copy this file to config.yaml and update with your details
+
+# Where commands run: "ssh" (default) or "local"
+# Use "local" when the MCP server runs on the target host itself.
+executor: ssh
+
+ssh:
+  # Server connection details (for host-based diagnostics)
+  host: "your-server.example.com"
+  port: 22
+  username: "your-user"
+
+  # Authentication: choose ONE of the following
+  # Option 1: Password authentication (less secure)
+  # password: "your-password"
+
+  # Option 2: SSH key authentication (recommended)
+  key_path: "~/.ssh/id_ed25519"
+  # Or leave key_path/password unset to use ssh-agent and ~/.ssh/config.
+
+  # Host key verification (do not disable on a real server)
+  known_hosts: "~/.ssh/known_hosts"
+  connect_timeout: 10
+
+security:
+  # Generic command execution is never implemented; this key is reserved.
+  allow_generic_commands: false
+
+  # Allowed disk diagnostic commands (whitelist)
+  # These are the ONLY commands the MCP can run on the host
+  allowed_commands:
+    - smartctl
+    - nvme
+    - lsblk
+    - zpool
+    - zfs
+    - mdadm
+    - iostat
+    - cat  # only for /proc/mdstat
+
+# Data sources: configure at least one
+# host: SSH-based smartctl and system tools
+host:
+  enabled: true
+
+# prometheus: Query node_exporter disk metrics via Prometheus
+prometheus:
+  enabled: false
+  host: "prometheus.example.com"
+  port: 443
+  use_https: true
+  token: "your-api-token"
+  query_timeout: "30s"
+
+# influxdb: Query historical disk metrics from InfluxDB
+influxdb:
+  enabled: false
+  host: "influxdb.example.com"
+  port: 443
+  use_https: true
+  database: "telegraf"  # Default database (Telegraf collects smart/diskio)
+  token: "your-api-token"
+  query_limit: 1000  # Maximum rows returned per query
+
+# Output safety limits (applies to command output, files and query results)
+output:
+  max_bytes: 64000
+
+# Append-only JSONL audit log for commands and file reads
+audit:
+  enabled: false
+  path: "~/.local/state/disk-health-mcp/audit.jsonl"

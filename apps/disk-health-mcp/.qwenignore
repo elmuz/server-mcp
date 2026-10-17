@@ -1,0 +1,19 @@
+# Qwen Code ignore patterns
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+env/
+.env*
+!.env.example
+.idea/
+.vscode/
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+.ruff_cache/
+config.yaml
+*.log
+*.parquet
