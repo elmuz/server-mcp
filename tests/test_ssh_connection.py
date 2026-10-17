@@ -287,8 +287,8 @@ class TestMCPServerSSH:
 
     def test_mcp_server_has_ssh_manager(self):
         """Test that MCP server has SSH manager initialized."""
-        assert mcp_server.ssh_manager is not None
-        assert isinstance(mcp_server.ssh_manager, SSHManager)
+        assert mcp_server.executor is not None
+        assert isinstance(mcp_server.executor, SSHManager)
 
     def test_mcp_server_has_security(self):
         """Test that MCP server has security validator."""
@@ -301,7 +301,7 @@ class TestMCPServerSSH:
 
         async def run_test():
             # Connect SSH
-            await mcp_server.ssh_manager.connect()
+            await mcp_server.executor.connect()
 
             try:
                 # Call the tool function directly
@@ -311,7 +311,7 @@ class TestMCPServerSSH:
                 assert isinstance(result, str)
             finally:
                 # Always disconnect
-                await mcp_server.ssh_manager.disconnect()
+                await mcp_server.executor.disconnect()
 
         asyncio.run(run_test())
 
@@ -320,7 +320,7 @@ class TestMCPServerSSH:
         """Test get_server_health tool works over SSH."""
 
         async def run_test():
-            await mcp_server.ssh_manager.connect()
+            await mcp_server.executor.connect()
 
             try:
                 result = await mcp_server.get_server_health()
@@ -329,7 +329,7 @@ class TestMCPServerSSH:
                 # Should contain some system info
                 assert len(result) > 0
             finally:
-                await mcp_server.ssh_manager.disconnect()
+                await mcp_server.executor.disconnect()
 
         asyncio.run(run_test())
 

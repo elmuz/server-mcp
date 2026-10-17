@@ -1,6 +1,10 @@
 # Remote Server MCP Configuration
 # Copy this file to config.yaml and update with your server details
 
+# Where commands run: "ssh" (default) or "local"
+# Use "local" when the MCP server runs on the target host itself.
+executor: ssh
+
 ssh:
   # Server connection details
   host: "your-server.example.com"

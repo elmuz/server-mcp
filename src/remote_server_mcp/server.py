@@ -26,7 +26,7 @@ from server_management_lib import (
     InfluxDBClient,
     PrometheusClient,
     SecurityValidator,
-    SSHManager,
+    create_executor,
     load_config,
     parse_duration,
     resolve_config_path,
@@ -45,7 +45,6 @@ from .operations import (
     FREE_MEMORY,
     LS_SERVICES,
     UPTIME,
-    docker_logs_grep,
 )
 
 APP_NAME = "remote-server-mcp"
@@ -57,7 +56,7 @@ logger = logging.getLogger(__name__)
 # itself refuses to start without a real configuration file (see main()).
 config = load_config(env_var=CONFIG_ENV_VAR, app_name=APP_NAME, log_missing=False)
 security = SecurityValidator(config)
-ssh_manager = SSHManager(config, security)
+executor = create_executor(config, security)
 
 mcp = MCPServer("remote-server-mcp")
 
@@ -90,7 +89,7 @@ def configure_logging() -> None:
 
 def apply_config(config_path: Path | None = None) -> Path:
     """(Re)load configuration and rebuild the dependent objects in place."""
-    global security, ssh_manager
+    global security, executor
 
     resolved = resolve_config_path(
         config_path, env_var=CONFIG_ENV_VAR, app_name=APP_NAME
@@ -109,7 +108,7 @@ def apply_config(config_path: Path | None = None) -> Path:
     config.clear()
     config.update(new_config)
     security = SecurityValidator(config)
-    ssh_manager = SSHManager(config, security)
+    executor = create_executor(config, security)
     return resolved
 
 
@@ -122,10 +121,10 @@ async def list_services() -> str:
     """
     try:
         base_path = security.services_base_path.rstrip("/") + "/"
-        services = await ssh_manager.execute_safe_command(
+        services = await executor.execute_safe_command(
             LS_SERVICES.render(path=base_path)
         )
-        docker = await ssh_manager.execute_safe_command(DOCKER_PS.render())
+        docker = await executor.execute_safe_command(DOCKER_PS.render())
         return (
             f"=== Services in {base_path} ===\n{services}\n"
             f"=== Docker Status ===\n{docker}"
@@ -154,7 +153,7 @@ async def get_service_logs(service: str, lines: int = 100) -> str:
         return msg
 
     # Check service exists
-    exists = await ssh_manager.check_service_exists(service)
+    exists = await executor.check_service_exists(service)
     if not exists:
         return (
             f"❌ Service '{service}' does not exist in {security.services_base_path}/"
@@ -167,7 +166,7 @@ async def get_service_logs(service: str, lines: int = 100) -> str:
         # Use '--' to prevent Docker option injection even if service
         # validation is somehow bypassed (defense in depth)
         cmd = DOCKER_LOGS.render(service=service, lines=lines)
-        result = await ssh_manager.execute_safe_command(cmd)
+        result = await executor.execute_safe_command(cmd)
         return result
     except Exception as e:
         return f"❌ Error getting logs: {e}"
@@ -186,7 +185,7 @@ async def get_service_status(service: str) -> str:
     if not security.validate_service_name(service):
         return f"❌ Invalid service name: {service}"
 
-    exists = await ssh_manager.check_service_exists(service)
+    exists = await executor.check_service_exists(service)
     if not exists:
         return (
             f"❌ Service '{service}' does not exist in {security.services_base_path}/"
@@ -194,17 +193,17 @@ async def get_service_status(service: str) -> str:
 
     try:
         results = []
-        output = await ssh_manager.execute_safe_command(
+        output = await executor.execute_safe_command(
             DOCKER_INSPECT.render(service=service)
         )
         results.append(f"=== Docker Status ===\n{output}")
 
-        output = await ssh_manager.execute_safe_command(
+        output = await executor.execute_safe_command(
             DOCKER_STATS.render(service=service)
         )
         results.append(f"=== Resource Usage ===\n{output}")
 
-        output = await ssh_manager.execute_safe_command(
+        output = await executor.execute_safe_command(
             DOCKER_PORTS.render(service=service)
         )
         results.append(f"=== Ports ===\n{output}")
@@ -227,7 +226,7 @@ async def restart_service(service: str) -> str:
     if not security.validate_service_name(service):
         return f"❌ Invalid service name: {service}"
 
-    exists = await ssh_manager.check_service_exists(service)
+    exists = await executor.check_service_exists(service)
     if not exists:
         return (
             f"❌ Service '{service}' does not exist in {security.services_base_path}/"
@@ -236,7 +235,7 @@ async def restart_service(service: str) -> str:
     try:
         # Use '--' to prevent Docker option injection (defense in depth)
         cmd = DOCKER_RESTART.render(service=service)
-        result = await ssh_manager.execute_safe_command(cmd)
+        result = await executor.execute_safe_command(cmd)
         return f"✅ Service '{service}' restarted\n{result}"
     except Exception as e:
         return f"❌ Error restarting service: {e}"
@@ -255,7 +254,7 @@ async def start_service(service: str) -> str:
     if not security.validate_service_name(service):
         return f"❌ Invalid service name: {service}"
 
-    exists = await ssh_manager.check_service_exists(service)
+    exists = await executor.check_service_exists(service)
     if not exists:
         return (
             f"❌ Service '{service}' does not exist in {security.services_base_path}/"
@@ -264,7 +263,7 @@ async def start_service(service: str) -> str:
     try:
         # Use '--' to prevent Docker option injection (defense in depth)
         cmd = DOCKER_START.render(service=service)
-        result = await ssh_manager.execute_safe_command(cmd)
+        result = await executor.execute_safe_command(cmd)
         return f"✅ Service '{service}' started\n{result}"
     except Exception as e:
         return f"❌ Error starting service: {e}"
@@ -283,7 +282,7 @@ async def stop_service(service: str) -> str:
     if not security.validate_service_name(service):
         return f"❌ Invalid service name: {service}"
 
-    exists = await ssh_manager.check_service_exists(service)
+    exists = await executor.check_service_exists(service)
     if not exists:
         return (
             f"❌ Service '{service}' does not exist in {security.services_base_path}/"
@@ -292,7 +291,7 @@ async def stop_service(service: str) -> str:
     try:
         # Use '--' to prevent Docker option injection (defense in depth)
         cmd = DOCKER_STOP.render(service=service)
-        result = await ssh_manager.execute_safe_command(cmd)
+        result = await executor.execute_safe_command(cmd)
         return f"✅ Service '{service}' stopped\n{result}"
     except Exception as e:
         return f"❌ Error stopping service: {e}"
@@ -320,7 +319,7 @@ async def get_service_file(service: str, file_path: str) -> str:
             f"File must be within {security.services_base_path}/{service}/"
         )
 
-    exists = await ssh_manager.check_service_exists(service)
+    exists = await executor.check_service_exists(service)
     if not exists:
         return (
             f"❌ Service '{service}' does not exist in {security.services_base_path}/"
@@ -328,7 +327,7 @@ async def get_service_file(service: str, file_path: str) -> str:
 
     service_base = f"{security.services_base_path.rstrip('/')}/{service}"
     try:
-        return await ssh_manager.read_remote_file(full_path, allowed_base=service_base)
+        return await executor.read_remote_file(full_path, allowed_base=service_base)
     except Exception as e:
         return f"❌ Error reading file: {e}"
 
@@ -359,7 +358,7 @@ async def list_service_files(service: str, subdirectory: str = "") -> str:
         base_path = security.services_base_path.rstrip("/")
         full_path = f"{base_path}/{service}"
 
-    exists = await ssh_manager.check_service_exists(service)
+    exists = await executor.check_service_exists(service)
     if not exists:
         return (
             f"❌ Service '{service}' does not exist in {security.services_base_path}/"
@@ -367,9 +366,7 @@ async def list_service_files(service: str, subdirectory: str = "") -> str:
 
     service_base = f"{security.services_base_path.rstrip('/')}/{service}"
     try:
-        entries = await ssh_manager.list_remote_dir(
-            full_path, allowed_base=service_base
-        )
+        entries = await executor.list_remote_dir(full_path, allowed_base=service_base)
     except Exception as e:
         return f"❌ Error listing files: {e}"
 
@@ -403,14 +400,15 @@ async def search_service_logs(service: str, pattern: str, lines: int = 1000) -> 
     lines = max(1, min(lines, 5000))
 
     try:
-        # Use grep with fixed strings (no regex) for safety
-        cmd = docker_logs_grep(service, lines, sanitized_pattern)
-        result = await ssh_manager.execute_safe_command(cmd)
+        cmd = DOCKER_LOGS.render(service=service, lines=lines)
+        output = await executor.execute_safe_command(cmd)
 
-        if not result.strip():
+        # Filter locally: no shell pipe, so the local executor works too.
+        matches = [line for line in output.splitlines() if sanitized_pattern in line]
+        if not matches:
             return f"No matches found for '{pattern}' in last {lines} lines"
 
-        return result
+        return "\n".join(matches)
     except Exception as e:
         return f"❌ Error searching logs: {e}"
 
@@ -559,7 +557,7 @@ async def get_server_health() -> str:
 
         results = []
         for title, cmd in commands:
-            output = await ssh_manager.execute_safe_command(cmd)
+            output = await executor.execute_safe_command(cmd)
             results.append(f"{title}\n{output}")
 
         return "\n\n".join(results)
@@ -580,7 +578,7 @@ async def main(config_path: Path | None = None) -> None:
     logger.info("Using configuration: %s", resolved)
     logger.info("Testing SSH connection...")
     try:
-        result = await ssh_manager.execute_safe_command("echo 'Connection successful'")
+        result = await executor.execute_safe_command("echo 'Connection successful'")
         logger.info(f"SSH connection test: {result.strip()}")
     except Exception as e:
         logger.warning(f"SSH connection test failed: {e}")

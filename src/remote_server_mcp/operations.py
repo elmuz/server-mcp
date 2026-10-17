@@ -67,9 +67,3 @@ DOCKER_STOP = Operation(
 UPTIME = Operation(("uptime",))
 FREE_MEMORY = Operation(("free", "-h"))
 DISK_USAGE = Operation(("df", "-h", "$path"))
-
-
-def docker_logs_grep(service: str, lines: int, pattern: str) -> str:
-    """Log search: the only operation that intentionally uses a shell pipe."""
-    logs = DOCKER_LOGS.render(service=service, lines=lines)
-    return f"{logs} | grep -F {shlex.quote(pattern)}"

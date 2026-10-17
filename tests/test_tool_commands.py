@@ -14,6 +14,7 @@ import pytest
 from remote_server_mcp import server
 from server_management_lib import (
     ConfigNotFoundError,
+    LocalExecutor,
     RemoteDirEntry,
     SecurityValidator,
 )
@@ -24,12 +25,12 @@ def restore_server_state():
     """Keep apply_config() from leaking into other tests."""
     original_config = dict(server.config)
     original_security = server.security
-    original_ssh = server.ssh_manager
+    original_executor = server.executor
     yield
     server.config.clear()
     server.config.update(original_config)
     server.security = original_security
-    server.ssh_manager = original_ssh
+    server.executor = original_executor
 
 
 @pytest.fixture
@@ -40,11 +41,11 @@ def custom_security():
 @pytest.fixture
 def patched(monkeypatch, custom_security):
     """Patch the module-level security/SSH objects used by the tools."""
-    ssh = AsyncMock()
-    ssh.check_service_exists.return_value = True
-    ssh.execute_safe_command.return_value = "ok"
-    ssh.read_remote_file.return_value = "file contents"
-    ssh.list_remote_dir.return_value = [
+    executor = AsyncMock()
+    executor.check_service_exists.return_value = True
+    executor.execute_safe_command.return_value = "ok"
+    executor.read_remote_file.return_value = "file contents"
+    executor.list_remote_dir.return_value = [
         RemoteDirEntry(
             name="config.yml",
             longname="-rw-r--r-- 1 app app 42 Jan  1 00:00 config.yml",
@@ -53,12 +54,12 @@ def patched(monkeypatch, custom_security):
     ]
 
     monkeypatch.setattr(server, "security", custom_security)
-    monkeypatch.setattr(server, "ssh_manager", ssh)
-    return ssh
+    monkeypatch.setattr(server, "executor", executor)
+    return executor
 
 
-def _commands(ssh) -> list[str]:
-    return [call.args[0] for call in ssh.execute_safe_command.await_args_list]
+def _commands(executor) -> list[str]:
+    return [call.args[0] for call in executor.execute_safe_command.await_args_list]
 
 
 class TestServicePathConsistency:
@@ -111,11 +112,13 @@ class TestDockerCommandConstruction:
 
         assert "--tail 1 " in _commands(patched)[0]
 
-    def test_log_search_is_quoted(self, patched):
-        asyncio.run(server.search_service_logs("app", "it's fine"))
+    def test_log_search_filters_without_a_shell_pipe(self, patched):
+        patched.execute_safe_command.return_value = "line one\nits fine here\n"
 
-        command = _commands(patched)[0]
-        assert "grep -F 'its fine'" in command
+        result = asyncio.run(server.search_service_logs("app", "it's fine"))
+
+        assert result == "its fine here"
+        assert "grep" not in _commands(patched)[0]
 
 
 class TestToolAnnotations:
@@ -150,8 +153,16 @@ class TestConfigBootstrap:
 
         assert resolved == config_file
         assert server.config["ssh"]["host"] == "example.com"
-        assert server.ssh_manager.services_base_path == "/data/srv"
+        assert server.executor.services_base_path == "/data/srv"
 
     def test_apply_config_missing_required_file_raises(self, tmp_path):
         with pytest.raises(ConfigNotFoundError):
             server.apply_config(tmp_path / "missing.yaml")
+
+    def test_apply_config_can_select_local_executor(self, tmp_path):
+        config_file = tmp_path / "config.yaml"
+        config_file.write_text("executor: local\nsecurity:\n  services_path: /srv\n")
+
+        server.apply_config(config_file)
+
+        assert isinstance(server.executor, LocalExecutor)
