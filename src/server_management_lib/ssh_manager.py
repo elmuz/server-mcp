@@ -12,13 +12,18 @@ import logging
 import os
 import shlex
 import time
-from dataclasses import dataclass
 from pathlib import Path
 
 import asyncssh
 
-from .audit import AuditLogger
-from .output import DEFAULT_MAX_OUTPUT_BYTES, sanitize_output
+from .base import (
+    ExecutorBase,
+    RemoteDirEntry,
+    RemoteFileError,
+    RemotePathError,
+    is_within,
+)
+from .output import sanitize_output
 from .security import SecurityValidator
 
 logger = logging.getLogger(__name__)
@@ -29,28 +34,6 @@ DISABLED_KNOWN_HOSTS = {"", "none", "false", "off"}
 
 class SSHConfigurationError(RuntimeError):
     """Raised when SSH settings cannot be turned into a safe connection."""
-
-
-class RemotePathError(RuntimeError):
-    """Raised when a remote path escapes its allowed base directory."""
-
-
-class RemoteFileError(RuntimeError):
-    """Raised when a remote file cannot be read safely."""
-
-
-@dataclass(frozen=True)
-class RemoteDirEntry:
-    """A single entry returned by :meth:`SSHManager.list_remote_dir`."""
-
-    name: str
-    longname: str
-    size: int
-
-
-def _is_within(path: str, base: str) -> bool:
-    base = base.rstrip("/")
-    return path == base or path.startswith(base + "/")
 
 
 def _load_known_hosts(path: Path) -> str | bytes:
@@ -109,7 +92,7 @@ def _load_known_hosts(path: Path) -> str | bytes:
     return ("\n".join(kept) + "\n").encode()
 
 
-class SSHManager:
+class SSHManager(ExecutorBase):
     """Manages SSH connections with strict security controls."""
 
     def __init__(self, config: dict, security: SecurityValidator):
@@ -120,24 +103,12 @@ class SSHManager:
             config: Configuration dictionary with SSH settings
             security: Security validator instance
         """
-        self.config = config
-        self.security = security
+        super().__init__(config, security)
         self.ssh_config = config.get("ssh", {}) or {}
-        self.services_base_path = security.services_base_path
         self.connection: asyncssh.SSHClientConnection | None = None
         self._connected = False
         self._known_hosts_cache: str | bytes | None = None
         self._known_hosts_loaded = False
-
-        output_config = config.get("output", {}) or {}
-        self.max_output_bytes = int(
-            output_config.get("max_bytes", DEFAULT_MAX_OUTPUT_BYTES)
-        )
-        audit_config = config.get("audit", {}) or {}
-        self.audit = AuditLogger(
-            audit_config.get("path"),
-            enabled=audit_config.get("enabled", False),
-        )
 
     # ------------------------------------------------------------------
     # Connection setup
@@ -329,7 +300,7 @@ class SSHManager:
         limit = max_bytes or self.max_output_bytes
         async with await self._get_sftp() as sftp:
             real_path = str(await sftp.realpath(path))
-            if allowed_base is not None and not _is_within(real_path, allowed_base):
+            if allowed_base is not None and not is_within(real_path, allowed_base):
                 self.audit.log("file_read_blocked", path=path, resolved=real_path)
                 raise RemotePathError(
                     f"Remote path escapes the allowed directory: {real_path}"
@@ -359,7 +330,7 @@ class SSHManager:
         """List a remote directory over SFTP with an optional base-path check."""
         async with await self._get_sftp() as sftp:
             real_path = str(await sftp.realpath(path))
-            if allowed_base is not None and not _is_within(real_path, allowed_base):
+            if allowed_base is not None and not is_within(real_path, allowed_base):
                 self.audit.log("dir_list_blocked", path=path, resolved=real_path)
                 raise RemotePathError(
                     f"Remote path escapes the allowed directory: {real_path}"

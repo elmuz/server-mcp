@@ -28,6 +28,8 @@ import yaml
 logger = logging.getLogger(__name__)
 
 DEFAULT_CONFIG: dict[str, Any] = {
+    # "ssh" (default) or "local" (run on the host where the MCP server runs)
+    "executor": "ssh",
     "ssh": {
         "host": "localhost",
         "port": 22,
@@ -77,6 +79,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
 
 # Environment variable -> (section, key, converter)
 ENV_OVERRIDES: dict[str, tuple[str, str, type]] = {
+    "EXECUTOR": ("executor", "executor", str),
     "SSH_HOST": ("ssh", "host", str),
     "SSH_PORT": ("ssh", "port", int),
     "SSH_USERNAME": ("ssh", "username", str),
