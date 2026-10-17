@@ -188,6 +188,8 @@ Integration tests that talk to a real host or database are opt-in:
 `uv run --directory apps/remote-server-mcp pytest -m integration`.
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) and [docs/development.md](docs/development.md).
+The current backlog and release checklist live in
+[docs/modernization-plan.md](docs/modernization-plan.md).
 
 ## Project layout
 

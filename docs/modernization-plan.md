@@ -1,264 +1,165 @@
-# Modernization Plan (2026-10)
+# Modernization Plan and Backlog
 
-Resumable working plan for the Server MCP monorepo:
+Current tracking document for the Server MCP suite. It replaces the earlier audit-style plan;
+the full findings remain available in git history.
 
-- `apps/remote-server-mcp` (RSM) — MCP server: Docker service operations
-- `packages/server-management-lib` (SML) — shared security, executors, config, clients
-- `apps/disk-health-mcp` (DHM) — MCP server: SMART/NVMe/ZFS/RAID diagnostics
-
-The three repositories were merged into `server-mcp` with their full history
-(`git subtree`). The old repositories remain as archives; see
-[releasing.md](releasing.md) for the push/archive plan.
-
-Status legend: `[ ]` todo, `[~]` in progress, `[x]` done, `[!]` blocked
-
-Last updated: 2026-10-17
+- **Status:** `0.2.0` implemented locally; not pushed or published
+- **Last updated:** 2026-10-17
+- **Legend:** `[ ]` todo, `[~]` partial, `[x]` done, `[!]` blocked
 
 ## 1. Context
 
-The original intent stands: an MCP server acts as a constrained proxy so an autonomous
-agent cannot run arbitrary commands on a production home server. The architecture is
-still valid:
+Server MCP is a security-first proxy between an autonomous agent and a Linux host. Two MCP
+servers (`remote-server-mcp`, `disk-health-mcp`) sit on top of a shared library
+(`server-management-lib`). The suite is now a uv workspace monorepo with one lockfile, one
+pre-commit configuration and one CI workflow.
 
-```text
-harness (any MCP client)
-        |
-        v
-remote-server-mcp / disk-health-mcp        tool layer (thin)
-        |
-        v
-server-management-lib                      policy + SSH + HTTP clients
-        |
-        v
-target host (Docker, smartctl, InfluxDB, Prometheus)
-```
+The design constraints are:
 
-Constraints that changed since the original design:
+- No generic command execution; only a fixed, validated tool catalog.
+- SSH by default, with host key verification; a shell-free local executor as an alternative.
+- File access confined to the configured service directory, verified on the target.
+- Read-only database access and bounded output.
+- Harness-agnostic documentation and packaging.
 
-- No local OpenAI-compatible inference server; the harness is now `pi` (and potentially
-  Claude Code, Codex, Cursor, opencode). Everything Qwen-specific must go.
-- The MCP server should be installable and runnable from anywhere (`uvx`), not only from
-  a repo checkout with a `cwd`.
-- MCP SDK 2.x is current; the projects still import the removed `FastMCP` API.
+## 2. Completed in 0.2.0
 
-## 2. Verified findings
+### 2.1 Core security and correctness
 
-> All P0/P1/P2 items below were resolved in `0.2.0`. This section is kept as the audit
-> trail; the checkboxes in sections 3, 4 and 6 show the current state.
+- [x] MCP SDK 2.x (`mcp.server.mcpserver.MCPServer`), console entry points fixed.
+- [x] Config resolution via `--config`, environment, XDG path and `./config.yaml`; fail fast
+      with exit code 2 when no config exists.
+- [x] Host key verification by default; unparseable legacy known_hosts entries skipped
+      individually instead of disabling verification.
+- [x] DHM no longer rewrites `smartdb.py` at runtime; `SEAGATE_COMPOSITE` restored.
+- [x] `services_path` honored by every tool and the SSH executor.
+- [x] `docker stats` argument order fixed; NVMe device validated before database access.
+- [x] Operation catalog for Docker commands, rendered with `shlex.join`.
+- [x] SFTP file reads/listings with remote `realpath` confinement.
+- [x] Output sanitization (ANSI/control characters) and a 64 KiB cap.
+- [x] Opt-in JSONL audit log with secret redaction.
+- [x] `ToolAnnotations` on all 24 tools (read-only vs destructive/write).
+- [x] Semantic SQL validation (`sqlparse`, single `SELECT`) and usable PromQL validation.
+- [x] SMART parsing fixes (`smart_support`, `smart_status`, zero thresholds, device type).
+- [x] Persistent SSH connection in DHM; dead asyncssh ML-KEM patch removed.
+- [x] Unused `pydantic` dependency removed.
 
-### P0 — broken or dangerous now
+### 2.2 Structure, packaging and docs
 
-1. DHM rewrites its own source at startup (`smartdb.refresh_if_stale`). The rewrite drops
-   `SEAGATE_COMPOSITE = {1, 7, 10}`, which breaks `smart_parser` and currently leaves 2
-   failing tests and a dirty worktree. It also downloads unpinned code from GitHub master
-   and writes it into the import path.
-2. `mcp>=1.0.0` with no upper bound. PyPI now serves `mcp` 2.3.0, where
-   `mcp.server.fastmcp` raises `ModuleNotFoundError`; `FastMCP` was renamed `MCPServer`.
-   Fresh installs (pip, `uvx`, `uv sync` without the lock) crash at import.
-3. Config discovery is `Path(__file__).parent.parent.parent / "config.yaml"`. Installed as
-   a wheel this resolves to `site-packages`, so the server silently falls back to
-   `root@localhost` defaults. `.env.example`, `MCP_LOG_LEVEL` and all `SSH_*` variables are
-   advertised but never read. No `--config` flag, no XDG path.
-4. Host key verification is disabled (`known_hosts=None` in `SSHManager.connect`).
-5. Console entry points (`remote-server-mcp`, `disk-health-mcp`) point at an `async def
-   main`, so the generated wrapper calls a coroutine and never runs the server. Only
-   `python -m ...` works.
-6. `services_path` is configurable in `SecurityValidator` but ignored by
-   `SSHManager.check_service_exists` and several RSM tools (hardcoded `/srv`).
-7. `get_service_status` puts `--format` after `--` in `docker stats`, so Docker treats it
-   as a container name (resource-usage section always errors).
-8. `get_nvme_health` builds an InfluxDB SQL string from an unvalidated `device` argument
-   before calling `validate_device_name` (DB-level injection).
-9. The documented "whitelist" command policy is actually a blacklist with a permissive
-   fall-through (`is_command_safe` returns `True` for anything not matching dangerous
-   substrings or disk prefixes). Not directly exploitable today, but it is not the
-   advertised control. `allow_generic_commands` is never read.
+- [x] uv workspace monorepo with imported history, one `uv.lock`, one pre-commit config,
+      one CI workflow and shared ruff/ty configuration.
+- [x] `py.typed` in all packages; coverage gates (90% / 60% / 55%).
+- [x] Harness-agnostic README, `AGENTS.md`, `CLAUDE.md`, docs and examples for pi,
+      Claude Code, Codex, Cursor and opencode.
+- [x] `CONTRIBUTING.md`, `SECURITY.md`, `CHANGELOG.md`, `docs/releasing.md`.
+- [x] Qwen/vLLM artifacts and duplicated per-repo tooling removed.
 
-### P1 — serious bugs and weak points
+## 3. Open work
 
-1. PromQL validation blocks `"`, `'`, `>`, `<`, so label matchers and comparisons are
-   impossible; the blacklist is meaningless for an HTTP API anyway.
-2. File paths are validated by calling `Path.resolve()` on the MCP host for a remote path;
-   remote symlinks are not resolved and a local `/srv` symlink changes behavior.
-3. Unbounded output from files and logs (no byte cap, no ANSI stripping) → context flood
-   and prompt injection surface.
-4. DHM reconnects SSH on every tool call, and `get_full_disk_report` does one handshake per
-   disk.
-5. `smart_parser` reads `smartcapable`/`smart_enabled` instead of `smart_support`, treats a
-   missing `smart_status` as `FAILED`, and flags `value <= thresh` with `thresh == 0` as
-   critical.
-6. Dead asyncssh ML-KEM patch: `asyncssh.kex.client_kex_algorithms` does not exist in
-   2.22+, so the patch is a silent no-op. `asyncssh` is unbounded in SML.
-7. Config keys that do nothing: `prometheus.query_timeout`, `influxdb.query_limit`
-   (sent as a non-documented body field), `security.allow_generic_commands`,
-   `MCP_LOG_LEVEL`. The InfluxDB endpoint whitelist is tautological (hardcoded path).
-8. No tests for RSM tool command construction; bypass tests contain no-op assertions;
-   DHM coverage gate is 44%; RSM has no `pytest-cov`.
-9. Packaging: git dependency without a tag/rev in `pyproject`, no `py.typed`, no CI,
-   three drifting copies of `check_md_links.py`, duplicated `.qwenignore`, stale `build/`
-   directory in SML, unused `pydantic` dependency, no `LICENSE` file in SML.
+### 3.1 Deferred from the original plan
 
-### P2 — structure and generalization
+- [ ] **Structured tool outputs.** Tools return formatted strings; clients cannot consume
+      typed results. Return pydantic models/dicts (and keep a readable text fallback) using
+      `MCPServer` structured output.
+- [ ] **Streamable HTTP transport.** Only stdio is implemented. Add an opt-in
+      `--transport streamable-http` path (loopback/token protected) for clients that cannot
+      launch a process.
+- [ ] **Container runtime adapter.** `docker` is hardcoded in
+      `apps/remote-server-mcp/src/remote_server_mcp/operations.py`. Add
+      `container_runtime: docker|podman|nerdctl` and build operations from the selected
+      runtime.
+- [ ] **Compose deployment operations.** There is no `compose up/down/pull/ps`. Add a small,
+      explicit set of compose operations scoped to `services_path/<service>/`, with a
+      dry-run or confirmation argument.
+- [ ] **Rate limiting and destructive-action confirmation.** `restart_service` and
+      `stop_service` execute immediately. Add a `confirm` parameter or MCP elicitation, and
+      a simple per-session rate limit.
 
-1. Consolidate the three repos into one `uv` workspace monorepo (see section 5) or, if
-   keeping separate repos, publish SML 0.2.0 and use workspace/path overrides.
-2. Replace shell string construction with an operation catalog executed via
-   `shlex.join`, and use SFTP for remote file reads/lists.
-3. Harness-agnostic docs and packaging: remove all Qwen artifacts, add pi / Claude Code /
-   Codex / Cursor / opencode snippets, support `uvx`, structured outputs and tool
-   annotations, optional streamable HTTP transport, optional local executor.
-4. Optional: multi-target config, container runtime adapter (docker/podman), compose
-   deployment operations with explicit confirmation, audit log, rate limits.
+### 3.2 Partial implementations to finish
 
-## 3. P0 work items
+- [ ] **`is_command_safe` is still a permissive blacklist.**
+      `packages/server-management-lib/src/server_management_lib/security.py` falls through
+      to `return True` for unknown commands, and `security.allow_generic_commands` is never
+      read. RSM is protected by its operation catalog; DHM still relies on this policy.
+      Either convert DHM to an operation catalog and delete the fall-through, or make the
+      policy explicitly allowlist-based.
+- [ ] **Local path resolution in `validate_service_file_path`.**
+      `security.py` still calls `Path.resolve()` on the MCP host for a remote path. The SFTP
+      layer now performs the authoritative remote `realpath` check, but a local `/srv`
+      symlink can still change or break the constructed path. Build the remote path
+      lexically with `PurePosixPath` and leave resolution to the executor.
+- [ ] **Single response cap for composite/list results.**
+      `execute_safe_command` caps each command, but `list_service_files`,
+      `get_service_status`, `get_full_disk_report` and directory listings can concatenate
+      multiple capped outputs or return a very large listing. Apply a final
+      `sanitize_output` cap to the complete tool response.
+- [ ] **Audit HTTP queries.**
+      The audit log covers commands, blocked operations and file access. InfluxDB and
+      Prometheus queries are not recorded. Pass an `AuditLogger` to the HTTP clients and log
+      query metadata (length/hash, database, status, duration) without storing secrets.
+- [ ] **DHM operation catalog.**
+      Disk-health commands are inline strings in
+      `apps/disk-health-mcp/src/disk_health_mcp/server.py`. They are built from validated
+      device names, but moving them into `operations.py` (or a shared catalog) makes the
+      construction model consistent with RSM.
+- [ ] **CI markdown enforcement.**
+      `.github/workflows/ci.yml` runs ruff, format, ty and pytest, but not `pymarkdown` or
+      `check-md-links`. Add both steps (or run `pre-commit` in CI) so documentation checks
+      are enforced remotely.
+- [ ] **Known_hosts summary logging.**
+      The loader logs up to three skipped entries plus a count. Aggregate skipped entries
+      into one summary warning per file.
 
-- [x] **P0.1 DHM self-rewrite**
-  - Restore `src/disk_health_mcp/smartdb.py` from HEAD.
-  - Remove `refresh_if_stale` from `smartdb.py`, the call in `server.main()`, and the now
-    dead copy in `scripts/generate_smartdb.py`.
-  - Regression tests: `SEAGATE_COMPOSITE` is `{1, 7, 10}`, `SEAGATE_COMPOSITE_ATTRS`
-    includes them, generated module keeps the constant, no auto-refresh symbol.
-- [x] **P0.2 MCP SDK 2.x**
-  - Depend on `mcp>=2.3,<3` in both MCP servers.
-  - Migrate `FastMCP` → `mcp.server.mcpserver.MCPServer`.
-  - Update anything reaching into `_tool_manager`; verify `uv sync` from scratch.
-- [x] **P0.3 Config discovery, env, logging**
-  - SML: `resolve_config_path()` and `load_config(..., env_var=, app_name=, required=)`,
-    deep merge over `DEFAULT_CONFIG`, env overrides, optional `.env` next to the config,
-    `ConfigNotFoundError`.
-  - Servers: `--config` flag, `$REMOTE_SERVER_MCP_CONFIG` / `$DISK_HEALTH_MCP_CONFIG`,
-    XDG path, fail fast in `main()` when no config was found.
-  - Wire `MCP_LOG_LEVEL`; move `logging.basicConfig` out of import time.
-  - Fix console entry points to a sync `cli()` wrapper that runs `asyncio.run(main())`.
-- [x] **P0.4 SSH hardening**
-  - Verify host keys by default (`~/.ssh/known_hosts`), configurable/disable-able with a
-    warning.
-  - Use ssh-agent / `~/.ssh/config` when no key or password is configured; only pass
-    explicit connection options when configured.
-- [x] **P0.5 Consistency and injection fixes**
-  - Pass `services_path` through `SSHManager.check_service_exists` and all RSM tools.
-  - Fix `docker stats` argument order; quote constructed paths with `shlex.quote`.
-  - Validate the NVMe device before any InfluxDB query.
+### 3.3 Release and migration
 
-Acceptance for P0: all three test suites green, `ruff`/`ty` clean, fresh install of both
-MCP servers importable with `mcp` 2.3.x, no startup network access in DHM, no hardcoded
-`/srv` left in tool command construction.
+- [ ] **Create the remote repository.** Recommended: new `elmuz/server-mcp`; archive the
+      three old repositories after adding a “moved” notice. Commands are in
+      `docs/releasing.md`.
+- [ ] **Push `main` and create the `v0.2.0` tag.** No remote or tag exists yet.
+- [ ] **Publish to PyPI.** `server-management-lib` first, then the two apps. All three names
+      are currently free. Until then `uvx remote-server-mcp` does not work; only
+      `uv run` from the workspace does.
+- [ ] **Archive the old repositories.** `remote-server-mcp`, `disk-health-mcp` and
+      `server-management-lib` are still live and could be mistaken for the current code.
+- [ ] **Make the CI badge live.** The README badge points at the future repository.
+- [ ] **Prerequisite:** `gh` is not installed in the development environment; use it or the
+      GitHub web UI for the push/archive steps.
 
-### P0 completion evidence (2026-10-17)
+### 3.4 Community and packaging polish
 
-- SML: 131 tests, 93% coverage; RSM: 151 unit tests + 17 integration tests (opt-in);
-  DHM: 60 tests. `pre-commit run --all-files` passes in all three repos.
-- MCP SDK is now `mcp>=2.3,<3` (lock: 2.3.0) and both servers use `MCPServer`.
-- Console entry points work: `remote-server-mcp --help` / `disk-health-mcp --help`;
-  a missing config exits 2 with an actionable message.
-- DHM no longer performs any network access at startup and `smartdb.py` is stable.
-- Both apps temporarily depended on the sibling checkout via `[tool.uv.sources]`
-  (`path = "../server-management-lib"`). This is superseded by the uv workspace.
-- The local `~/.ssh/known_hosts` contains one legacy DSA entry that modern
-  cryptography rejects. The loader now keeps verification enabled and skips only
-  the unreadable lines (warning per skipped entry). Consider a single summary log.
-- RSM integration tests are excluded by default (`addopts = "-m 'not integration'"`);
-  run them with `uv run pytest -m integration`.
+- [ ] Add `[project.urls]`, `classifiers`, `keywords` and `authors` to the package metadata.
+- [ ] Add `CODE_OF_CONDUCT.md`, issue templates, a pull-request template and `CODEOWNERS`.
+- [ ] Consider Python 3.14 in the CI matrix (currently 3.11–3.13).
+- [ ] Consider a short demo/screenshot section in the README once the repository is public.
 
-Remaining P0-adjacent follow-ups:
+## 4. Verification snapshot (0.2.0)
 
-- [x] Documentation is harness-agnostic and uses the new config resolution.
-- [x] Operation catalog, output caps and command policy (P1).
-- [x] Path override removed by the uv workspace; PyPI publication is optional (see
-      [releasing.md](releasing.md)).
+From a clean clone:
 
-## 4. P1 backlog
+| Check | Result |
+|---|---|
+| `uv sync --locked --all-packages --all-extras` | passes |
+| `server-management-lib` tests | 177 passed, 92% coverage |
+| `remote-server-mcp` tests | 144 passed (+17 integration opt-in), 61% coverage |
+| `disk-health-mcp` tests | 65 passed, 57% coverage |
+| `ruff check`, `ruff format --check`, `ty check` | pass |
+| `pre-commit run --all-files` | all hooks pass |
+| `uv build --all-packages` | all three wheels/sdists build, `py.typed` included |
 
-- [x] Operation catalog + `shlex.join`; SFTP for file reads and listings.
-- [x] Output caps, ANSI stripping, audit log, tool annotations (read-only/destructive).
-- [x] Replace PromQL/SQL character blacklists with read-only semantics (single SELECT
-      parser; Prometheus HTTP API is already read-only).
-- [x] Fix `smart_parser` flags/health/severity, add captured `smartctl -j` fixtures,
-      raise DHM coverage gate.
-- [x] Remove the dead asyncssh ML-KEM patch and bound `asyncssh<3` (done in P0).
-- [x] Persistent SSH connection in DHM (shared lazy connection, no per-call handshake).
-- [x] Drop unused `pydantic` (done in P2).
-- [x] RSM command-construction unit tests.
-- [x] CI workflow (3.11–3.13), `py.typed`, one shared pre-commit config and one lockfile.
+## 5. Decisions
 
-### P1 completion evidence (2026-10-17)
+- Monorepo with a uv workspace; the two MCP servers stay separate for least privilege.
+- History imported with `git subtree` (merge commit per repository) because
+  `git-filter-repo` was unavailable.
+- Recommended remote is a new `elmuz/server-mcp` repository; reusing/renaming
+  `remote-server-mcp` is documented as an alternative.
+- Local executor instead of multi-target support (explicit user decision).
+- No runtime SMART database refresh; generation is an explicit offline script.
 
-- SML: 157 tests, 92% coverage. RSM: 143 unit + 17 integration tests, 63% coverage.
-  DHM: 65 tests, 57% coverage (gate raised 44% → 55%).
-- New SML modules: `output.py` (ANSI/control stripping + byte caps), `audit.py`
-  (JSONL, best effort, redaction), `py.typed`.
-- SFTP is now used for service file reads/listings; paths are resolved on the remote
-  side and checked against the real path of the service base directory.
-- Query validation is semantic: `sqlparse` enforces a single read-only statement;
-  PromQL accepts label matchers, quotes and comparison operators. Shell metacharacters
-  are no longer treated as shell injection because queries go over HTTP.
-- RSM commands come from `operations.py` (argv + `shlex.join`), with read-only /
-  destructive tool annotations. DHM has read-only/write annotations too.
-- Audit logging is opt-in (`audit.enabled`), output cap defaults to 64 KiB
-  (`output.max_bytes`), and the HTTP clients honor `prometheus.query_timeout`.
-- CI workflows were added to all three repos. The app workflows check out
-  `server-management-lib` as a sibling until the workspace/PyPI step.
+## 6. Resume instructions
 
-## 5. Structure decision (P2, done)
-
-Single repo, `uv` workspace, one lock and one CI:
-
-```text
-server-mcp/
-├── pyproject.toml                 # workspace root, shared tooling config
-├── uv.lock
-├── .github/workflows/ci.yml
-├── docs/
-├── scripts/check_md_links.py
-├── packages/server-management-lib/
-├── apps/remote-server-mcp/
-└── apps/disk-health-mcp/
-```
-
-```toml
-[tool.uv.workspace]
-members = ["packages/*", "apps/*"]
-
-[tool.uv.sources]
-server-management-lib = { workspace = true }
-```
-
-History was preserved with `git subtree add` from each local repository (merge commit per
-import), because `git-filter-repo` was not installed. The two MCP servers stay separate
-(least privilege: DHM read-only, RSM destructive); they share the library and config schema.
-
-The recommended remote is a new `elmuz/server-mcp` repository; the old repositories are
-archived after a "moved" notice. Reusing/renaming `remote-server-mcp` is documented as an
-alternative. Full commands are in [releasing.md](releasing.md).
-
-## 6. Generalization checklist (P2)
-
-- [x] Delete `.qwen/` references, `.qwenignore`, Qwen/vLLM mentions in docs.
-- [x] Document pi (`pi mcp add ...`), Claude Code (`.mcp.json`), Codex (TOML),
-      Cursor, opencode in `docs/harnesses.md`.
-- [x] `uvx`-friendly packaging (PyPI publish step documented) and config resolution.
-- [x] `ToolAnnotations` on every tool; text results with strict size limits.
-- [ ] Structured outputs and optional streamable HTTP transport.
-- [x] Optional local executor (`executor: local`, no SSH).
-- [ ] Container runtime adapter (`docker` / `podman`), compose operations with confirm.
-
-### P2 completion evidence (2026-10-17)
-
-- Monorepo created at `~/code/server-mcp` with imported history, one `uv.lock`, one
-  pre-commit config, one CI workflow and shared ruff/ty configuration.
-- Versions bumped to `0.2.0`; `py.typed` in all packages; coverage gates retained.
-- `pydantic` removed from the library; local executor added with its own tests.
-- Documentation is harness-agnostic: new `README.md`, `AGENTS.md`, `CLAUDE.md`,
-  `docs/getting-started.md`, `docs/configuration.md`, `docs/architecture.md`,
-  `docs/security-model.md`, `docs/tools.md`, `docs/harnesses.md`, `docs/development.md`,
-  `docs/releasing.md`, plus `CONTRIBUTING.md`, `SECURITY.md`, `CHANGELOG.md` and
-  `examples/`.
-- Old per-repo tooling, lockfiles, Qwen artifacts and duplicated markdown scripts removed.
-
-## 7. Resume instructions
-
-1. Read section 3; each checkbox lists its acceptance.
-2. Run the verification suite:
+1. Pick an item from section 3; each checkbox names the file or area to change.
+2. Run the full suite:
 
 ```bash
 cd ~/code/server-mcp
@@ -269,28 +170,8 @@ uv run ty check
 uv run --directory packages/server-management-lib pytest -q
 uv run --directory apps/remote-server-mcp pytest -q
 uv run --directory apps/disk-health-mcp pytest -q
-```
-
-1. The apps and the library are workspace members; `uv sync --all-packages` is enough.
-2. Run the full hook suite before committing:
-
-```bash
 env -u VIRTUAL_ENV pre-commit run --all-files
 ```
 
-## 8. Decision log
-
-- 2026-10-17: Migrate to MCP SDK 2.x (`MCPServer`) instead of pinning `<2`.
-- 2026-10-17: Remove runtime SMART DB refresh entirely; generation stays an explicit
-  offline script.
-- 2026-10-17: Require an explicit/existing config at runtime; tests may import with
-  defaults, but the server refuses to start on `root@localhost` defaults.
-- 2026-10-17: Host key verification on by default; disabling requires an explicit option.
-  Legacy/unparseable known_hosts lines are skipped individually, not the whole file.
-- 2026-10-17: Both MCP apps use `[tool.uv.sources]` with the sibling SML checkout as a
-  development override until SML is released (or the workspace in section 5 is done).
-- 2026-10-17: RSM integration tests are opt-in (`-m integration`) so the default suite and
-  CI do not depend on a reachable server/database.
-- 2026-10-17: Consolidated into a uv workspace monorepo with `git subtree` history import.
-  Recommended remote: new `elmuz/server-mcp`; archive the three old repositories.
-- 2026-10-17: Dropped `pydantic`; added a shell-free local executor instead of multi-target.
+1. Update this file and `CHANGELOG.md` when an item is completed.
+2. For release steps, follow `docs/releasing.md`.
