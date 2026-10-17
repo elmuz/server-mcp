@@ -46,3 +46,12 @@ prometheus:
   # use_https: false
   # token: "your-bearer-token"  # Optional: read-only bearer token
   # query_timeout: "30s"  # Query timeout parameter
+
+# Output safety limits (applies to command output, files and query results)
+output:
+  max_bytes: 64000
+
+# Append-only JSONL audit log for commands and file reads
+audit:
+  enabled: false
+  path: "~/.local/state/remote-server-mcp/audit.jsonl"

@@ -159,19 +159,38 @@ Remaining P0-adjacent follow-ups:
 - [ ] Operation catalog / output caps / command policy (P1).
 - [ ] SML release and removal of the path override.
 
-## 4. P1 backlog (next session)
+## 4. P1 backlog
 
-- [ ] Operation catalog + `shlex.join`; SFTP for file reads and listings.
-- [ ] Output caps, ANSI stripping, audit log, tool annotations (read-only/destructive).
-- [ ] Replace PromQL/SQL character blacklists with read-only semantics (single SELECT
+- [x] Operation catalog + `shlex.join`; SFTP for file reads and listings.
+- [x] Output caps, ANSI stripping, audit log, tool annotations (read-only/destructive).
+- [x] Replace PromQL/SQL character blacklists with read-only semantics (single SELECT
       parser; Prometheus HTTP API is already read-only).
-- [ ] Fix `smart_parser` flags/health/severity, add captured `smartctl -j` fixtures,
+- [x] Fix `smart_parser` flags/health/severity, add captured `smartctl -j` fixtures,
       raise DHM coverage gate.
 - [x] Remove the dead asyncssh ML-KEM patch and bound `asyncssh<3` (done in P0).
-- [ ] Persistent SSH connection in DHM; drop unused `pydantic` or use it for config
-      validation.
-- [ ] RSM command-construction unit tests.
-- [ ] CI workflow (3.11–3.14), one shared pre-commit config, `py.typed`, release tags.
+- [x] Persistent SSH connection in DHM (shared lazy connection, no per-call handshake).
+- [ ] Drop unused `pydantic` or use it for config validation.
+- [x] RSM command-construction unit tests.
+- [~] CI workflow (3.11–3.13) and `py.typed` (done). Shared pre-commit config and release
+      tags still depend on the workspace/PyPI decision (section 5).
+
+### P1 completion evidence (2026-10-17)
+
+- SML: 157 tests, 92% coverage. RSM: 143 unit + 17 integration tests, 63% coverage.
+  DHM: 65 tests, 57% coverage (gate raised 44% → 55%).
+- New SML modules: `output.py` (ANSI/control stripping + byte caps), `audit.py`
+  (JSONL, best effort, redaction), `py.typed`.
+- SFTP is now used for service file reads/listings; paths are resolved on the remote
+  side and checked against the real path of the service base directory.
+- Query validation is semantic: `sqlparse` enforces a single read-only statement;
+  PromQL accepts label matchers, quotes and comparison operators. Shell metacharacters
+  are no longer treated as shell injection because queries go over HTTP.
+- RSM commands come from `operations.py` (argv + `shlex.join`), with read-only /
+  destructive tool annotations. DHM has read-only/write annotations too.
+- Audit logging is opt-in (`audit.enabled`), output cap defaults to 64 KiB
+  (`output.max_bytes`), and the HTTP clients honor `prometheus.query_timeout`.
+- CI workflows were added to all three repos. The app workflows check out
+  `server-management-lib` as a sibling until the workspace/PyPI step.
 
 ## 5. Structure decision (P2, recommended)
 

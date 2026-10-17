@@ -15,19 +15,37 @@ import argparse
 import asyncio
 import logging
 import os
-import shlex
 from pathlib import Path
 
 from mcp.server.mcpserver import MCPServer
+from mcp.types import ToolAnnotations
 
 from server_management_lib import (
+    DEFAULT_MAX_OUTPUT_BYTES,
     ConfigNotFoundError,
     InfluxDBClient,
     PrometheusClient,
     SecurityValidator,
     SSHManager,
     load_config,
+    parse_duration,
     resolve_config_path,
+)
+
+from .operations import (
+    DISK_USAGE,
+    DOCKER_INSPECT,
+    DOCKER_LOGS,
+    DOCKER_PORTS,
+    DOCKER_PS,
+    DOCKER_RESTART,
+    DOCKER_START,
+    DOCKER_STATS,
+    DOCKER_STOP,
+    FREE_MEMORY,
+    LS_SERVICES,
+    UPTIME,
+    docker_logs_grep,
 )
 
 APP_NAME = "remote-server-mcp"
@@ -42,6 +60,25 @@ security = SecurityValidator(config)
 ssh_manager = SSHManager(config, security)
 
 mcp = MCPServer("remote-server-mcp")
+
+READ_ONLY = ToolAnnotations(
+    read_only_hint=True,
+    destructive_hint=False,
+    idempotent_hint=True,
+    open_world_hint=False,
+)
+WRITE_ACTION = ToolAnnotations(
+    read_only_hint=False,
+    destructive_hint=False,
+    idempotent_hint=False,
+    open_world_hint=False,
+)
+DESTRUCTIVE_ACTION = ToolAnnotations(
+    read_only_hint=False,
+    destructive_hint=True,
+    idempotent_hint=False,
+    open_world_hint=False,
+)
 
 
 def configure_logging() -> None:
@@ -76,7 +113,7 @@ def apply_config(config_path: Path | None = None) -> Path:
     return resolved
 
 
-@mcp.tool()
+@mcp.tool(annotations=READ_ONLY)
 async def list_services() -> str:
     """List all services in /srv/ directory.
 
@@ -85,18 +122,19 @@ async def list_services() -> str:
     """
     try:
         base_path = security.services_base_path.rstrip("/") + "/"
-        cmd = (
-            f"ls -1 {shlex.quote(base_path)} 2>&1 && "
-            "echo '---DOCKER STATUS---' && "
-            "docker ps --format '{{.Names}}\t{{.Status}}' 2>&1"
+        services = await ssh_manager.execute_safe_command(
+            LS_SERVICES.render(path=base_path)
         )
-        result = await ssh_manager.execute_safe_command(cmd)
-        return result
+        docker = await ssh_manager.execute_safe_command(DOCKER_PS.render())
+        return (
+            f"=== Services in {base_path} ===\n{services}\n"
+            f"=== Docker Status ===\n{docker}"
+        )
     except Exception as e:
         return f"❌ Error listing services: {e}"
 
 
-@mcp.tool()
+@mcp.tool(annotations=READ_ONLY)
 async def get_service_logs(service: str, lines: int = 100) -> str:
     """Get logs for a specific service.
 
@@ -128,14 +166,14 @@ async def get_service_logs(service: str, lines: int = 100) -> str:
     try:
         # Use '--' to prevent Docker option injection even if service
         # validation is somehow bypassed (defense in depth)
-        cmd = f"docker logs --tail {lines} -- {shlex.quote(service)} 2>&1"
+        cmd = DOCKER_LOGS.render(service=service, lines=lines)
         result = await ssh_manager.execute_safe_command(cmd)
         return result
     except Exception as e:
         return f"❌ Error getting logs: {e}"
 
 
-@mcp.tool()
+@mcp.tool(annotations=READ_ONLY)
 async def get_service_status(service: str) -> str:
     """Get detailed status of a specific service.
 
@@ -155,28 +193,20 @@ async def get_service_status(service: str) -> str:
         )
 
     try:
-        # Use '--' to prevent Docker option injection (defense in depth)
-        cmd = (
-            f"docker inspect "
-            f"--format='Name: {{{{.Name}}}}\nState: {{{{.State.Status}}}}\n"
-            f"Running: {{{{.State.Running}}}}\n"
-            f"RestartCount: {{{{.RestartCount}}}}\n"
-            f"StartedAt: {{{{.State.StartedAt}}}}' -- {service} 2>&1"
-        )
         results = []
-        output = await ssh_manager.execute_safe_command(cmd)
+        output = await ssh_manager.execute_safe_command(
+            DOCKER_INSPECT.render(service=service)
+        )
         results.append(f"=== Docker Status ===\n{output}")
 
-        cmd = (
-            f"docker stats --no-stream "
-            f"--format='CPU: {{{{.CPUPerc}}}}\nMemory: {{{{.MemUsage}}}}\n"
-            f"Net I/O: {{{{.NetIO}}}}' -- {service} 2>&1"
+        output = await ssh_manager.execute_safe_command(
+            DOCKER_STATS.render(service=service)
         )
-        output = await ssh_manager.execute_safe_command(cmd)
         results.append(f"=== Resource Usage ===\n{output}")
 
-        cmd = f"docker port -- {service} 2>&1 || echo 'No ports exposed'"
-        output = await ssh_manager.execute_safe_command(cmd)
+        output = await ssh_manager.execute_safe_command(
+            DOCKER_PORTS.render(service=service)
+        )
         results.append(f"=== Ports ===\n{output}")
 
         return "\n\n".join(results)
@@ -184,7 +214,7 @@ async def get_service_status(service: str) -> str:
         return f"❌ Error getting service status: {e}"
 
 
-@mcp.tool()
+@mcp.tool(annotations=DESTRUCTIVE_ACTION)
 async def restart_service(service: str) -> str:
     """Restart a service (Docker container).
 
@@ -205,14 +235,14 @@ async def restart_service(service: str) -> str:
 
     try:
         # Use '--' to prevent Docker option injection (defense in depth)
-        cmd = f"docker restart -- {shlex.quote(service)} 2>&1"
+        cmd = DOCKER_RESTART.render(service=service)
         result = await ssh_manager.execute_safe_command(cmd)
         return f"✅ Service '{service}' restarted\n{result}"
     except Exception as e:
         return f"❌ Error restarting service: {e}"
 
 
-@mcp.tool()
+@mcp.tool(annotations=WRITE_ACTION)
 async def start_service(service: str) -> str:
     """Start a stopped service.
 
@@ -233,14 +263,14 @@ async def start_service(service: str) -> str:
 
     try:
         # Use '--' to prevent Docker option injection (defense in depth)
-        cmd = f"docker start -- {shlex.quote(service)} 2>&1"
+        cmd = DOCKER_START.render(service=service)
         result = await ssh_manager.execute_safe_command(cmd)
         return f"✅ Service '{service}' started\n{result}"
     except Exception as e:
         return f"❌ Error starting service: {e}"
 
 
-@mcp.tool()
+@mcp.tool(annotations=DESTRUCTIVE_ACTION)
 async def stop_service(service: str) -> str:
     """Stop a running service.
 
@@ -261,14 +291,14 @@ async def stop_service(service: str) -> str:
 
     try:
         # Use '--' to prevent Docker option injection (defense in depth)
-        cmd = f"docker stop -- {shlex.quote(service)} 2>&1"
+        cmd = DOCKER_STOP.render(service=service)
         result = await ssh_manager.execute_safe_command(cmd)
         return f"✅ Service '{service}' stopped\n{result}"
     except Exception as e:
         return f"❌ Error stopping service: {e}"
 
 
-@mcp.tool()
+@mcp.tool(annotations=READ_ONLY)
 async def get_service_file(service: str, file_path: str) -> str:
     """Get the contents of a file within a service directory.
 
@@ -296,15 +326,14 @@ async def get_service_file(service: str, file_path: str) -> str:
             f"❌ Service '{service}' does not exist in {security.services_base_path}/"
         )
 
+    service_base = f"{security.services_base_path.rstrip('/')}/{service}"
     try:
-        cmd = f"cat {shlex.quote(full_path)} 2>&1"
-        result = await ssh_manager.execute_safe_command(cmd)
-        return result
+        return await ssh_manager.read_remote_file(full_path, allowed_base=service_base)
     except Exception as e:
         return f"❌ Error reading file: {e}"
 
 
-@mcp.tool()
+@mcp.tool(annotations=READ_ONLY)
 async def list_service_files(service: str, subdirectory: str = "") -> str:
     """List files in a service directory.
 
@@ -336,15 +365,20 @@ async def list_service_files(service: str, subdirectory: str = "") -> str:
             f"❌ Service '{service}' does not exist in {security.services_base_path}/"
         )
 
+    service_base = f"{security.services_base_path.rstrip('/')}/{service}"
     try:
-        cmd = f"ls -lah {shlex.quote(full_path)} 2>&1"
-        result = await ssh_manager.execute_safe_command(cmd)
-        return result
+        entries = await ssh_manager.list_remote_dir(
+            full_path, allowed_base=service_base
+        )
     except Exception as e:
         return f"❌ Error listing files: {e}"
 
+    if not entries:
+        return f"No files found in {full_path}"
+    return "\n".join(entry.longname for entry in entries)
 
-@mcp.tool()
+
+@mcp.tool(annotations=READ_ONLY)
 async def search_service_logs(service: str, pattern: str, lines: int = 1000) -> str:
     """Search service logs for a specific pattern.
 
@@ -370,10 +404,7 @@ async def search_service_logs(service: str, pattern: str, lines: int = 1000) -> 
 
     try:
         # Use grep with fixed strings (no regex) for safety
-        cmd = (
-            f"docker logs --tail {lines} -- {shlex.quote(service)} 2>&1 | "
-            f"grep -F '{sanitized_pattern}'"
-        )
+        cmd = docker_logs_grep(service, lines, sanitized_pattern)
         result = await ssh_manager.execute_safe_command(cmd)
 
         if not result.strip():
@@ -384,7 +415,7 @@ async def search_service_logs(service: str, pattern: str, lines: int = 1000) -> 
         return f"❌ Error searching logs: {e}"
 
 
-@mcp.tool()
+@mcp.tool(annotations=READ_ONLY)
 async def query_influxdb(query: str, database: str | None = None) -> str:
     """Query InfluxDB v3 using SQL (read-only).
 
@@ -429,11 +460,14 @@ async def query_influxdb(query: str, database: str | None = None) -> str:
         database=db,
         token=influxdb_config.get("token"),
         query_limit=influxdb_config.get("query_limit", 1000),
+        max_output_bytes=config.get("output", {}).get(
+            "max_bytes", DEFAULT_MAX_OUTPUT_BYTES
+        ),
     )
     return await client.query(validated_query)
 
 
-@mcp.tool()
+@mcp.tool(annotations=READ_ONLY)
 async def query_prometheus(query: str, time: str | None = None) -> str:
     """Query Prometheus using PromQL (read-only).
 
@@ -467,11 +501,15 @@ async def query_prometheus(query: str, time: str | None = None) -> str:
         port=prometheus_config.get("port", 9090),
         use_https=prometheus_config.get("use_https", False),
         token=prometheus_config.get("token"),
+        max_output_bytes=config.get("output", {}).get(
+            "max_bytes", DEFAULT_MAX_OUTPUT_BYTES
+        ),
+        timeout=parse_duration(prometheus_config.get("query_timeout", "30s")),
     )
     return await client.query(validated_query, time)
 
 
-@mcp.tool()
+@mcp.tool(annotations=READ_ONLY)
 async def get_prometheus_targets() -> str:
     """Get scrape targets from Prometheus.
 
@@ -493,11 +531,15 @@ async def get_prometheus_targets() -> str:
         port=prometheus_config.get("port", 9090),
         use_https=prometheus_config.get("use_https", False),
         token=prometheus_config.get("token"),
+        max_output_bytes=config.get("output", {}).get(
+            "max_bytes", DEFAULT_MAX_OUTPUT_BYTES
+        ),
+        timeout=parse_duration(prometheus_config.get("query_timeout", "30s")),
     )
     return await client.get_targets()
 
 
-@mcp.tool()
+@mcp.tool(annotations=READ_ONLY)
 async def get_server_health() -> str:
     """Get overall server health (CPU, memory, disk) - no sensitive data.
 
@@ -506,20 +548,19 @@ async def get_server_health() -> str:
     """
     try:
         commands = [
-            "echo '=== System Uptime ===' && uptime",
-            "echo '=== Memory Usage ===' && free -h",
-            "echo '=== Disk Usage ===' && "
-            f"df -h {shlex.quote(security.services_base_path)}",
+            ("=== System Uptime ===", UPTIME.render()),
+            ("=== Memory Usage ===", FREE_MEMORY.render()),
             (
-                "echo '=== Running Services ===' && docker ps "
-                "--format '{{.Names}} ({{.Status}})'"
+                "=== Disk Usage ===",
+                DISK_USAGE.render(path=security.services_base_path),
             ),
+            ("=== Running Services ===", DOCKER_PS.render()),
         ]
 
         results = []
-        for cmd in commands:
+        for title, cmd in commands:
             output = await ssh_manager.execute_safe_command(cmd)
-            results.append(output)
+            results.append(f"{title}\n{output}")
 
         return "\n\n".join(results)
     except Exception as e:

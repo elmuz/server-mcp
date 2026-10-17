@@ -12,7 +12,11 @@ from unittest.mock import AsyncMock
 import pytest
 
 from remote_server_mcp import server
-from server_management_lib import ConfigNotFoundError, SecurityValidator
+from server_management_lib import (
+    ConfigNotFoundError,
+    RemoteDirEntry,
+    SecurityValidator,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -39,6 +43,14 @@ def patched(monkeypatch, custom_security):
     ssh = AsyncMock()
     ssh.check_service_exists.return_value = True
     ssh.execute_safe_command.return_value = "ok"
+    ssh.read_remote_file.return_value = "file contents"
+    ssh.list_remote_dir.return_value = [
+        RemoteDirEntry(
+            name="config.yml",
+            longname="-rw-r--r-- 1 app app 42 Jan  1 00:00 config.yml",
+            size=42,
+        )
+    ]
 
     monkeypatch.setattr(server, "security", custom_security)
     monkeypatch.setattr(server, "ssh_manager", ssh)
@@ -59,13 +71,17 @@ class TestServicePathConsistency:
     def test_list_service_files_uses_configured_base_path(self, patched):
         asyncio.run(server.list_service_files("app"))
 
-        assert "/opt/services/app" in _commands(patched)[0]
+        call = patched.list_remote_dir.await_args
+        assert call.args[0] == "/opt/services/app"
+        assert call.kwargs["allowed_base"] == "/opt/services/app"
 
     def test_get_service_file_uses_configured_base_path(self, patched):
-        asyncio.run(server.get_service_file("app", "config.yml"))
+        result = asyncio.run(server.get_service_file("app", "config.yml"))
 
-        command = _commands(patched)[0]
-        assert "cat /opt/services/app/config.yml" in command
+        call = patched.read_remote_file.await_args
+        assert call.args[0] == "/opt/services/app/config.yml"
+        assert call.kwargs["allowed_base"] == "/opt/services/app"
+        assert result == "file contents"
 
     def test_server_health_uses_configured_base_path(self, patched):
         asyncio.run(server.get_server_health())
@@ -81,9 +97,9 @@ class TestDockerCommandConstruction:
         stats = [c for c in _commands(patched) if c.startswith("docker stats")]
         assert stats, "expected a docker stats command"
         command = stats[0]
-        assert "--format=" in command
-        assert command.index("--format=") < command.index(" -- app")
-        assert command.endswith("-- app 2>&1")
+        assert "--format" in command
+        assert command.index("--format") < command.index(" -- app")
+        assert command.endswith("-- app")
 
     def test_service_is_quoted(self, patched):
         asyncio.run(server.restart_service("app"))
@@ -100,6 +116,21 @@ class TestDockerCommandConstruction:
 
         command = _commands(patched)[0]
         assert "grep -F 'its fine'" in command
+
+
+class TestToolAnnotations:
+    def test_read_only_tools_are_annotated(self):
+        tools = {tool.name: tool for tool in server.mcp._tool_manager.list_tools()}
+        for name in ("list_services", "get_service_logs", "get_service_file"):
+            assert tools[name].annotations.read_only_hint is True
+            assert tools[name].annotations.destructive_hint is False
+
+    def test_destructive_tools_are_annotated(self):
+        tools = {tool.name: tool for tool in server.mcp._tool_manager.list_tools()}
+        assert tools["restart_service"].annotations.read_only_hint is False
+        assert tools["restart_service"].annotations.destructive_hint is True
+        assert tools["stop_service"].annotations.destructive_hint is True
+        assert tools["start_service"].annotations.destructive_hint is False
 
 
 class TestConfigBootstrap:
