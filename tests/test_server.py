@@ -19,12 +19,12 @@ def restore_server_state():
     """Keep apply_config() from leaking into other tests."""
     original_config = dict(server.config)
     original_security = server.security
-    original_ssh = server.ssh_manager
+    original_executor = server.executor
     yield
     server.config.clear()
     server.config.update(original_config)
     server.security = original_security
-    server.ssh_manager = original_ssh
+    server.executor = original_executor
 
 
 # ============================================================================
@@ -323,4 +323,4 @@ class TestConfigBootstrap:
 
         assert resolved == config_file
         assert server.config["ssh"]["host"] == "diskhost.example.com"
-        assert server.ssh_manager.services_base_path == "/data/srv"
+        assert server.executor.services_base_path == "/data/srv"

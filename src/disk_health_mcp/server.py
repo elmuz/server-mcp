@@ -31,7 +31,7 @@ from server_management_lib import (
     InfluxDBClient,
     PrometheusClient,
     SecurityValidator,
-    SSHManager,
+    create_executor,
     load_config,
     parse_duration,
     resolve_config_path,
@@ -53,7 +53,7 @@ logger = logging.getLogger(__name__)
 # itself refuses to start without a real configuration file (see main()).
 config = load_config(env_var=CONFIG_ENV_VAR, app_name=APP_NAME, log_missing=False)
 security = SecurityValidator(config)
-ssh_manager = SSHManager(config, security)
+executor = create_executor(config, security)
 
 mcp = MCPServer("disk-health-mcp")
 
@@ -80,7 +80,7 @@ def configure_logging() -> None:
 
 def apply_config(config_path: Path | None = None) -> Path:
     """(Re)load configuration and rebuild the dependent objects in place."""
-    global security, ssh_manager
+    global security, executor
 
     resolved = resolve_config_path(
         config_path, env_var=CONFIG_ENV_VAR, app_name=APP_NAME
@@ -99,7 +99,7 @@ def apply_config(config_path: Path | None = None) -> Path:
     config.clear()
     config.update(new_config)
     security = SecurityValidator(config)
-    ssh_manager = SSHManager(config, security)
+    executor = create_executor(config, security)
     return resolved
 
 
@@ -108,10 +108,10 @@ def apply_config(config_path: Path | None = None) -> Path:
 # ============================================================================
 
 
-async def _run_ssh(cmd: str) -> str:
-    """Execute a command over the shared (lazily connected) SSH session."""
+async def _run_command(cmd: str) -> str:
+    """Execute a command through the configured executor."""
     try:
-        return await ssh_manager.execute_safe_command(cmd)
+        return await executor.execute_safe_command(cmd)
     except Exception as e:
         return f"❌ SSH error: {e}"
 
@@ -309,7 +309,7 @@ async def list_disks() -> str:
     cmd = "lsblk -d -o NAME,MODEL,SERIAL,SIZE,TYPE,TRAN --json 2>&1"
     if not security.is_command_safe(cmd):
         return "❌ Command not in safe whitelist"
-    return await _run_ssh(cmd)
+    return await _run_command(cmd)
 
 
 @mcp.tool(annotations=READ_ONLY)
@@ -345,7 +345,7 @@ async def get_disk_health(device: str) -> str:
     if not security.is_command_safe(cmd):
         return "❌ Command not in safe whitelist"
 
-    raw_output = await _run_ssh(cmd)
+    raw_output = await _run_command(cmd)
     if "❌" in raw_output:
         return _enrich_error_output(raw_output, device)
 
@@ -356,7 +356,7 @@ async def get_disk_health(device: str) -> str:
     except (json.JSONDecodeError, KeyError, TypeError) as e:
         logger.warning(f"JSON parse failed, falling back to text: {e}")
         text_cmd = f"smartctl -a /dev/{device} 2>&1"
-        raw_text = await _run_ssh(text_cmd)
+        raw_text = await _run_command(text_cmd)
         if "❌" not in raw_text:
             smart_device = parse_smart_text(raw_text)
             return format_smart_summary(smart_device)
@@ -463,7 +463,7 @@ async def get_smart_attributes(device: str) -> str:
     if not security.is_command_safe(cmd):
         return "❌ Command not in safe whitelist"
 
-    result = await _run_ssh(cmd)
+    result = await _run_command(cmd)
     if "❌" in result:
         return _enrich_error_output(result, device)
 
@@ -533,7 +533,7 @@ async def get_nvme_health(device: str) -> str:
     cmd = f"nvme smart-log /dev/{device} 2>&1"
     if not security.is_command_safe(cmd):
         return "❌ Command not in safe whitelist"
-    result = await _run_ssh(cmd)
+    result = await _run_command(cmd)
     return _enrich_error_output(result, device)
 
 
@@ -571,7 +571,7 @@ async def run_smart_test(device: str, test_type: str = "short") -> str:
     cmd = f"smartctl -t {test_type} /dev/{device} 2>&1"
     if not security.is_command_safe(cmd):
         return "❌ Command not in safe whitelist"
-    return await _run_ssh(cmd)
+    return await _run_command(cmd)
 
 
 @mcp.tool(annotations=READ_ONLY)
@@ -596,7 +596,7 @@ async def get_zfs_status() -> str:
     )
     if not security.is_command_safe(cmd):
         return "❌ Command not in safe whitelist"
-    return await _run_ssh(cmd)
+    return await _run_command(cmd)
 
 
 @mcp.tool(annotations=READ_ONLY)
@@ -618,7 +618,7 @@ async def get_raid_status() -> str:
     cmd = "cat /proc/mdstat 2>&1 && echo '---' && mdadm --detail --scan --verbose 2>&1"
     if not security.is_command_safe(cmd):
         return "❌ Command not in safe whitelist"
-    return await _run_ssh(cmd)
+    return await _run_command(cmd)
 
 
 @mcp.tool(annotations=READ_ONLY)
@@ -640,7 +640,7 @@ async def get_io_stats() -> str:
     cmd = "iostat -x 1 1 2>&1"
     if not security.is_command_safe(cmd):
         return "❌ Command not in safe whitelist"
-    return await _run_ssh(cmd)
+    return await _run_command(cmd)
 
 
 # ============================================================================
@@ -865,7 +865,7 @@ async def _get_full_report_via_ssh() -> str:
                 lines.append("  ❌ Command blocked by security")
                 continue
 
-            health = await _run_ssh(cmd)
+            health = await _run_command(cmd)
             if "❌" in health:
                 enriched = _enrich_error_output(health, name)
                 lines.append(f"  {enriched.replace(chr(10), chr(10) + '  ')}")

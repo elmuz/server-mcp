@@ -157,7 +157,7 @@ def patched_server(
 
     with (
         patch("disk_health_mcp.server.config", mock_config),
-        patch("disk_health_mcp.server.ssh_manager", mock_ssh_manager),
+        patch("disk_health_mcp.server.executor", mock_ssh_manager),
         patch("disk_health_mcp.server.security", mock_security),
         patch.object(
             mock_ssh_manager,
@@ -167,6 +167,6 @@ def patched_server(
     ):
         yield {
             "config": mock_config,
-            "ssh_manager": mock_ssh_manager,
+            "executor": mock_ssh_manager,
             "security": mock_security,
         }
