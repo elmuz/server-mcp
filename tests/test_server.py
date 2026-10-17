@@ -5,10 +5,27 @@ Uses mocked SSH, security, and config to test
 the actual tool logic without a real host.
 """
 
+import pytest
+
+from disk_health_mcp import server
 from disk_health_mcp.server import (
     _enrich_error_output,
     _format_influxdb_device_health,
 )
+
+
+@pytest.fixture(autouse=True)
+def restore_server_state():
+    """Keep apply_config() from leaking into other tests."""
+    original_config = dict(server.config)
+    original_security = server.security
+    original_ssh = server.ssh_manager
+    yield
+    server.config.clear()
+    server.config.update(original_config)
+    server.security = original_security
+    server.ssh_manager = original_ssh
+
 
 # ============================================================================
 # Error Enrichment
@@ -265,3 +282,45 @@ class TestInfluxDBSmartAttributes:
         assert "Drive is near end of life" in result
         assert "Media Errors: 2" in result
         assert "🔴 critical" in result  # Reallocated sectors flagged
+
+
+class TestNvmeDeviceValidation:
+    """The device must be validated before any database query."""
+
+    async def test_invalid_device_never_reaches_influxdb(
+        self, patched_server, mock_security
+    ):
+        from unittest.mock import AsyncMock, patch
+
+        from disk_health_mcp.server import get_nvme_health
+
+        mock_security.validate_device_name.return_value = False
+        influx_lookup = AsyncMock(return_value={"device": "evil"})
+
+        with patch("disk_health_mcp.server._get_influxdb_latest_device", influx_lookup):
+            result = await get_nvme_health("x' OR '1'='1")
+
+        assert "Invalid device name" in result
+        influx_lookup.assert_not_awaited()
+
+
+class TestConfigBootstrap:
+    def test_apply_config_rebuilds_dependencies(self, tmp_path, monkeypatch):
+        from disk_health_mcp import server
+
+        config_file = tmp_path / "config.yaml"
+        config_file.write_text(
+            "ssh:\n"
+            "  host: diskhost.example.com\n"
+            "security:\n"
+            "  services_path: /data/srv\n"
+            "host:\n"
+            "  enabled: false\n"
+        )
+        monkeypatch.setenv("DISK_HEALTH_MCP_CONFIG", str(config_file))
+
+        resolved = server.apply_config()
+
+        assert resolved == config_file
+        assert server.config["ssh"]["host"] == "diskhost.example.com"
+        assert server.ssh_manager.services_base_path == "/data/srv"

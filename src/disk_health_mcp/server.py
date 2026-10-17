@@ -15,19 +15,23 @@ device name validation, read-only InfluxDB/Prometheus queries).
 Design Principle: Whitelist operations, don't blacklist commands.
 """
 
+import argparse
 import asyncio
 import json
 import logging
+import os
 from pathlib import Path
 
-from mcp.server.fastmcp import FastMCP
+from mcp.server.mcpserver import MCPServer
 
 from server_management_lib import (
+    ConfigNotFoundError,
     InfluxDBClient,
     PrometheusClient,
     SecurityValidator,
     SSHManager,
     load_config,
+    resolve_config_path,
 )
 
 from .smart_parser import (
@@ -37,22 +41,50 @@ from .smart_parser import (
     parse_smart_text,
 )
 
-# Configure logging
-logging.basicConfig(level=logging.INFO)
+APP_NAME = "disk-health-mcp"
+CONFIG_ENV_VAR = "DISK_HEALTH_MCP_CONFIG"
+
 logger = logging.getLogger(__name__)
 
-# Load configuration
-config_path = Path(__file__).parent.parent.parent / "config.yaml"
-config = load_config(config_path)
-
-# Initialize security validator
+# Best-effort load so the module stays importable (tests, tooling). The server
+# itself refuses to start without a real configuration file (see main()).
+config = load_config(env_var=CONFIG_ENV_VAR, app_name=APP_NAME, log_missing=False)
 security = SecurityValidator(config)
-
-# Initialize SSH manager
 ssh_manager = SSHManager(config, security)
 
-# Create MCP server
-mcp = FastMCP("disk-health-mcp")
+mcp = MCPServer("disk-health-mcp")
+
+
+def configure_logging() -> None:
+    """Configure logging from MCP_LOG_LEVEL (called at startup, not on import)."""
+    level_name = os.environ.get("MCP_LOG_LEVEL", "INFO").upper()
+    level = getattr(logging, level_name, logging.INFO)
+    logging.basicConfig(level=level)
+
+
+def apply_config(config_path: Path | None = None) -> Path:
+    """(Re)load configuration and rebuild the dependent objects in place."""
+    global security, ssh_manager
+
+    resolved = resolve_config_path(
+        config_path, env_var=CONFIG_ENV_VAR, app_name=APP_NAME
+    )
+    if resolved is None:
+        # Raises ConfigNotFoundError with an actionable message.
+        load_config(
+            config_path,
+            env_var=CONFIG_ENV_VAR,
+            app_name=APP_NAME,
+            required=True,
+        )
+        raise ConfigNotFoundError("No configuration file found")
+
+    new_config = load_config(resolved, required=True)
+    config.clear()
+    config.update(new_config)
+    security = SecurityValidator(config)
+    ssh_manager = SSHManager(config, security)
+    return resolved
 
 
 # ============================================================================
@@ -465,6 +497,9 @@ async def get_nvme_health(device: str) -> str:
     Returns:
         NVMe SMART health data
     """
+    if not security.validate_device_name(device):
+        return f"❌ Invalid device name: {device}"
+
     # Normalize device name (nvme0n1 -> nvme0 for InfluxDB matching)
     influx_device = device
     if device.endswith("n1"):
@@ -481,9 +516,6 @@ async def get_nvme_health(device: str) -> str:
             "❌ No data sources available.\n"
             "Enable at least one: host.enabled or influxdb.enabled in config.yaml."
         )
-
-    if not security.validate_device_name(device):
-        return f"❌ Invalid device name: {device}"
 
     cmd = f"nvme smart-log /dev/{device} 2>&1"
     if not security.is_command_safe(cmd):
@@ -848,16 +880,17 @@ async def _get_full_report_via_ssh() -> str:
     return "\n".join(lines)
 
 
-async def main():
+async def main(config_path: Path | None = None) -> None:
     """Run the MCP server."""
-    # Refresh SMART attribute database if stale (>7 days old)
-    # Falls back silently to committed copy on network failure
-    from .smartdb import refresh_if_stale
+    configure_logging()
 
-    refreshed = refresh_if_stale(max_age_days=7)
-    if refreshed:
-        logger.info("SMART attribute database refreshed from upstream")
+    try:
+        resolved = apply_config(config_path)
+    except ConfigNotFoundError as e:
+        logger.error("%s", e)
+        raise SystemExit(2) from e
 
+    logger.info("Using configuration: %s", resolved)
     logger.info("Starting Disk Health MCP...")
     logger.info(
         "Available tools: list_disks, get_disk_health, get_smart_attributes, "
@@ -868,5 +901,18 @@ async def main():
     await mcp.run_stdio_async()
 
 
+def cli() -> None:
+    """Console entry point."""
+    parser = argparse.ArgumentParser(description="Disk Health MCP server")
+    parser.add_argument(
+        "--config",
+        type=Path,
+        default=None,
+        help=f"Path to config.yaml (default: ${CONFIG_ENV_VAR} or XDG config)",
+    )
+    args = parser.parse_args()
+    asyncio.run(main(args.config))
+
+
 if __name__ == "__main__":
-    asyncio.run(main())
+    cli()

@@ -4,6 +4,9 @@ SMART attribute reference database.
 Auto-generated from smartmontools drivedb.h DEFAULT presets.
 Do not edit manually — run scripts/generate_smartdb.py to regenerate.
 
+Generation is an explicit offline step. This module never downloads or rewrites
+itself at runtime; the committed copy is the single source of truth.
+
 Sources:
 - smartmontools drivedb.h: https://github.com/smartmontools/smartmontools/blob/master/smartmontools/drivedb.h
 - Seagate composite decoding: smartmontools source (attributes 1, 7, 10 use 48-bit)
@@ -28,15 +31,10 @@ class SMARTAttr:
     type_hint: str  # HDD, SSD, or ""
 
 
-SMART_ATTR: dict[int, SMARTAttr] = {}
-SMART_ATTR_NAMES: dict[int, str] = {}
-SEAGATE_COMPOSITE: set[int] = set()
-
-
 # Canonical SMART attribute database
 # Format: ID -> SMARTAttr(name, encoding, type_hint)
 
-SMART_ATTR = {
+SMART_ATTR: dict[int, SMARTAttr] = {
     1: SMARTAttr("Raw_Read_Error_Rate", "raw48", ""),
     2: SMARTAttr("Throughput_Performance", "raw48", ""),
     3: SMARTAttr("Spin_Up_Time", "raw16(avg16)", ""),
@@ -117,106 +115,3 @@ SEAGATE_COMPOSITE = {
     7,  # Seek_Error_Rate
     10,  # Spin_Retry_Count
 }
-
-
-# ===========================================================================
-# Auto-refresh from upstream
-# ===========================================================================
-
-
-def refresh_if_stale(max_age_days: int = 7) -> bool:
-    """Refresh this module from smartmontools drivedb.h if stale.
-
-    Checks the file modification time. If older than *max_age_days*,
-    attempts to download the latest DEFAULT presets and rewrite
-    this file in-place.
-
-    Returns True if refreshed, False if skipped or failed.
-    Silently falls back to the existing copy on any error.
-    """
-    import logging
-    import re
-    import time
-    import urllib.request
-    from pathlib import Path
-
-    logger = logging.getLogger(__name__)
-    source = Path(__file__)
-
-    if not source.exists():
-        return False
-
-    age_days = (time.time() - source.stat().st_mtime) / 86400
-    if age_days < max_age_days:
-        return False
-
-    drivedb_url = (
-        "https://raw.githubusercontent.com/smartmontools/smartmontools"
-        "/master/smartmontools/drivedb.h"
-    )
-
-    try:
-        with urllib.request.urlopen(drivedb_url, timeout=15) as resp:
-            content = resp.read().decode("utf-8")
-    except Exception as e:
-        logger.warning(
-            "smartdb.py is %.0f days old but refresh failed: %s. Using existing copy.",
-            age_days,
-            e,
-        )
-        return False
-
-    # Parse DEFAULT presets
-    presets = []
-    in_default = False
-    for line in content.splitlines():
-        stripped = line.strip()
-        if stripped.startswith('{ "DEFAULT"'):
-            in_default = True
-            continue
-        if in_default and stripped.startswith("{ "):
-            break
-        if not in_default or not stripped.startswith('"-v '):
-            continue
-
-        line = stripped.strip('"').strip()
-        if "//" in line:
-            line = line[: line.index("//")]
-        line = line.strip()
-
-        match = re.match(r"-v\s+(\d+),([^,]+),([^,\s]+)(?:,\s*(\S+))?", line)
-        if match:
-            presets.append(
-                (
-                    int(match.group(1)),
-                    match.group(2),
-                    match.group(3),
-                    match.group(4) or "",
-                )
-            )
-
-    if not presets:
-        logger.warning("No presets found in drivedb.h refresh")
-        return False
-
-    # Regenerate module
-    lines = [source.read_text().split("SMART_ATTR = {")[0]]
-    lines.append("SMART_ATTR = {")
-    for attr_id, encoding, name, type_hint in sorted(presets):
-        lines.append(
-            f"    {attr_id}: SMARTAttr({name!r}, {encoding!r}, {type_hint!r}),"
-        )
-    lines.append("}")
-    lines.append("")
-    lines.append(
-        "# Quick lookup: ID -> name\n"
-        "SMART_ATTR_NAMES = {k: v.name for k, v in SMART_ATTR.items()}"
-    )
-
-    source.write_text("\n".join(lines))
-    logger.info(
-        "SMART attribute database refreshed: %d attributes (was %.0f days old)",
-        len(presets),
-        age_days,
-    )
-    return True

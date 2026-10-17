@@ -154,37 +154,5 @@ def main():
     print(f"Generated {OUTPUT} with {len(presets)} attribute mappings")
 
 
-def refresh_if_stale(max_age_days: int = 7) -> bool:
-    """Refresh smartdb.py if it's older than max_age_days.
-
-    Returns True if a refresh happened, False if skipped or failed.
-    Silently falls back to existing file on any error.
-    """
-    import time
-
-    if not OUTPUT.exists():
-        # No file at all — try to generate
-        try:
-            main()
-            return True
-        except Exception as e:
-            print(f"WARNING: Could not generate smartdb.py: {e}")
-            return False
-
-    age_days = (time.time() - OUTPUT.stat().st_mtime) / 86400
-    if age_days < max_age_days:
-        return False
-
-    try:
-        main()
-        return True
-    except Exception as e:
-        print(
-            f"WARNING: smartdb.py is {age_days:.0f} days old but refresh "
-            f"failed: {e}. Using existing copy."
-        )
-        return False
-
-
 if __name__ == "__main__":
     main()

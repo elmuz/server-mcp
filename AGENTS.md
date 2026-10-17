@@ -1,5 +1,7 @@
 # Disk Health MCP - Agent Guide
 
+> Roadmap / modernization plan: `~/code/remote-server-mcp/docs/modernization-plan.md`
+
 ## Project Overview
 
 **disk-health-mcp** is a disk health diagnostics MCP server. It provides AI assistants with controlled access to SMART, NVMe, ZFS, RAID, and I/O diagnostics with manufacturer-aware normalization.

@@ -6,7 +6,7 @@ readme = "README.md"
 license = "MIT"
 requires-python = ">=3.11"
 dependencies = [
-    "mcp>=1.0.0",
+    "mcp>=2.3,<3",
     "server-management-lib @ git+https://github.com/elmuz/server-management-lib.git",
 ]
 
@@ -27,7 +27,12 @@ dev = [
 ]
 
 [project.scripts]
-disk-health-mcp = "disk_health_mcp:main"
+disk-health-mcp = "disk_health_mcp:cli"
+
+# Development override: use the sibling checkout until server-management-lib is
+# released. Remove this block when depending on a published/tagged version.
+[tool.uv.sources]
+server-management-lib = { path = "../server-management-lib", editable = true }
 
 [build-system]
 requires = ["setuptools>=61.0"]
