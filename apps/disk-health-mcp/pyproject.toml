@@ -1,38 +1,17 @@
 [project]
 name = "disk-health-mcp"
-version = "0.1.0"
-description = "Disk health diagnostics MCP server. Analyzes SMART, NVMe, ZFS, RAID, and I/O metrics with manufacturer-aware severity assessment."
+version = "0.2.0"
+description = "Disk health diagnostics MCP server: SMART, NVMe, ZFS, RAID and I/O metrics with manufacturer-aware severity."
 readme = "README.md"
 license = "MIT"
 requires-python = ">=3.11"
 dependencies = [
     "mcp>=2.3,<3",
-    "server-management-lib @ git+https://github.com/elmuz/server-management-lib.git",
-]
-
-[project.optional-dependencies]
-dev = [
-    # Testing
-    "pytest>=8.0.0",
-    "pytest-cov>=6.0.0",
-    "pytest-asyncio>=0.24.0",
-    # Linting
-    "ruff>=0.9.0",
-    # Type checking
-    "ty>=0.0.1a10",
-    # Git hooks
-    "pre-commit>=4.0.0",
-    # Markdown linting
-    "pymarkdownlnt>=0.9.0",
+    "server-management-lib>=0.2,<0.3",
 ]
 
 [project.scripts]
 disk-health-mcp = "disk_health_mcp:cli"
-
-# Development override: use the sibling checkout until server-management-lib is
-# released. Remove this block when depending on a published/tagged version.
-[tool.uv.sources]
-server-management-lib = { path = "../server-management-lib", editable = true }
 
 [build-system]
 requires = ["setuptools>=61.0"]
@@ -66,32 +45,3 @@ exclude_lines = [
     "async def main",
     "await mcp.run_stdio_async",
 ]
-
-[tool.ruff]
-target-version = "py311"
-line-length = 88
-
-[tool.ruff.lint]
-select = [
-    "E",   # pycodestyle errors
-    "W",   # pycodestyle warnings
-    "F",   # pyflakes
-    "I",   # isort
-    "N",   # pep8-naming
-    "UP",  # pyupgrade
-    "RUF", # ruff-specific rules
-]
-ignore = []
-
-[tool.ruff.lint.isort]
-known-first-party = ["disk_health_mcp", "server_management_lib"]
-
-[tool.ruff.lint.per-file-ignores]
-"tests/**" = ["E501"]  # Allow long lines in tests
-
-[tool.ty.environment]
-python-version = "3.11"
-
-[tool.ty.rules]
-unresolved-attribute = "ignore"
-invalid-argument-type = "ignore"

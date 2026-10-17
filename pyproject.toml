@@ -1,0 +1,58 @@
+[project]
+name = "server-mcp-workspace"
+version = "0.2.0"
+description = "Workspace for the Server MCP suite"
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.11"
+dependencies = []
+
+[tool.uv.workspace]
+members = ["packages/*", "apps/*"]
+
+[tool.uv.sources]
+server-management-lib = { workspace = true }
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-cov>=6.0.0",
+    "pytest-asyncio>=0.24.0",
+    "ruff>=0.9.0",
+    "ty>=0.0.1a10",
+    "pre-commit>=4.0.0",
+    "pymarkdownlnt>=0.9.0",
+]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 88
+
+[tool.ruff.lint]
+select = [
+    "E",   # pycodestyle errors
+    "W",   # pycodestyle warnings
+    "F",   # pyflakes
+    "I",   # isort
+    "N",   # pep8-naming
+    "UP",  # pyupgrade
+    "RUF", # ruff-specific rules
+]
+ignore = []
+
+[tool.ruff.lint.isort]
+known-first-party = [
+    "disk_health_mcp",
+    "remote_server_mcp",
+    "server_management_lib",
+]
+
+[tool.ruff.lint.per-file-ignores]
+"**/tests/**" = ["E501"]  # Allow long lines in tests
+
+[tool.ty.environment]
+python-version = "3.11"
+
+[tool.ty.rules]
+unresolved-attribute = "ignore"
+invalid-argument-type = "ignore"

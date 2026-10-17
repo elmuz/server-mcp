@@ -1,7 +1,7 @@
 [project]
 name = "server-management-lib"
-version = "0.1.0"
-description = "Shared library for server management MCPs. Provides SSH execution, security validation, config loading, and HTTP clients for InfluxDB/Prometheus."
+version = "0.2.0"
+description = "Shared security, SSH/local execution, configuration and HTTP clients for the Server MCP suite."
 readme = "README.md"
 license = "MIT"
 requires-python = ">=3.11"
@@ -11,21 +11,6 @@ dependencies = [
     "aiohttp>=3.9.0",
     "python-dotenv>=1.0.0",
     "sqlparse>=0.5",
-]
-
-[project.optional-dependencies]
-dev = [
-    # Testing
-    "pytest>=8.0.0",
-    "pytest-cov>=6.0.0",
-    # Linting
-    "ruff>=0.9.0",
-    # Type checking
-    "ty>=0.0.1a10",
-    # Git hooks
-    "pre-commit>=4.0.0",
-    # Markdown linting
-    "pymarkdownlnt>=0.9.0",
 ]
 
 [build-system]
@@ -40,41 +25,13 @@ testpaths = ["tests"]
 python_files = ["test_*.py"]
 python_classes = ["Test*"]
 python_functions = ["test_*"]
-markers = [
-    "integration: marks integration tests that require real SSH connection",
-]
 addopts = "--cov=src/server_management_lib --cov-report=term-missing --cov-fail-under=90"
 
-[tool.ruff]
-target-version = "py311"
-line-length = 88
+[tool.coverage.run]
+source = ["server_management_lib"]
+branch = true
 
-[tool.ruff.lint]
-select = [
-    "E",   # pycodestyle errors
-    "W",   # pycodestyle warnings
-    "F",   # pyflakes
-    "I",   # isort
-    "N",   # pep8-naming
-    "UP",  # pyupgrade
-    "RUF", # ruff-specific rules
-]
-ignore = []
-
-[tool.ruff.lint.isort]
-known-first-party = ["server_management_lib"]
-
-[tool.ruff.lint.per-file-ignores]
-"tests/**" = ["E501"]  # Allow long lines in tests
-
-[tool.ty.environment]
-python-version = "3.11"
-
-[tool.ty.rules]
-unresolved-attribute = "ignore"
-invalid-argument-type = "ignore"
-
-[dependency-groups]
-dev = [
-    "pytest-cov>=7.1.0",
-]
+[tool.coverage.report]
+fail_under = 90
+show_missing = true
+skip_covered = true

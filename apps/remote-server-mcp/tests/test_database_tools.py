@@ -16,6 +16,7 @@ Run with:
 import asyncio
 import json
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
@@ -416,19 +417,23 @@ class TestDisabledServiceBehavior:
 
     def test_influxdb_invalid_query_returns_error(self):
         """Invalid SQL should return validation error, not crash."""
+        config = {"influxdb": {"enabled": True, "database": "testdb"}}
 
         async def run_test():
-            result = await mcp_server.query_influxdb("DROP TABLE cpu")
+            with patch.object(mcp_server, "config", config):
+                result = await mcp_server.query_influxdb("DROP TABLE cpu")
             assert "❌" in result
-            assert "SELECT" in result  # Should mention it needs SELECT
+            assert "SELECT" in result
 
         asyncio.run(run_test())
 
     def test_prometheus_invalid_query_returns_error(self):
-        """Invalid PromQL should return validation error."""
+        """Control characters in PromQL are rejected before any request."""
+        config = {"prometheus": {"enabled": True}}
 
         async def run_test():
-            result = await mcp_server.query_prometheus("; cat /etc/passwd")
+            with patch.object(mcp_server, "config", config):
+                result = await mcp_server.query_prometheus("up\x00")
             assert "❌" in result
 
         asyncio.run(run_test())

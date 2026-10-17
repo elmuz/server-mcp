@@ -49,6 +49,7 @@ __all__ = [
     "SSHConfigurationError",
     "SSHManager",
     "SecurityValidator",
+    "__version__",
     "create_executor",
     "load_config",
     "parse_duration",
@@ -56,3 +57,5 @@ __all__ = [
     "sanitize_output",
     "strip_ansi",
 ]
+
+__version__ = "0.2.0"

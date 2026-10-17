@@ -1,0 +1,53 @@
+repos:
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.17.1
+    hooks:
+      - id: ruff
+        args: [--fix]
+      - id: ruff-format
+
+  - repo: local
+    hooks:
+      - id: ty
+        name: ty
+        entry: env -u VIRTUAL_ENV uv run ty check
+        language: system
+        types: [python]
+        pass_filenames: false
+
+      - id: pytest-lib
+        name: pytest (server-management-lib)
+        entry: env -u VIRTUAL_ENV uv run --directory packages/server-management-lib pytest -q
+        language: system
+        types: [python]
+        pass_filenames: false
+        always_run: true
+
+      - id: pytest-remote
+        name: pytest (remote-server-mcp)
+        entry: env -u VIRTUAL_ENV uv run --directory apps/remote-server-mcp pytest -q
+        language: system
+        types: [python]
+        pass_filenames: false
+        always_run: true
+
+      - id: pytest-disk
+        name: pytest (disk-health-mcp)
+        entry: env -u VIRTUAL_ENV uv run --directory apps/disk-health-mcp pytest -q
+        language: system
+        types: [python]
+        pass_filenames: false
+        always_run: true
+
+      - id: pymarkdown
+        name: pymarkdown
+        entry: env -u VIRTUAL_ENV uv run pymarkdown -c .pymarkdown fix
+        language: system
+        types: [markdown]
+
+      - id: check-md-links
+        name: check-md-links
+        entry: env -u VIRTUAL_ENV uv run python scripts/check_md_links.py
+        language: system
+        types: [markdown]
+        pass_filenames: false

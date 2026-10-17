@@ -1,37 +1,17 @@
 [project]
 name = "remote-server-mcp"
-version = "0.1.0"
-description = "Security-first MCP server for managing remote servers via SSH. Provides AI assistants with controlled, safe operations for debugging services without exposing credentials or allowing dangerous commands."
+version = "0.2.0"
+description = "Security-first MCP server for managing Docker services on a remote server or on the local host."
 readme = "README.md"
 license = "MIT"
 requires-python = ">=3.11"
 dependencies = [
     "mcp>=2.3,<3",
-    "server-management-lib @ git+https://github.com/elmuz/server-management-lib.git",
-]
-
-[project.optional-dependencies]
-dev = [
-    # Testing
-    "pytest>=8.0.0",
-    "pytest-cov>=6.0.0",
-    # Linting
-    "ruff>=0.9.0",
-    # Type checking
-    "ty>=0.0.1a10",
-    # Git hooks
-    "pre-commit>=4.0.0",
-    # Markdown linting
-    "pymarkdownlnt>=0.9.0",
+    "server-management-lib>=0.2,<0.3",
 ]
 
 [project.scripts]
 remote-server-mcp = "remote_server_mcp:cli"
-
-# Development override: use the sibling checkout until server-management-lib is
-# released. Remove this block when depending on a published/tagged version.
-[tool.uv.sources]
-server-management-lib = { path = "../server-management-lib", editable = true }
 
 [build-system]
 requires = ["setuptools>=61.0"]
@@ -60,32 +40,3 @@ branch = true
 fail_under = 60
 show_missing = true
 skip_covered = true
-
-[tool.ruff]
-target-version = "py311"
-line-length = 88
-
-[tool.ruff.lint]
-select = [
-    "E",   # pycodestyle errors
-    "W",   # pycodestyle warnings
-    "F",   # pyflakes
-    "I",   # isort
-    "N",   # pep8-naming
-    "UP",  # pyupgrade
-    "RUF", # ruff-specific rules
-]
-ignore = []
-
-[tool.ruff.lint.isort]
-known-first-party = ["remote_server_mcp", "server_management_lib"]
-
-[tool.ruff.lint.per-file-ignores]
-"tests/**" = ["E501"]  # Allow long lines in tests
-
-[tool.ty.environment]
-python-version = "3.11"
-
-[tool.ty.rules]
-unresolved-attribute = "ignore"
-invalid-argument-type = "ignore"

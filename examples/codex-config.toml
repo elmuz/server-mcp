@@ -1,0 +1,23 @@
+[mcp_servers.remote-server]
+command = "uv"
+args = [
+  "run",
+  "--project", "/path/to/server-mcp",
+  "--package", "remote-server-mcp",
+  "remote-server-mcp",
+]
+
+[mcp_servers.remote-server.env]
+REMOTE_SERVER_MCP_CONFIG = "/home/me/.config/remote-server-mcp/config.yaml"
+
+[mcp_servers.disk-health]
+command = "uv"
+args = [
+  "run",
+  "--project", "/path/to/server-mcp",
+  "--package", "disk-health-mcp",
+  "disk-health-mcp",
+]
+
+[mcp_servers.disk-health.env]
+DISK_HEALTH_MCP_CONFIG = "/home/me/.config/disk-health-mcp/config.yaml"

@@ -1,0 +1,31 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "remote-server": {
+      "type": "local",
+      "command": [
+        "uv", "run",
+        "--project", "/path/to/server-mcp",
+        "--package", "remote-server-mcp",
+        "remote-server-mcp"
+      ],
+      "environment": {
+        "REMOTE_SERVER_MCP_CONFIG": "/home/me/.config/remote-server-mcp/config.yaml"
+      },
+      "enabled": true
+    },
+    "disk-health": {
+      "type": "local",
+      "command": [
+        "uv", "run",
+        "--project", "/path/to/server-mcp",
+        "--package", "disk-health-mcp",
+        "disk-health-mcp"
+      ],
+      "environment": {
+        "DISK_HEALTH_MCP_CONFIG": "/home/me/.config/disk-health-mcp/config.yaml"
+      },
+      "enabled": true
+    }
+  }
+}

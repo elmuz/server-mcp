@@ -413,13 +413,22 @@ class TestSSHConfiguration:
         assert "port" in ssh_config
         assert "username" in ssh_config
 
-    def test_config_has_authentication(self, config):
-        """Test configuration has authentication method."""
-        ssh_config = config["ssh"]
-        # Should have either password or key_path
-        has_password = ssh_config.get("password") is not None
-        has_key = ssh_config.get("key_path") is not None
-        assert has_password or has_key, "Config must have password or key_path"
+    def test_config_has_authentication(self):
+        """A key-based config must expose the key path to the SSH manager."""
+        config = {
+            "ssh": {
+                "host": "example.com",
+                "username": "test",
+                "key_path": "~/.ssh/id_ed25519",
+                "known_hosts": "none",
+            },
+            "security": {"services_path": "/srv"},
+        }
+        manager = SSHManager(config, SecurityValidator(config))
+
+        kwargs = manager.build_connect_kwargs()
+        assert kwargs["client_keys"]
+        assert not kwargs["client_keys"][0].startswith("~")
 
     def test_key_path_expansion(self, config):
         """Test that key path with ~ is properly expanded."""
