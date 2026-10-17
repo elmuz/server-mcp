@@ -86,10 +86,10 @@ Publish the library first; the apps depend on `server-management-lib>=0.2,<0.3`.
 # Build all workspace packages
 uv build --all-packages
 
-# Publish in dependency order
-uv publish --package server-management-lib
-uv publish --package remote-server-mcp
-uv publish --package disk-health-mcp
+# Publish in dependency order (glob the exact files so only one package is sent)
+uv publish "dist/server_management_lib-0.2.0*"
+uv publish "dist/remote_server_mcp-0.2.0*"
+uv publish "dist/disk_health_mcp-0.2.0*"
 ```
 
 `uv publish` reads credentials from `UV_PUBLISH_TOKEN` (or `~/.pypirc`). The package names
