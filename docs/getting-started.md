@@ -81,7 +81,7 @@ uv run --directory apps/remote-server-mcp remote-server-mcp
 uv run --directory apps/disk-health-mcp disk-health-mcp
 ```
 
-Both speak MCP over stdio and log to stderr. You normally do not run them by hand; the MCP
+Both speak MCP over stdio (Streamable HTTP is opt-in) and log to stderr. You normally do not run them by hand; the MCP
 client starts them.
 
 ## 4. Connect a client

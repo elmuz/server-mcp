@@ -3,8 +3,12 @@
 MCP server for disk health diagnostics: SMART, NVMe, ZFS, RAID and I/O metrics, with
 manufacturer-aware severity assessment.
 
-Part of the [Server MCP suite](../../README.md). It exposes 13 read-mostly tools and can use
-InfluxDB/Telegraf data before falling back to `smartctl`/`nvme-cli` over SSH or locally.
+Part of the [Server MCP suite](../../README.md). It exposes 13 read-mostly tools and can
+use InfluxDB/Telegraf data before falling back to `smartctl`/`nvme-cli` over SSH or
+locally. Every tool publishes a structured `ToolResponse` next to the readable text.
+Streamable HTTP is available with `--transport streamable-http` (loopback by default,
+bearer token for other addresses).
+
 Storage coverage includes ZFS, mdadm and mergerFS + SnapRAID (SnapRAID status and a mount
 summary), so the same server can diagnose NAS stacks that do not use ZFS or RAID.
 

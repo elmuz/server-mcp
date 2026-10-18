@@ -21,7 +21,28 @@ The suite contains two independent MCP servers built on one shared core:
 | [`server-management-lib`](packages/server-management-lib) | Security policy, executors, config and HTTP clients |
 
 Any MCP-capable client works: pi, Claude Code, Codex, Cursor, opencode, Claude Desktop and
-anything else that speaks stdio MCP. See [docs/harnesses.md](docs/harnesses.md).
+anything else that speaks MCP. Stdio is the default transport; Streamable HTTP is opt-in.
+See [docs/harnesses.md](docs/harnesses.md).
+
+## See it work
+
+```text
+get_server_health()
+  === Disk Usage (/mnt/storage) ===  48T total, 31T used, 36%
+  === Unhealthy Containers ===      (none)
+
+get_service_status("immich-server")
+  Name: immich-server   State: running   Health: healthy
+  CPU: 2.10%  Memory: 1.2GiB / 8GiB
+
+get_disk_health("nvme0n1")
+  ✅ Device Health Report: /dev/nvme0n1
+  Source: InfluxDB (Telegraf smart plugin)
+  Sample: 4 minutes ago (2026-10-18T21:05:00Z)
+```
+
+Screenshots are intentionally omitted until a curated set is available; the snippets above
+are the actual response shapes.
 
 ## Why this exists
 
@@ -45,6 +66,12 @@ opposite approach:
   through its read-only HTTP API. Credentials never go to the model.
 - **Explicit safety metadata.** Read-only and destructive tools are annotated with MCP
   `ToolAnnotations`, so clients can auto-approve reads and gate destructive actions.
+- **Structured results.** Every tool publishes a `ToolResponse` JSON object (`ok`, `tool`,
+  `summary`, `text`, `data`) as MCP `structuredContent` and keeps the readable text block.
+- **Opt-in remote transport.** Streamable HTTP is available for clients that cannot launch a
+  process; it binds to loopback by default and requires a bearer token for any other address.
+- **Runtime choice.** Docker remains the default; Podman and nerdctl can be selected with
+  `container_runtime` without changing the security policy.
 
 ## Quick start
 
@@ -93,7 +120,7 @@ elsewhere. Disk diagnostics work the same way with `disk-health-mcp` and
 
 ## What the agents can do
 
-`remote-server-mcp` (17 tools):
+`remote-server-mcp` (21 tools):
 
 | Tool | Access |
 |---|---|
@@ -104,8 +131,10 @@ elsewhere. Disk diagnostics work the same way with `disk-health-mcp` and
 | `get_service_file`, `list_service_files` | read-only, confined to the service directory; `.env` values are masked and key/credential files are refused |
 | `get_server_health` | read-only |
 | `query_influxdb`, `query_prometheus`, `get_prometheus_targets` | read-only |
+| `compose_ps` | read-only, scoped to `services_path/<service>` |
 | `start_service` | write |
-| `restart_service`, `stop_service` | destructive |
+| `compose_pull`, `compose_up` | write, require `confirm=true` |
+| `restart_service`, `stop_service`, `compose_down` | destructive, require `confirm=true` |
 
 A service directory resolves to its containers through the
 `com.docker.compose.project` label, so `/srv/immich` covers `immich-server` and
@@ -113,6 +142,11 @@ A service directory resolves to its containers through the
 directory under `services_path` or is listed in `security.allowed_containers`. The log
 tools always include Docker timestamps, accept optional `since`/`until` windows and a
 `container` filter, and search for the exact literal pattern.
+
+State-changing tools require an explicit `confirm=true` argument: without it they return
+the rendered command as a dry-run preview and execute nothing. A sliding-window rate limit
+(`rate_limit`, default 10 actions per minute) bounds repeated destructive calls per server
+process.
 
 Host infrastructure services are not Docker containers. `get_host_service_status` and
 `get_host_service_logs` read systemd units through `systemctl`/`journalctl`, but only units
@@ -132,7 +166,7 @@ in [docs/tools.md](docs/tools.md).
 
 ```text
 MCP client (pi, Claude Code, Codex, Cursor, opencode, ...)
-        │ stdio MCP
+        │ stdio MCP (default) or Streamable HTTP with a bearer token
         ▼
 remote-server-mcp / disk-health-mcp     tool layer: schemas + annotations
         │

@@ -1,0 +1,52 @@
+name: Bug report
+description: Report a reproducible problem in a Server MCP package
+title: "bug: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Do not include config files, `.env` contents, tokens, keys or private hostnames.
+        Security issues must be reported privately as described in SECURITY.md.
+  - type: dropdown
+    id: package
+    attributes:
+      label: Package
+      options:
+        - server-management-lib
+        - remote-server-mcp
+        - disk-health-mcp
+        - documentation
+        - packaging / CI
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Version or commit
+      placeholder: 0.2.0 or a commit SHA
+    validations:
+      required: true
+  - type: textarea
+    id: description
+    attributes:
+      label: What happened?
+      description: Include the tool name, the arguments you used and the observed output.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What did you expect?
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction steps
+      description: Minimal steps, with secrets redacted.
+  - type: input
+    id: environment
+    attributes:
+      label: Environment
+      placeholder: Python version, OS, Docker/Podman/nerdctl version, MCP client

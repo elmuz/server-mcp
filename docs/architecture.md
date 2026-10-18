@@ -22,7 +22,7 @@ same behaviour.
 
 ```text
 MCP client
-   │ tool call (stdio MCP)
+   │ tool call (stdio MCP, or opt-in Streamable HTTP)
    ▼
 tool function (apps/*/server.py)
    │ validate service/device/path/query
@@ -39,7 +39,7 @@ executor.execute_safe_command(...)
 sanitize_output(...)  strip ANSI/control chars, cap bytes
    │
    ▼
-MCP result (text)
+MCP result (text + ToolResponse structuredContent)
 ```
 
 File reads do not go through a shell:
@@ -54,7 +54,7 @@ tool -> executor.read_remote_file(path, allowed_base=service_dir)
 
 | Module | Responsibility |
 |---|---|
-| `security.py` | Service/device/path validation, sensitive-file policy, SQL/PromQL read-only checks, command policy |
+| `security.py` | Service/device/path validation, sensitive-file policy, SQL/PromQL read-only checks, command policy (including container runtimes and Compose scoping) |
 | `base.py` | Shared executor primitives, path confinement, audit/output settings |
 | `ssh_manager.py` | asyncssh connection, host key verification, SFTP file access |
 | `tunnel.py` | Optional loopback SSH forwarding for InfluxDB/Prometheus endpoints |
@@ -65,6 +65,9 @@ tool -> executor.read_remote_file(path, allowed_base=service_dir)
 | `redaction.py` | Dotenv value masking for readable-but-redacted file reads |
 | `audit.py` | JSONL audit log with secret redaction |
 | `http_clients.py` | InfluxDB v3 and Prometheus read-only clients |
+| `responses.py` | `ToolResponse`/`ToolOutput` and the structured-output tool wrapper |
+| `rate_limit.py` | Sliding-window limiter for state-changing tools |
+| `transport.py` | Opt-in Streamable HTTP serving and bearer-token middleware |
 
 ## Executors
 
@@ -126,10 +129,23 @@ rejected; there is no fall-through to a permissive default.
 ## MCP layer
 
 - MCP SDK 2.x (`mcp.server.mcpserver.MCPServer`).
-- stdio transport; logs go to stderr.
+- stdio by default; Streamable HTTP is opt-in, loopback-first and token-protected.
+  Logs go to stderr.
 - Tools declare `ToolAnnotations` (`read_only_hint`, `destructive_hint`) so clients can
   auto-approve reads and ask for confirmation on destructive actions.
-- Tool results are text; size limits are enforced in the library, not in the client.
+- Tools return a readable text block plus a `ToolResponse` structured payload. Size limits
+  are enforced in the library, not in the client.
+- Two static resources (`server-mcp://config/schema`, `server-mcp://tools/catalog`) and a
+  `server-mcp://tools/{name}` template expose configuration defaults (secrets masked) and
+  tool metadata without executing anything.
+
+## Container runtime adapter
+
+The remote-server catalog is built per runtime (`docker`, `podman` or `nerdctl`) from
+`container_runtime`. `build_container_catalog()` produces every operation once, so the
+tools, the resolver and the tests use the selected CLI consistently. Compose operations
+carry `--project-directory <services_path>/<service>`; the command policy validates that
+directory and the exact subcommand arguments, and rejects any other Compose invocation.
 
 ## Why a monorepo
 

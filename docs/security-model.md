@@ -12,6 +12,8 @@ and no path where arbitrary user text is concatenated into a shell string.
 
 - Execute arbitrary commands or open a shell
 - Run `docker run`, `docker exec` or `docker build`
+- Run arbitrary Compose commands or point Compose at a directory outside `services_path`
+- Restart, stop or tear down a service without `confirm=true`
 - Read files outside `security.services_path/<service>/`
 - Read private keys, credential stores, `.ssh`, `.git` or `/etc/shadow`
 - Receive the values of a `.env` file unmasked
@@ -130,10 +132,29 @@ duration; the query text is never stored because it can contain literal values. 
 token and secret fields are redacted. The log is best effort: a write failure never blocks
 an operation.
 
-### 10. MCP tool annotations
+### 10. MCP tool annotations and structured results
 
-Read-only tools set `readOnlyHint: true`; `restart_service` and `stop_service` set
-`destructiveHint: true`. Clients can use this metadata for auto-approval policies.
+Read-only tools set `readOnlyHint: true`; `restart_service`, `stop_service` and
+`compose_down` set `destructiveHint: true`. Clients can use this metadata for auto-approval
+policies. Every tool publishes a `ToolResponse` (`ok`, `tool`, `summary`, `text`, `data`)
+as structured content, so a client can act on `ok` or `data` without parsing the text.
+
+### 11. State-changing actions
+
+`restart_service`, `stop_service`, `compose_pull`, `compose_up` and `compose_down` require
+`confirm=true`. Without it they return the rendered command as a dry-run preview and execute
+nothing. Confirmed calls pass through a per-process sliding-window rate limit
+(`rate_limit`, default 10 calls per minute), which prevents a retry loop from repeatedly
+restarting a service. Compose actions only accept a service directory below `services_path`;
+the directory is validated by the command policy, and only `ps`, `pull`, `up -d` and `down`
+with their fixed arguments are allowed.
+
+### 12. Network transport
+
+The default transport is stdio. Streamable HTTP is opt-in and refuses a non-loopback bind
+address without a bearer token. With a token configured, every HTTP request must present
+`Authorization: Bearer <token>` before the MCP handler sees it. The model cannot choose the
+transport or the token.
 
 ## Known limitations
 
@@ -143,7 +164,8 @@ Read-only tools set `readOnlyHint: true`; `restart_service` and `stop_service` s
   is unreachable until its validated name is added to `security.allowed_containers`.
 - **A compose project is managed as a unit.** `start_service`, `restart_service` and
   `stop_service` act on every container whose compose project resolves to the target
-  directory; there is no per-container confirmation.
+  directory. Confirmation covers the whole target, not individual containers; target one
+  container by name when that granularity is needed.
 - **Docker socket access is powerful.** The MCP process can control any container the Docker
   daemon allows. Run it as a dedicated user and consider a restricted Docker socket proxy.
 - **Logs and files are untrusted input.** Output is sanitized and capped, but a compromised
@@ -165,7 +187,9 @@ Read-only tools set `readOnlyHint: true`; `restart_service` and `stop_service` s
   endpoint, but the configured destination should be limited to the metrics service.
 - **No multi-target support.** One process manages one target (remote or local). Run
   multiple instances for multiple hosts.
-- **stdio only.** The servers do not expose an HTTP transport yet.
+- **Streamable HTTP is a single shared token.** It is disabled by default and is not a
+  multi-user auth system. Bind it to loopback or put it behind a trusted proxy that
+  enforces its own authentication.
 
 ## Reporting
 

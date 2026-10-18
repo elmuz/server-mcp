@@ -1,0 +1,10 @@
+# Default owners for everything in the repository.
+*       @elmuz
+
+# Security-sensitive code requires an explicit review.
+/packages/server-management-lib/src/server_management_lib/security.py    @elmuz
+/packages/server-management-lib/src/server_management_lib/ssh_manager.py @elmuz
+/packages/server-management-lib/src/server_management_lib/transport.py   @elmuz
+/apps/remote-server-mcp/src/remote_server_mcp/operations.py              @elmuz
+/apps/disk-health-mcp/src/disk_health_mcp/operations.py                  @elmuz
+/.github/                                                                 @elmuz

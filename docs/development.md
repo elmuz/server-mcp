@@ -94,8 +94,8 @@ by `scripts/check_md_links.py`. Both run in pre-commit.
 
 ## CI
 
-`.github/workflows/ci.yml` runs on Python 3.11, 3.12 and 3.13: locked sync, ruff, format
-check, ty, and all three test suites.
+`.github/workflows/ci.yml` runs on Python 3.11, 3.12, 3.13 and 3.14: locked sync, ruff,
+format check, ty, all three test suites, pymarkdown and the markdown link check.
 
 ## Releasing
 

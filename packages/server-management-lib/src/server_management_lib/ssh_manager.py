@@ -58,7 +58,7 @@ def _load_known_hosts(path: Path) -> str | bytes:
         )
 
     kept: list[str] = []
-    skipped = 0
+    skipped_lines: list[int] = []
     for lineno, line in enumerate(path.read_text(errors="replace").splitlines(), 1):
         entry = line.strip()
         if not entry or entry.startswith("#"):
@@ -66,19 +66,24 @@ def _load_known_hosts(path: Path) -> str | bytes:
         try:
             asyncssh.import_known_hosts(entry)
         except Exception:
-            skipped += 1
-            if skipped <= 3:
-                logger.warning(
-                    "Skipping unsupported known_hosts entry at %s:%d "
-                    "(legacy or malformed key)",
-                    path,
-                    lineno,
-                )
+            skipped_lines.append(lineno)
             continue
         kept.append(entry)
 
-    if skipped > 3:
-        logger.warning("Skipped %d unsupported known_hosts entries", skipped)
+    if skipped_lines:
+        # One aggregated warning per file keeps the log readable while still
+        # making the skipped entries identifiable.
+        preview = ", ".join(str(line) for line in skipped_lines[:10])
+        suffix = ", ..." if len(skipped_lines) > 10 else ""
+        logger.warning(
+            "Skipped %d unsupported known_hosts entr%s in %s (lines %s%s); "
+            "host key verification stays enabled for the remaining entries",
+            len(skipped_lines),
+            "y" if len(skipped_lines) == 1 else "ies",
+            path,
+            preview,
+            suffix,
+        )
     if not kept:
         raise SSHConfigurationError(
             f"No usable host keys in {path}. Remove legacy entries or regenerate "
@@ -88,7 +93,7 @@ def _load_known_hosts(path: Path) -> str | bytes:
         "Loaded %d known_hosts entries from %s (%d skipped)",
         len(kept),
         path,
-        skipped,
+        len(skipped_lines),
     )
     return ("\n".join(kept) + "\n").encode()
 

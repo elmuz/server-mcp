@@ -5,6 +5,9 @@ description = "Workspace for the Server MCP suite"
 readme = "README.md"
 license = "MIT"
 requires-python = ">=3.11"
+authors = [
+    { name = "Alessio Elmi", email = "alessio.elmi@gmail.com" },
+]
 dependencies = []
 
 [tool.uv.workspace]

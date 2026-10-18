@@ -32,6 +32,23 @@ logger = logging.getLogger(__name__)
 DEFAULT_CONFIG: dict[str, Any] = {
     # "ssh" (default) or "local" (run on the host where the MCP server runs)
     "executor": "ssh",
+    # Container runtime used by the remote-server MCP operation catalog.
+    "container_runtime": "docker",
+    # MCP transport. stdio is the default; streamable-http is opt-in.
+    "transport": {
+        "type": "stdio",
+        "host": "127.0.0.1",
+        "port": 8000,
+        "path": "/mcp",
+        # Required for a non-loopback bind. Prefer MCP_HTTP_TOKEN over YAML.
+        "token": None,
+    },
+    # Sliding-window limit for destructive/state-changing tool calls.
+    "rate_limit": {
+        "enabled": True,
+        "max_calls": 10,
+        "window_seconds": 60,
+    },
     "ssh": {
         "host": "localhost",
         "port": 22,
@@ -109,6 +126,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
 # Environment variable -> (section, key, converter)
 ENV_OVERRIDES: dict[str, tuple[str, str, type]] = {
     "EXECUTOR": ("executor", "executor", str),
+    "CONTAINER_RUNTIME": ("container_runtime", "container_runtime", str),
     "SSH_HOST": ("ssh", "host", str),
     "SSH_PORT": ("ssh", "port", int),
     "SSH_USERNAME": ("ssh", "username", str),
@@ -124,6 +142,11 @@ ENV_OVERRIDES: dict[str, tuple[str, str, type]] = {
     "PROMETHEUS_PORT": ("prometheus", "port", int),
     "PROMETHEUS_USE_HTTPS": ("prometheus", "use_https", bool),
     "PROMETHEUS_TOKEN": ("prometheus", "token", str),
+    "MCP_TRANSPORT": ("transport", "type", str),
+    "MCP_HTTP_HOST": ("transport", "host", str),
+    "MCP_HTTP_PORT": ("transport", "port", int),
+    "MCP_HTTP_PATH": ("transport", "path", str),
+    "MCP_HTTP_TOKEN": ("transport", "token", str),
     "OUTPUT_MAX_BYTES": ("output", "max_bytes", int),
     "AUDIT_ENABLED": ("audit", "enabled", bool),
     "AUDIT_LOG_PATH": ("audit", "path", str),
@@ -298,6 +321,41 @@ def load_config(
     _apply_env_overrides(config, os.environ if env is None else env)
     logger.info("Loaded configuration from %s", resolved)
     return config
+
+
+# Values that must never be published by the config-schema MCP resource.
+SECRET_CONFIG_KEYS = frozenset({"token", "password"})
+
+
+def redact_config_values(value: Any) -> Any:
+    """Return a copy of a config mapping with credential-like values masked."""
+    if isinstance(value, Mapping):
+        return {
+            key: (
+                "***"
+                if str(key).lower() in SECRET_CONFIG_KEYS
+                else redact_config_values(item)
+            )
+            for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [redact_config_values(item) for item in value]
+    return value
+
+
+def config_schema() -> dict[str, Any]:
+    """Describe the configuration defaults and environment overrides.
+
+    Used by the MCP config resource. Credential-like values are masked, and
+    environment variable names are listed without their values.
+    """
+    return {
+        "defaults": redact_config_values(DEFAULT_CONFIG),
+        "environment_overrides": {
+            name: {"section": section, "key": key}
+            for name, (section, key, _converter) in sorted(ENV_OVERRIDES.items())
+        },
+    }
 
 
 def _describe_search_paths(

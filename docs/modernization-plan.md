@@ -5,9 +5,9 @@ modernization backlog with the live-deployment findings from the `catafalco` hos
 documents are no longer maintained separately; earlier snapshots remain in git history.
 
 - **Status:** `0.2.0` is implemented and pushed to `origin/main`; it is not tagged or
-  published. P0-1 through P0-5 and P1-1 through P1-11 are fixed in the unreleased
-  worktree, and the latest remote CI run is red.
-- **Last updated:** 2026-10-18
+  published. P0-1 through P0-5, P1-1 through P1-11 and P2-1 through P2-9 are fixed in the
+  unreleased worktree. The previously red remote CI run still needs a fresh run.
+- **Last updated:** 2026-10-19
 - **Target deployment:** `catafalco` (Ubuntu home server/NAS; Docker services under `/srv`)
 - **Legend:** `[ ]` todo, `[~]` in progress, `[x]` done, `[!]` blocked, `[?]` needs decision
 - **Severity:** **P0** correctness/safety, **P1** capability/usability, **P2** polish
@@ -56,7 +56,7 @@ The reference deployment matters because it exposes assumptions the unit tests c
 - [x] SFTP file reads/listings with remote `realpath` confinement.
 - [x] Output sanitization (ANSI/control characters) and a 64 KiB cap per command/file/query.
 - [x] Opt-in JSONL audit log with secret redaction.
-- [x] `ToolAnnotations` on all 24 tools (read-only vs destructive/write).
+- [x] `ToolAnnotations` on every tool (read-only, write or destructive).
 - [x] Semantic SQL validation (`sqlparse`, single `SELECT`) and usable PromQL validation.
 - [x] SMART parsing fixes (`smart_support`, `smart_status`, zero thresholds, device type).
 - [x] Persistent SSH connection in DHM; dead asyncssh ML-KEM patch removed.
@@ -411,56 +411,100 @@ client/session before re-validating live behavior.
 
 #### P2-1 Structured tool outputs
 
-- [ ] **Fix.** Tools return formatted strings; clients cannot consume typed results. Return
+- [x] **Fix.** Tools return formatted strings; clients cannot consume typed results. Return
       pydantic models/dicts (and keep a readable text fallback) using `MCPServer` structured
       output.
+- **Done (unreleased):** `server-management-lib.responses` defines the `ToolResponse`
+  pydantic envelope (`ok`, `tool`, `summary`, `text`, `data`) and a `make_structured_tool()`
+  wrapper. Both servers register an MCP-facing wrapper with a `ToolResponse` output schema
+  while the implementation functions keep returning readable strings for direct use and
+  tests. Container lists, service status/logs, files, query rows and disk data populate
+  `data`. Tests assert the schema on every tool and the structured payload for
+  representative tools.
 
 #### P2-2 Streamable HTTP transport
 
-- [ ] **Fix.** Only stdio is implemented. Add an opt-in `--transport streamable-http` path
+- [x] **Fix.** Only stdio is implemented. Add an opt-in `--transport streamable-http` path
       (loopback/token protected) for clients that cannot launch a process.
+- **Done (unreleased):** `transport.py` serves the Streamable HTTP app (default `/mcp`) and
+  enforces two rules: a non-loopback bind requires a token, and a configured token must be
+  presented as `Authorization: Bearer ...` on every HTTP request. Configuration lives in
+  `transport.*` (`MCP_TRANSPORT`, `MCP_HTTP_HOST`, `MCP_HTTP_PORT`, `MCP_HTTP_PATH`,
+  `MCP_HTTP_TOKEN`); CLI flags override host/port/path. Both servers exit with status 2 on
+  an unsafe binding. Tests cover the policy, the ASGI middleware and the serving path.
 
 #### P2-3 Container runtime adapter
 
-- [ ] **Fix.** `docker` is hardcoded in
+- [x] **Fix.** `docker` is hardcoded in
       `apps/remote-server-mcp/src/remote_server_mcp/operations.py`. Add
       `container_runtime: docker|podman|nerdctl` and build operations from the selected
       runtime.
+- **Done (unreleased):** `build_container_catalog(runtime)` returns every container and
+  Compose operation for the selected runtime; `SecurityValidator.container_runtime` rejects
+  unknown values with a warning and falls back to Docker. The command allowlist covers
+  Podman/nerdctl subcommands and the existing Docker ones. The resolver and every tool use
+  the selected catalog; `apply_config()` rebuilds it. Tests render every operation for all
+  three runtimes through the command policy.
 
 #### P2-4 Compose deployment operations
 
-- [ ] **Fix.** There is no `compose up/down/pull/ps`. Add a small, explicit set of compose
+- [x] **Fix.** There is no `compose up/down/pull/ps`. Add a small, explicit set of compose
       operations scoped to `services_path/<service>/`, with a dry-run or confirmation
       argument.
+- **Done (unreleased):** `compose_ps` is read-only; `compose_pull`, `compose_up` and
+  `compose_down` run through `<runtime> compose --project-directory
+  <services_path>/<service> <subcommand>` and require `confirm=true`. All four are added to
+  the command policy with fixed subcommand arguments, a directory below `services_path`
+  and no arbitrary flags. Tests cover the rendered commands, previews, failures and policy
+  rejections.
 
 #### P2-5 Rate limiting and destructive-action confirmation
 
-- [ ] **Fix.** `restart_service` and `stop_service` execute immediately. Add a `confirm`
+- [x] **Fix.** `restart_service` and `stop_service` execute immediately. Add a `confirm`
       parameter or MCP elicitation, and a simple per-session rate limit.
+- **Done (unreleased):** `restart_service`, `stop_service`, `compose_pull`, `compose_up`
+  and `compose_down` default to `confirm=false` and return the exact command preview without
+  executing it. Confirmed calls pass a sliding-window `RateLimiter` (`rate_limit`, default
+  10 calls per 60 s, per server process). Tests cover the preview path, execution, the
+  limit and the disabled configuration.
 
 #### P2-6 CI markdown enforcement
 
-- [ ] **Fix.** `.github/workflows/ci.yml` runs ruff, format, ty and pytest, but not
+- [x] **Fix.** `.github/workflows/ci.yml` runs ruff, format, ty and pytest, but not
       `pymarkdown` or `check-md-links`. Add both steps (or run `pre-commit` in CI) so
       documentation checks are enforced remotely.
+- **Done (unreleased):** CI runs `pymarkdown -c .pymarkdown scan .` and
+  `python scripts/check_md_links.py` after the test suites.
 
 #### P2-7 Known_hosts summary logging
 
-- [ ] **Fix.** The loader logs up to three skipped entries plus a count. Aggregate skipped
+- [x] **Fix.** The loader logs up to three skipped entries plus a count. Aggregate skipped
       entries into one summary warning per file.
+- **Done (unreleased):** the loader logs a single warning with the skipped count, the first
+  ten line numbers and the file name; host key verification remains enabled for every entry
+  that parses. A test asserts one aggregated record for two skipped lines.
 
 #### P2-8 MCP resources and resource templates
 
-- [ ] **Optional.** No MCP resources are exposed (`list_mcp_resources` is empty). Consider
+- [x] **Optional.** No MCP resources are exposed (`list_mcp_resources` is empty). Consider
       exposing the config schema and tool catalog as resources.
+- **Done (unreleased):** both servers expose `server-mcp://config/schema` (defaults and
+  environment override names, credential values masked), `server-mcp://tools/catalog`
+  (name, description, annotations and schemas) and a `server-mcp://tools/{name}` template.
+  Reading a resource never executes a host command. Tests cover registration, content and
+  unknown-tool handling.
 
 #### P2-9 Community and packaging polish
 
-- [ ] Add `[project.urls]`, `classifiers`, `keywords` and `authors` to the package metadata.
-- [ ] Add `CODE_OF_CONDUCT.md`, issue templates, a pull-request template and `CODEOWNERS`.
-- [ ] Consider Python 3.14 in the CI matrix (currently 3.11–3.13; local verification already
+- [x] Add `[project.urls]`, `classifiers`, `keywords` and `authors` to the package metadata.
+- [x] Add `CODE_OF_CONDUCT.md`, issue templates, a pull-request template and `CODEOWNERS`.
+- [x] Consider Python 3.14 in the CI matrix (currently 3.11–3.13; local verification already
       runs on 3.14).
-- [ ] Consider a short demo/screenshot section in the README once the repository is public.
+- [x] Consider a short demo/screenshot section in the README once the repository is public.
+- **Done (unreleased):** all three publishable packages declare authors, URLs, keywords and
+  classifiers; CI includes Python 3.14; the repository has a code of conduct, bug/feature
+  issue forms, a PR template and `CODEOWNERS`; the README has a "See it work" section with
+  representative response snippets.
 
 ### 3.4 Release and migration
 
@@ -582,12 +626,12 @@ uv build --all-packages
 
 | Check | Result |
 |---|---|
-| `server-management-lib` tests | 271 passed, 93% coverage |
-| `remote-server-mcp` tests | 224 passed (+17 integration opt-in), 84% coverage |
-| `disk-health-mcp` tests | 113 passed, 77% coverage |
+| `server-management-lib` tests | 353 passed, 94% coverage |
+| `remote-server-mcp` tests | 253 passed (+17 integration opt-in), 85% coverage |
+| `disk-health-mcp` tests | 122 passed, 77% coverage |
 | Python version used locally | 3.14.8 |
-| `ruff check`, `ruff format --check`, `ty check` | pass (verified 2026-10-18) |
-| `pre-commit run --all-files` | all hooks pass (verified 2026-10-18) |
+| `ruff check`, `ruff format --check`, `ty check` | pending re-verification after P2 |
+| `pre-commit run --all-files` | pending re-verification after P2 |
 | `uv build --all-packages` | all three wheels/sdists build, `py.typed` included (0.2.0 snapshot) |
 
 ### 6.3 Live smoke checks (read-only)

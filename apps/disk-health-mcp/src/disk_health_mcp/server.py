@@ -33,13 +33,17 @@ from server_management_lib import (
     InfluxDBClient,
     PrometheusClient,
     SecurityValidator,
+    ToolOutput,
     close_metric_tunnels,
+    config_schema,
     create_audit_logger,
     create_executor,
     load_config,
+    make_structured_tool,
     open_metric_tunnels,
     parse_duration,
     resolve_config_path,
+    run_streamable_http,
     sanitize_output,
 )
 
@@ -137,6 +141,12 @@ security = SecurityValidator(config)
 executor = create_executor(config, security)
 
 mcp = MCPServer("disk-health-mcp")
+
+# Tools keep returning readable strings; the MCP-facing wrapper returns a
+# structured ToolResponse alongside the same text block.
+structured_tool = make_structured_tool(
+    lambda name, tool, annotations: mcp.tool(name=name, annotations=annotations)(tool)
+)
 
 READ_ONLY = ToolAnnotations(
     read_only_hint=True,
@@ -456,8 +466,8 @@ def _format_influxdb_device_health(row: dict, device: str | None = None) -> str:
     return "\n".join(lines)
 
 
-@mcp.tool(annotations=READ_ONLY)
-async def list_disks() -> str:
+@structured_tool(READ_ONLY)
+async def list_disks() -> str | ToolOutput:
     """List all storage devices on the host.
 
     Returns device names, models, serials, sizes, and types.
@@ -475,11 +485,24 @@ async def list_disks() -> str:
     cmd = LIST_DISKS.render()
     if not security.is_command_safe(cmd):
         return "❌ Command not in safe whitelist"
-    return _cap_composite(await _run_command(cmd))
+    output = _cap_composite(await _run_command(cmd))
+    devices: list = []
+    if not _command_failed(output):
+        try:
+            payload = json.loads(output)
+            if isinstance(payload, dict):
+                devices = payload.get("blockdevices", []) or []
+        except (json.JSONDecodeError, TypeError):
+            devices = []
+    return ToolOutput(
+        output,
+        ok=not _command_failed(output),
+        data={"devices": devices, "count": len(devices)},
+    )
 
 
-@mcp.tool(annotations=READ_ONLY)
-async def get_disk_health(device: str) -> str:
+@structured_tool(READ_ONLY)
+async def get_disk_health(device: str) -> str | ToolOutput:
     """Get a comprehensive health analysis for a specific disk.
 
     Data source priority:
@@ -498,7 +521,10 @@ async def get_disk_health(device: str) -> str:
     # Priority 1: Try InfluxDB (no root needed)
     influx_data = await _get_influxdb_latest_device(device)
     if influx_data:
-        return _cap_composite(_format_influxdb_device_health(influx_data, device))
+        return ToolOutput(
+            _cap_composite(_format_influxdb_device_health(influx_data, device)),
+            data={"device": device, "source": "influxdb", "sample": influx_data},
+        )
 
     # Priority 2: Fall back to smartctl via SSH
     if not config.get("host", {}).get("enabled", False):
@@ -524,7 +550,17 @@ async def get_disk_health(device: str) -> str:
             return _enrich_error_output(
                 _no_smart_data_message(device, raw_output), device
             )
-        return _cap_composite(format_smart_summary(smart_device))
+        return ToolOutput(
+            _cap_composite(format_smart_summary(smart_device)),
+            data={
+                "device": device,
+                "source": "smartctl",
+                "model": smart_device.model,
+                "health": smart_device.overall_health,
+                "health_score": smart_device.health_score,
+                "warnings": list(smart_device.warnings),
+            },
+        )
     except (json.JSONDecodeError, KeyError, TypeError) as e:
         logger.warning(f"JSON parse failed, falling back to text: {e}")
         text_cmd = SMART_TEXT.render(device=device)
@@ -539,10 +575,19 @@ async def get_disk_health(device: str) -> str:
             return _enrich_error_output(
                 _no_smart_data_message(device, raw_text), device
             )
-        return _cap_composite(format_smart_summary(text_device))
+        return ToolOutput(
+            _cap_composite(format_smart_summary(text_device)),
+            data={
+                "device": device,
+                "source": "smartctl-text",
+                "model": text_device.model,
+                "health": text_device.overall_health,
+                "health_score": text_device.health_score,
+            },
+        )
 
 
-@mcp.tool(annotations=READ_ONLY)
+@structured_tool(READ_ONLY)
 async def get_smart_attributes(device: str) -> str:
     """Get raw SMART attributes for a specific disk.
 
@@ -679,7 +724,7 @@ async def get_smart_attributes(device: str) -> str:
         return _enrich_error_output(_no_smart_data_message(device, result), device)
 
 
-@mcp.tool(annotations=READ_ONLY)
+@structured_tool(READ_ONLY)
 async def get_nvme_health(device: str) -> str:
     """Get NVMe SMART health log for an NVMe device.
 
@@ -719,7 +764,7 @@ async def get_nvme_health(device: str) -> str:
     return _cap_composite(result)
 
 
-@mcp.tool(annotations=WRITE_ACTION)
+@structured_tool(WRITE_ACTION)
 async def run_smart_test(device: str, test_type: str = "short") -> str:
     """Run a SMART self-test on a disk.
 
@@ -780,7 +825,7 @@ async def run_smart_test(device: str, test_type: str = "short") -> str:
     return _cap_composite(result)
 
 
-@mcp.tool(annotations=READ_ONLY)
+@structured_tool(READ_ONLY)
 async def get_zfs_status() -> str:
     """Get ZFS pool status, health, and capacity.
 
@@ -810,7 +855,7 @@ async def get_zfs_status() -> str:
     return _cap_composite("\n\n".join(results))
 
 
-@mcp.tool(annotations=READ_ONLY)
+@structured_tool(READ_ONLY)
 async def get_raid_status() -> str:
     """Get mdadm software RAID status.
 
@@ -840,7 +885,7 @@ async def get_raid_status() -> str:
     return _cap_composite("\n\n".join(results))
 
 
-@mcp.tool(annotations=READ_ONLY)
+@structured_tool(READ_ONLY)
 async def get_snapraid_status() -> str:
     """Get SnapRAID parity and sync status.
 
@@ -863,7 +908,7 @@ async def get_snapraid_status() -> str:
     return _cap_composite(await _run_command(cmd))
 
 
-@mcp.tool(annotations=READ_ONLY)
+@structured_tool(READ_ONLY)
 async def get_mount_status() -> str:
     """Get mounted filesystems and mergerFS pool state.
 
@@ -895,7 +940,7 @@ async def get_mount_status() -> str:
     return _cap_composite("\n\n".join(results))
 
 
-@mcp.tool(annotations=READ_ONLY)
+@structured_tool(READ_ONLY)
 async def get_io_stats() -> str:
     """Get disk I/O statistics.
 
@@ -951,7 +996,7 @@ def _make_prometheus_client() -> PrometheusClient:
     )
 
 
-@mcp.tool(annotations=READ_ONLY)
+@structured_tool(READ_ONLY)
 async def query_prometheus_disk(query: str) -> str:
     """Query Prometheus for disk-related metrics.
 
@@ -987,7 +1032,7 @@ async def query_prometheus_disk(query: str) -> str:
     return await client.query(query)
 
 
-@mcp.tool(annotations=READ_ONLY)
+@structured_tool(READ_ONLY)
 async def query_influxdb_disk(query: str, database: str | None = None) -> str:
     """Query InfluxDB for historical disk metrics.
 
@@ -1046,8 +1091,8 @@ async def _influxdb_devices_with_recent_data() -> list[str]:
     return devices
 
 
-@mcp.tool(annotations=READ_ONLY)
-async def get_full_disk_report(device: str | None = None) -> str:
+@structured_tool(READ_ONLY)
+async def get_full_disk_report(device: str | None = None) -> str | ToolOutput:
     """Get a comprehensive disk health report combining multiple data sources.
 
     Data source priority:
@@ -1072,6 +1117,7 @@ async def get_full_disk_report(device: str | None = None) -> str:
 
     # Overview of all disks - try InfluxDB first
     lines = ["=== Disk Health Overview ===\n"]
+    overview_devices: list[str] = []
 
     if await _is_influxdb_available():
         devices = await _influxdb_devices_with_recent_data()
@@ -1083,6 +1129,7 @@ async def get_full_disk_report(device: str | None = None) -> str:
             )
             return _cap_composite(f"{note}\n\n{await _get_full_report_via_ssh()}")
 
+        overview_devices = devices
         lines.append("Source: InfluxDB (Telegraf smart plugin)\n")
         lines.append(
             f"Found {len(devices)} devices with a valid sample in the last "
@@ -1126,7 +1173,10 @@ async def get_full_disk_report(device: str | None = None) -> str:
         lines.append("⚠️  InfluxDB not enabled, using SSH fallback\n")
         return await _get_full_report_via_ssh()
 
-    return _cap_composite("\n".join(lines))
+    return ToolOutput(
+        _cap_composite("\n".join(lines)),
+        data={"source": "influxdb", "devices": overview_devices},
+    )
 
 
 async def _get_full_report_via_ssh() -> str:
@@ -1215,7 +1265,75 @@ async def _get_full_report_via_ssh() -> str:
     return _cap_composite("\n".join(lines))
 
 
-async def main(config_path: Path | None = None) -> None:
+# ============================================================================
+# MCP resources (read-only documentation and metadata)
+# ============================================================================
+
+
+def _tool_metadata(name: str) -> dict:
+    """Describe one registered MCP tool."""
+    tool = mcp._tool_manager.get_tool(name)
+    if tool is None:
+        raise ValueError(f"Unknown tool: {name}")
+    annotations = tool.annotations
+    return {
+        "name": tool.name,
+        "description": tool.description,
+        "read_only": bool(annotations and annotations.read_only_hint),
+        "destructive": bool(annotations and annotations.destructive_hint),
+        "idempotent": bool(annotations and annotations.idempotent_hint),
+        "input_schema": tool.parameters,
+        "output_schema": tool.output_schema,
+    }
+
+
+@mcp.resource(
+    "server-mcp://config/schema",
+    name="config-schema",
+    title="Configuration schema",
+    description="Configuration defaults and environment overrides (secrets masked).",
+    mime_type="application/json",
+)
+def config_schema_resource() -> dict:
+    """Return the configuration defaults with credential values masked."""
+    return {"app": APP_NAME, **config_schema()}
+
+
+@mcp.resource(
+    "server-mcp://tools/catalog",
+    name="tool-catalog",
+    title="Tool catalog",
+    description="Read-only, auditable list of the tools this server exposes.",
+    mime_type="application/json",
+)
+def tool_catalog_resource() -> dict:
+    """Return name, description and annotations for every tool."""
+    return {
+        "app": APP_NAME,
+        "tools": [_tool_metadata(tool.name) for tool in mcp._tool_manager.list_tools()],
+    }
+
+
+@mcp.resource(
+    "server-mcp://tools/{name}",
+    name="tool-details",
+    title="Tool details",
+    description="Metadata and JSON schemas for a single tool.",
+    mime_type="application/json",
+)
+def tool_details_resource(name: str) -> dict:
+    """Return metadata for one registered tool."""
+    return _tool_metadata(name)
+
+
+async def main(
+    config_path: Path | None = None,
+    *,
+    transport: str | None = None,
+    http_host: str | None = None,
+    http_port: int | None = None,
+    http_path: str | None = None,
+) -> None:
     """Run the MCP server."""
     configure_logging()
 
@@ -1248,8 +1366,23 @@ async def main(config_path: Path | None = None) -> None:
         "get_snapraid_status, get_mount_status, get_io_stats, "
         "query_prometheus_disk, query_influxdb_disk, get_full_disk_report"
     )
+    transport_config = config.get("transport", {}) or {}
+    selected = transport or str(transport_config.get("type", "stdio"))
     try:
-        await mcp.run_stdio_async()
+        if selected == "stdio":
+            await mcp.run_stdio_async()
+        elif selected in {"streamable-http", "streamable_http", "http"}:
+            host = http_host or str(transport_config.get("host", "127.0.0.1"))
+            port = http_port or int(transport_config.get("port", 8000))
+            path = http_path or str(transport_config.get("path", "/mcp"))
+            token = transport_config.get("token") or None
+            await run_streamable_http(mcp, host=host, port=port, token=token, path=path)
+        else:
+            logger.error("Unknown transport: %s", selected)
+            raise SystemExit(2)
+    except ValueError as e:
+        logger.error("Invalid Streamable HTTP configuration: %s", e)
+        raise SystemExit(2) from e
     finally:
         await close_metric_tunnels(tunnels)
 
@@ -1263,8 +1396,38 @@ def cli() -> None:
         default=None,
         help=f"Path to config.yaml (default: ${CONFIG_ENV_VAR} or XDG config)",
     )
+    parser.add_argument(
+        "--transport",
+        choices=("stdio", "streamable-http"),
+        default=None,
+        help="MCP transport (default: transport.type from config, else stdio)",
+    )
+    parser.add_argument(
+        "--http-host",
+        default=None,
+        help="Streamable HTTP bind address (default: 127.0.0.1)",
+    )
+    parser.add_argument(
+        "--http-port",
+        type=int,
+        default=None,
+        help="Streamable HTTP port (default: 8000)",
+    )
+    parser.add_argument(
+        "--http-path",
+        default=None,
+        help="Streamable HTTP endpoint path (default: /mcp)",
+    )
     args = parser.parse_args()
-    asyncio.run(main(args.config))
+    asyncio.run(
+        main(
+            args.config,
+            transport=args.transport,
+            http_host=args.http_host,
+            http_port=args.http_port,
+            http_path=args.http_path,
+        )
+    )
 
 
 if __name__ == "__main__":

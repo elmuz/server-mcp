@@ -28,11 +28,15 @@ def restore_server_state():
     original_config = dict(server.config)
     original_security = server.security
     original_executor = server.executor
+    original_limiter = server.rate_limiter
+    # Most tests exercise a single action; the limiter has its own tests.
+    server.rate_limiter = None
     yield
     server.config.clear()
     server.config.update(original_config)
     server.security = original_security
     server.executor = original_executor
+    server.rate_limiter = original_limiter
 
 
 @pytest.fixture
@@ -176,7 +180,7 @@ class TestDockerCommandConstruction:
         assert command.endswith("-- app")
 
     def test_service_is_quoted(self, patched):
-        asyncio.run(server.restart_service("app"))
+        asyncio.run(server.restart_service("app", confirm=True))
 
         commands = _commands(patched)
         assert any("docker restart -- app" in command for command in commands)
@@ -520,7 +524,7 @@ class TestServiceResolution:
     def test_restart_targets_every_project_container(self, patched):
         patched.execute_safe_command.side_effect = _dispatch(MULTI_CONTAINER_LISTING)
 
-        result = asyncio.run(server.restart_service("immich"))
+        result = asyncio.run(server.restart_service("immich", confirm=True))
 
         assert _targets(_commands(patched), "docker restart") == [
             "immich-server",
@@ -539,7 +543,7 @@ class TestServiceResolution:
 
         patched.execute_safe_command.side_effect = run
 
-        result = asyncio.run(server.restart_service("immich"))
+        result = asyncio.run(server.restart_service("immich", confirm=True))
 
         assert "⚠️ Service 'immich' restarted with failures: immich-redis" in result
         assert "✅" not in result
@@ -549,7 +553,7 @@ class TestServiceResolution:
         patched.execute_safe_command.side_effect = _dispatch(MULTI_CONTAINER_LISTING)
 
         asyncio.run(server.start_service("immich-server"))
-        asyncio.run(server.stop_service("immich-postgres"))
+        asyncio.run(server.stop_service("immich-postgres", confirm=True))
 
         commands = _commands(patched)
         assert _targets(commands, "docker start") == ["immich-server"]
@@ -636,7 +640,11 @@ class TestOperationCatalog:
             if not isinstance(operation, Operation):
                 continue
             command = operation.render(
-                service="app", lines=10, path="/srv/app", unit="telegraf"
+                service="app",
+                lines=10,
+                path="/srv/app",
+                unit="telegraf",
+                directory="/srv/app",
             )
             assert security.is_command_safe(command) is True, (name, command)
 

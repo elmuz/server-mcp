@@ -302,6 +302,17 @@ def _relative_file_access(file_path: str) -> tuple[FileAccess, str | None]:
 # back to the exact same canonical form, so hand-built shell syntax (chaining,
 # redirection, command substitution) is rejected before the allowlist lookup.
 
+# Supported container runtimes and the default used when unset.
+DEFAULT_CONTAINER_RUNTIME = "docker"
+CONTAINER_RUNTIMES: tuple[str, ...] = ("docker", "podman", "nerdctl")
+# ``compose`` subcommands and the only arguments the catalog may append.
+COMPOSE_ARGUMENTS: dict[str, tuple[tuple[str, ...], ...]] = {
+    "ps": ((), ("--format", "{{.Name}} {{.Status}}")),
+    "pull": ((),),
+    "up": (("-d",), ("-d", "--remove-orphans")),
+    "down": ((), ("--remove-orphans",)),
+}
+
 ALLOWED_ARGV_PREFIXES: tuple[tuple[str, ...], ...] = (
     # remote-server-mcp catalog
     ("echo",),
@@ -367,7 +378,23 @@ for _nvme in ("nvme", "/usr/sbin/nvme", "/sbin/nvme"):
     ):
         ALLOWED_ARGV_PREFIXES += ((_nvme, _subcommand),)
 
-del _smartctl, _nvme, _subcommand
+# Podman and nerdctl expose a Docker-compatible command surface. Only the
+# container subcommands the catalog uses are accepted; -compose commands are
+# handled separately by ``_is_safe_compose`` (they carry a directory argument).
+for _runtime in ("podman", "nerdctl"):
+    for _subcommand in (
+        "ps",
+        "logs",
+        "inspect",
+        "stats",
+        "port",
+        "restart",
+        "start",
+        "stop",
+    ):
+        ALLOWED_ARGV_PREFIXES += ((_runtime, _subcommand),)
+
+del _smartctl, _nvme, _subcommand, _runtime
 
 # Bare shell syntax in an argument can only come from a hand-built command.
 SHELL_METACHARACTERS = frozenset(";&|<>`$")
@@ -411,9 +438,27 @@ class SecurityValidator:
         self.config = config
         self.security_config = config.get("security", {})
         self.services_base_path = self.security_config.get("services_path", "/srv")
+        self._container_runtime = self._read_container_runtime(config)
         # Kept for configuration compatibility only. It deliberately has no
         # effect: there is no path that enables arbitrary command execution.
         self.allow_generic_command_execution = False
+
+    @staticmethod
+    def _read_container_runtime(config: dict) -> str:
+        raw = config.get("container_runtime", DEFAULT_CONTAINER_RUNTIME)
+        if isinstance(raw, str) and raw.strip().lower() in CONTAINER_RUNTIMES:
+            return raw.strip().lower()
+        logger.warning(
+            "Ignoring container_runtime %r: expected one of %s",
+            raw,
+            ", ".join(CONTAINER_RUNTIMES),
+        )
+        return DEFAULT_CONTAINER_RUNTIME
+
+    @property
+    def container_runtime(self) -> str:
+        """Container CLI used by the remote-server operation catalog."""
+        return self._container_runtime
 
     @property
     def allowed_host_units(self) -> frozenset[str]:
@@ -1038,9 +1083,49 @@ class SecurityValidator:
                 )
                 return False
 
+        if self._is_safe_compose(argv):
+            return True
+
         for prefix in ALLOWED_ARGV_PREFIXES:
             if tuple(argv[: len(prefix)]) == prefix:
                 return True
 
         logger.warning("Command is not in the allowed operation catalog: %s", command)
         return False
+
+    def _is_safe_compose(self, argv: list[str]) -> bool:
+        """Validate a ``<runtime> compose --project-directory <dir> <cmd>`` argv.
+
+        Compose operations carry a variable service directory, so they cannot be
+        expressed as a fixed prefix. The directory must stay below
+        ``security.services_path`` and only the catalog's compose subcommands
+        and arguments are accepted.
+        """
+        if len(argv) < 5:
+            return False
+
+        runtime, compose, flag, directory, subcommand = argv[:5]
+        if runtime not in CONTAINER_RUNTIMES or compose != "compose":
+            return False
+        if flag != "--project-directory" or not directory.startswith("/"):
+            return False
+        if ".." in directory.split("/"):
+            return False
+
+        base = self.services_base_path.rstrip("/") or "/"
+        inside_base = directory == base or directory.startswith(
+            base if base == "/" else base + "/"
+        )
+        if not inside_base:
+            logger.warning(
+                "Compose directory %r is outside services_path %r",
+                directory,
+                base,
+            )
+            return False
+
+        allowed = COMPOSE_ARGUMENTS.get(subcommand)
+        if allowed is None:
+            logger.warning("Compose subcommand is not in the catalog: %s", subcommand)
+            return False
+        return tuple(argv[5:]) in allowed

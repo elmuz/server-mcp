@@ -29,35 +29,31 @@ from server_management_lib import (
     Operation,
     PrometheusClient,
     SecurityValidator,
+    ToolOutput,
     close_metric_tunnels,
+    config_schema,
     create_audit_logger,
     create_executor,
+    create_rate_limiter,
     load_config,
+    make_structured_tool,
     open_metric_tunnels,
     parse_duration,
     redact_env_content,
     resolve_config_path,
+    run_streamable_http,
     sanitize_output,
 )
 
 from .operations import (
     DISK_USAGE,
-    DOCKER_HEALTH,
-    DOCKER_INSPECT,
-    DOCKER_PORTS,
-    DOCKER_PS,
-    DOCKER_PS_UNHEALTHY,
-    DOCKER_RESTART,
-    DOCKER_START,
-    DOCKER_STATS,
-    DOCKER_STOP,
     ECHO_CONNECTION,
     FREE_MEMORY,
     JOURNALCTL_UNIT,
     LS_SERVICES,
     SYSTEMCTL_STATUS,
     UPTIME,
-    docker_logs_operation,
+    build_container_catalog,
 )
 from .resolution import (
     Resolution,
@@ -67,6 +63,7 @@ from .resolution import (
     command_failure,
     format_container_table,
     resolve_service_target,
+    service_target,
 )
 
 APP_NAME = "remote-server-mcp"
@@ -79,8 +76,16 @@ logger = logging.getLogger(__name__)
 config = load_config(env_var=CONFIG_ENV_VAR, app_name=APP_NAME, log_missing=False)
 security = SecurityValidator(config)
 executor = create_executor(config, security)
+catalog = build_container_catalog(security.container_runtime)
+rate_limiter = create_rate_limiter(config)
 
 mcp = MCPServer("remote-server-mcp")
+
+# Tools keep returning readable strings; the MCP-facing wrapper returns a
+# structured ToolResponse alongside the same text block.
+structured_tool = make_structured_tool(
+    lambda name, tool, annotations: mcp.tool(name=name, annotations=annotations)(tool)
+)
 
 READ_ONLY = ToolAnnotations(
     read_only_hint=True,
@@ -110,6 +115,28 @@ def _max_output_bytes() -> int:
 def _cap_composite(text: str) -> str:
     """Apply the response cap to output assembled from several commands."""
     return sanitize_output(text, _max_output_bytes(), label="tool output")
+
+
+def _rate_limited(action: str) -> str | None:
+    """Return a rate-limit error when the sliding window is exhausted."""
+    if rate_limiter is None:
+        return None
+    retry_after = rate_limiter.check()
+    if retry_after is None:
+        return None
+    return (
+        f"❌ Rate limit exceeded for {action}. No change was made.\n"
+        f"Try again in {retry_after:.0f}s (see rate_limit in config.yaml)."
+    )
+
+
+def _confirmation_required(action: str, target: str, command: str) -> str:
+    """Explain that a state-changing operation needs explicit confirmation."""
+    return (
+        f"⚠️ Confirmation required to {action} '{target}'. No change was made.\n"
+        f"Command: {command}\n"
+        "Call the tool again with confirm=true after verifying the target."
+    )
 
 
 def _make_influxdb_client() -> InfluxDBClient:
@@ -145,7 +172,20 @@ async def _resolve_service(service: str) -> Resolution:
     """Validate a target and resolve it to allowed Docker containers."""
     if not security.validate_service_name(service):
         raise ResolutionError(f"❌ Invalid service name: {service}")
-    return await resolve_service_target(executor, security, service)
+    return await resolve_service_target(executor, security, service, catalog)
+
+
+async def _compose_directory(service: str) -> str:
+    """Return the compose project directory for a service, or raise."""
+    if not security.validate_service_name(service):
+        raise ResolutionError(f"❌ Invalid service name: {service}")
+    if not await executor.check_service_exists(service):
+        raise ResolutionError(
+            f"❌ Service '{service}' does not exist in "
+            f"{security.services_base_path}/\n"
+            "Compose operations require a service directory below services_path."
+        )
+    return f"{security.services_base_path.rstrip('/')}/{service}"
 
 
 def _container_block(resolution: Resolution, container: str, body: str) -> str:
@@ -195,7 +235,7 @@ def _render_logs_command(
     until: str | None,
 ) -> str:
     """Render ``docker logs`` for one container with optional time filters."""
-    operation = docker_logs_operation(since=since, until=until)
+    operation = catalog.logs(since=since, until=until)
     params: dict[str, str | int] = {"service": container, "lines": lines}
     if since:
         params["since"] = since
@@ -226,8 +266,8 @@ def _host_unit_error(unit: str) -> str:
 
 async def _run_on_containers(
     resolution: Resolution, operation: Operation, action: str
-) -> str:
-    """Run a Docker action for each resolved container and collect the output."""
+) -> ToolOutput:
+    """Run a container action for each resolved container and collect output."""
     blocks = []
     failed = []
     for container in resolution.containers:
@@ -243,7 +283,18 @@ async def _run_on_containers(
         message = f"⚠️ {message} with failures: {', '.join(failed)}"
     else:
         message = f"✅ {message}"
-    return _cap_composite(f"{message}\n" + "\n\n".join(blocks))
+    text = _cap_composite(f"{message}\n" + "\n\n".join(blocks))
+    return ToolOutput(
+        text,
+        ok=not failed,
+        data={
+            "target": resolution.target,
+            "service": resolution.service,
+            "action": action,
+            "containers": list(resolution.containers),
+            "failed": failed,
+        },
+    )
 
 
 def configure_logging() -> None:
@@ -255,7 +306,7 @@ def configure_logging() -> None:
 
 def apply_config(config_path: Path | None = None) -> Path:
     """(Re)load configuration and rebuild the dependent objects in place."""
-    global security, executor
+    global security, executor, catalog, rate_limiter
 
     resolved = resolve_config_path(
         config_path, env_var=CONFIG_ENV_VAR, app_name=APP_NAME
@@ -275,11 +326,13 @@ def apply_config(config_path: Path | None = None) -> Path:
     config.update(new_config)
     security = SecurityValidator(config)
     executor = create_executor(config, security)
+    catalog = build_container_catalog(security.container_runtime)
+    rate_limiter = create_rate_limiter(config)
     return resolved
 
 
-@mcp.tool(annotations=READ_ONLY)
-async def list_services() -> str:
+@structured_tool(READ_ONLY)
+async def list_services() -> str | ToolOutput:
     """List all services in /srv/ directory.
 
     Returns:
@@ -290,17 +343,25 @@ async def list_services() -> str:
         services = await executor.execute_safe_command(
             LS_SERVICES.render(path=base_path)
         )
-        docker = await executor.execute_safe_command(DOCKER_PS.render())
-        return _cap_composite(
+        docker = await executor.execute_safe_command(catalog.ps.render())
+        text = _cap_composite(
             f"=== Services in {base_path} ===\n{services}\n"
             f"=== Docker Status ===\n{docker}"
+        )
+        return ToolOutput(
+            text,
+            data={
+                "services_path": security.services_base_path,
+                "services": [line for line in services.splitlines() if line.strip()],
+                "docker_status": docker,
+            },
         )
     except Exception as e:
         return f"❌ Error listing services: {e}"
 
 
-@mcp.tool(annotations=READ_ONLY)
-async def list_containers() -> str:
+@structured_tool(READ_ONLY)
+async def list_containers() -> str | ToolOutput:
     """List every Docker container, including stopped and crashed ones.
 
     Shows each container's name, compose project, service directory mapping
@@ -311,7 +372,7 @@ async def list_containers() -> str:
         Container table with names, projects and status
     """
     try:
-        containers = await collect_containers(executor)
+        containers = await collect_containers(executor, catalog)
     except ResolutionError as e:
         return str(e)
     except Exception as e:
@@ -335,12 +396,31 @@ async def list_containers() -> str:
         directories=directories,
         allowed_containers=security.allowed_containers,
     )
-    return _cap_composite(
+    text = _cap_composite(
         f"=== Docker Containers ({len(containers)}) ===\n{table}{directory_warning}"
+    )
+    return ToolOutput(
+        text,
+        data={
+            "count": len(containers),
+            "containers": [
+                {
+                    "name": container.name,
+                    "project": container.project,
+                    "service": service_target(
+                        container,
+                        directories,
+                        security.allowed_containers,
+                    ),
+                    "status": container.status,
+                }
+                for container in containers
+            ],
+        },
     )
 
 
-@mcp.tool(annotations=READ_ONLY)
+@structured_tool(READ_ONLY)
 async def get_host_service_status(unit: str) -> str:
     """Get the systemd status of an allowlisted host infrastructure service.
 
@@ -364,7 +444,7 @@ async def get_host_service_status(unit: str) -> str:
         return f"❌ Error getting host service status: {e}"
 
 
-@mcp.tool(annotations=READ_ONLY)
+@structured_tool(READ_ONLY)
 async def get_host_service_logs(unit: str, lines: int = 100) -> str:
     """Get recent journal entries for an allowlisted host service.
 
@@ -392,14 +472,14 @@ async def get_host_service_logs(unit: str, lines: int = 100) -> str:
         return f"❌ Error getting host service logs: {e}"
 
 
-@mcp.tool(annotations=READ_ONLY)
+@structured_tool(READ_ONLY)
 async def get_service_logs(
     service: str,
     lines: int = 100,
     since: str | None = None,
     until: str | None = None,
     container: str | None = None,
-) -> str:
+) -> str | ToolOutput:
     """Get timestamped logs for a service directory or a container name.
 
     Args:
@@ -434,13 +514,24 @@ async def get_service_logs(
             cmd = _render_logs_command(name, lines, since, until)
             result = await executor.execute_safe_command(cmd)
             blocks.append(_container_block(resolution, name, result))
-        return _cap_composite("\n\n".join(blocks))
+        text = _cap_composite("\n\n".join(blocks))
+        return ToolOutput(
+            text,
+            data={
+                "target": resolution.target,
+                "service": resolution.service,
+                "containers": list(containers),
+                "lines": lines,
+                "since": since,
+                "until": until,
+            },
+        )
     except Exception as e:
         return f"❌ Error getting logs: {e}"
 
 
-@mcp.tool(annotations=READ_ONLY)
-async def get_service_status(service: str) -> str:
+@structured_tool(READ_ONLY)
+async def get_service_status(service: str) -> str | ToolOutput:
     """Get detailed status of a service directory or container name.
 
     Args:
@@ -458,12 +549,12 @@ async def get_service_status(service: str) -> str:
         blocks = []
         for container in resolution.containers:
             inspect_output = await executor.execute_safe_command(
-                DOCKER_INSPECT.render(service=container)
+                catalog.inspect.render(service=container)
             )
             status = f"=== Docker Status ===\n{inspect_output}"
 
             stats_output = await executor.execute_safe_command(
-                DOCKER_STATS.render(service=container)
+                catalog.stats.render(service=container)
             )
             status += (
                 "\n\n=== Resource Usage ===\n"
@@ -471,12 +562,21 @@ async def get_service_status(service: str) -> str:
             )
 
             ports_output = await executor.execute_safe_command(
-                DOCKER_PORTS.render(service=container)
+                catalog.ports.render(service=container)
             )
             status += f"\n\n=== Ports ===\n{ports_output}"
 
             blocks.append(_container_block(resolution, container, status))
-        return _cap_composite("\n\n".join(blocks))
+        text = _cap_composite("\n\n".join(blocks))
+        return ToolOutput(
+            text,
+            data={
+                "target": resolution.target,
+                "service": resolution.service,
+                "source": resolution.source,
+                "containers": list(resolution.containers),
+            },
+        )
     except Exception as e:
         return f"❌ Error getting service status: {e}"
 
@@ -518,8 +618,8 @@ def _format_container_health(container: str, output: str, entries: int) -> str:
     return "\n".join(lines)
 
 
-@mcp.tool(annotations=READ_ONLY)
-async def get_container_health(service: str, entries: int = 5) -> str:
+@structured_tool(READ_ONLY)
+async def get_container_health(service: str, entries: int = 5) -> str | ToolOutput:
     """Get the Docker healthcheck status and recent probe output.
 
     Args:
@@ -539,21 +639,33 @@ async def get_container_health(service: str, entries: int = 5) -> str:
         blocks = []
         for container in resolution.containers:
             output = await executor.execute_safe_command(
-                DOCKER_HEALTH.render(service=container)
+                catalog.health.render(service=container)
             )
             body = _format_container_health(container, output, entries)
             blocks.append(_container_block(resolution, container, body))
-        return _cap_composite("\n\n".join(blocks))
+        text = _cap_composite("\n\n".join(blocks))
+        return ToolOutput(
+            text,
+            data={
+                "target": resolution.target,
+                "service": resolution.service,
+                "containers": list(resolution.containers),
+                "entries": entries,
+            },
+        )
     except Exception as e:
         return f"❌ Error getting container health: {e}"
 
 
-@mcp.tool(annotations=DESTRUCTIVE_ACTION)
-async def restart_service(service: str) -> str:
+@structured_tool(DESTRUCTIVE_ACTION)
+async def restart_service(service: str, confirm: bool = False) -> str | ToolOutput:
     """Restart a service directory or container (all resolved containers).
+
+    State-changing by definition, so ``confirm`` must be true.
 
     Args:
         service: Service directory or container name
+        confirm: Must be true to execute; false returns a dry-run preview
 
     Returns:
         Restart result per resolved container
@@ -563,15 +675,27 @@ async def restart_service(service: str) -> str:
     except ResolutionError as e:
         return str(e)
 
+    if not confirm:
+        return _confirmation_required(
+            "restart",
+            resolution.target,
+            " ".join(
+                catalog.restart.render(service=name) for name in resolution.containers
+            ),
+        )
+    limited = _rate_limited("restart_service")
+    if limited is not None:
+        return limited
+
     try:
         # Use '--' to prevent Docker option injection (defense in depth)
-        return await _run_on_containers(resolution, DOCKER_RESTART, "restarted")
+        return await _run_on_containers(resolution, catalog.restart, "restarted")
     except Exception as e:
         return f"❌ Error restarting service: {e}"
 
 
-@mcp.tool(annotations=WRITE_ACTION)
-async def start_service(service: str) -> str:
+@structured_tool(WRITE_ACTION)
+async def start_service(service: str) -> str | ToolOutput:
     """Start a stopped service directory or container.
 
     Args:
@@ -587,17 +711,20 @@ async def start_service(service: str) -> str:
 
     try:
         # Use '--' to prevent Docker option injection (defense in depth)
-        return await _run_on_containers(resolution, DOCKER_START, "started")
+        return await _run_on_containers(resolution, catalog.start, "started")
     except Exception as e:
         return f"❌ Error starting service: {e}"
 
 
-@mcp.tool(annotations=DESTRUCTIVE_ACTION)
-async def stop_service(service: str) -> str:
+@structured_tool(DESTRUCTIVE_ACTION)
+async def stop_service(service: str, confirm: bool = False) -> str | ToolOutput:
     """Stop a running service directory or container.
+
+    State-changing by definition, so ``confirm`` must be true.
 
     Args:
         service: Service directory or container name
+        confirm: Must be true to execute; false returns a dry-run preview
 
     Returns:
         Stop result per resolved container
@@ -607,15 +734,145 @@ async def stop_service(service: str) -> str:
     except ResolutionError as e:
         return str(e)
 
+    if not confirm:
+        return _confirmation_required(
+            "stop",
+            resolution.target,
+            " ".join(
+                catalog.stop.render(service=name) for name in resolution.containers
+            ),
+        )
+    limited = _rate_limited("stop_service")
+    if limited is not None:
+        return limited
+
     try:
         # Use '--' to prevent Docker option injection (defense in depth)
-        return await _run_on_containers(resolution, DOCKER_STOP, "stopped")
+        return await _run_on_containers(resolution, catalog.stop, "stopped")
     except Exception as e:
         return f"❌ Error stopping service: {e}"
 
 
-@mcp.tool(annotations=READ_ONLY)
-async def get_service_file(service: str, file_path: str) -> str:
+@structured_tool(READ_ONLY)
+async def compose_ps(service: str) -> str | ToolOutput:
+    """Show containers for a compose project directory.
+
+    Compose commands are scoped to ``services_path/<service>``; the service
+    name is validated before execution and no arbitrary compose arguments are
+    accepted.
+
+    Args:
+        service: Service directory name below services_path
+
+    Returns:
+        ``compose ps`` output for the project
+    """
+    try:
+        directory = await _compose_directory(service)
+    except ResolutionError as e:
+        return str(e)
+
+    try:
+        output = await executor.execute_safe_command(
+            catalog.compose_ps.render(directory=directory)
+        )
+        text = _cap_composite(f"=== Compose Status: {service} ===\n{output}")
+        return ToolOutput(
+            text,
+            ok=command_failure(output) is None,
+            data={
+                "service": service,
+                "directory": directory,
+                "runtime": catalog.runtime,
+            },
+        )
+    except Exception as e:
+        return f"❌ Error getting compose status: {e}"
+
+
+async def _run_compose_action(
+    service: str, operation: Operation, action: str, confirm: bool
+) -> str | ToolOutput:
+    """Run a mutating compose action after confirmation and rate limiting."""
+    try:
+        directory = await _compose_directory(service)
+    except ResolutionError as e:
+        return str(e)
+
+    command = operation.render(directory=directory)
+    if not confirm:
+        return _confirmation_required(f"compose {action}", service, command)
+
+    limited = _rate_limited(f"compose_{action}")
+    if limited is not None:
+        return limited
+
+    try:
+        output = await executor.execute_safe_command(command)
+    except Exception as e:
+        return f"❌ Error running compose {action}: {e}"
+
+    ok = command_failure(output) is None
+    marker = "✅" if ok else "⚠️"
+    text = _cap_composite(
+        f"{marker} compose {action} '{service}'\n\n{output.strip() or '(no output)'}"
+    )
+    return ToolOutput(
+        text,
+        ok=ok,
+        data={
+            "service": service,
+            "directory": directory,
+            "runtime": catalog.runtime,
+            "action": action,
+        },
+    )
+
+
+@structured_tool(WRITE_ACTION)
+async def compose_pull(service: str, confirm: bool = False) -> str | ToolOutput:
+    """Pull the images of a compose project (requires confirm=true).
+
+    Args:
+        service: Service directory name below services_path
+        confirm: Must be true to execute; false returns a dry-run preview
+
+    Returns:
+        ``compose pull`` output
+    """
+    return await _run_compose_action(service, catalog.compose_pull, "pull", confirm)
+
+
+@structured_tool(WRITE_ACTION)
+async def compose_up(service: str, confirm: bool = False) -> str | ToolOutput:
+    """Start a compose project in the background (requires confirm=true).
+
+    Args:
+        service: Service directory name below services_path
+        confirm: Must be true to execute; false returns a dry-run preview
+
+    Returns:
+        ``compose up`` output
+    """
+    return await _run_compose_action(service, catalog.compose_up, "up", confirm)
+
+
+@structured_tool(DESTRUCTIVE_ACTION)
+async def compose_down(service: str, confirm: bool = False) -> str | ToolOutput:
+    """Stop and remove a compose project (requires confirm=true).
+
+    Args:
+        service: Service directory name below services_path
+        confirm: Must be true to execute; false returns a dry-run preview
+
+    Returns:
+        ``compose down`` output
+    """
+    return await _run_compose_action(service, catalog.compose_down, "down", confirm)
+
+
+@structured_tool(READ_ONLY)
+async def get_service_file(service: str, file_path: str) -> str | ToolOutput:
     """Get the contents of a file within a service directory.
 
     Args:
@@ -657,16 +914,26 @@ async def get_service_file(service: str, file_path: str) -> str:
     except Exception as e:
         return f"❌ Error reading file: {e}"
 
-    if check.access is FileAccess.REDACT:
-        return _cap_composite(
+    redacted = check.access is FileAccess.REDACT
+    if redacted:
+        text = _cap_composite(
             f"{redact_env_content(content)}\n\n"
             "(Environment values are masked by the sensitive-file policy.)"
         )
-    return _cap_composite(content)
+    else:
+        text = _cap_composite(content)
+    return ToolOutput(
+        text,
+        data={
+            "service": service,
+            "path": check.path,
+            "redacted": redacted,
+        },
+    )
 
 
-@mcp.tool(annotations=READ_ONLY)
-async def list_service_files(service: str, subdirectory: str = "") -> str:
+@structured_tool(READ_ONLY)
+async def list_service_files(service: str, subdirectory: str = "") -> str | ToolOutput:
     """List files in a service directory.
 
     Args:
@@ -711,11 +978,22 @@ async def list_service_files(service: str, subdirectory: str = "") -> str:
         return f"❌ Error listing files: {e}"
 
     if not entries:
-        return f"No files found in {full_path}"
-    return _cap_composite("\n".join(entry.longname for entry in entries))
+        return ToolOutput(
+            f"No files found in {full_path}",
+            data={"service": service, "path": full_path, "entries": []},
+        )
+    text = _cap_composite("\n".join(entry.longname for entry in entries))
+    return ToolOutput(
+        text,
+        data={
+            "service": service,
+            "path": full_path,
+            "entries": [{"name": entry.name, "size": entry.size} for entry in entries],
+        },
+    )
 
 
-@mcp.tool(annotations=READ_ONLY)
+@structured_tool(READ_ONLY)
 async def search_service_logs(
     service: str,
     pattern: str,
@@ -723,7 +1001,7 @@ async def search_service_logs(
     since: str | None = None,
     until: str | None = None,
     container: str | None = None,
-) -> str:
+) -> str | ToolOutput:
     """Search service logs for a literal text pattern.
 
     Args:
@@ -772,15 +1050,48 @@ async def search_service_logs(
                 matches.extend(container_matches)
 
         if not matches:
-            return f"No matches found for '{exact_pattern}' in last {lines} lines"
+            return ToolOutput(
+                f"No matches found for '{exact_pattern}' in last {lines} lines",
+                data={
+                    "target": resolution.target,
+                    "pattern": exact_pattern,
+                    "matches": [],
+                },
+            )
 
-        return _cap_composite("\n".join(matches))
+        text = _cap_composite("\n".join(matches))
+        return ToolOutput(
+            text,
+            data={
+                "target": resolution.target,
+                "service": resolution.service,
+                "pattern": exact_pattern,
+                "containers": list(containers),
+                "matches": matches,
+            },
+        )
     except Exception as e:
         return f"❌ Error searching logs: {e}"
 
 
-@mcp.tool(annotations=READ_ONLY)
-async def query_influxdb(query: str, database: str | None = None) -> str:
+QUERY_SUCCESS_PREFIX = "✅ Query successful"
+
+
+def _query_data(result: str) -> dict:
+    """Extract the JSON payload from a query response, when there is one."""
+    if not result.startswith(QUERY_SUCCESS_PREFIX):
+        return {}
+    try:
+        payload = json.loads(result.split("\n\n", 1)[1])
+    except (json.JSONDecodeError, IndexError):
+        return {}
+    if isinstance(payload, list):
+        return {"rows": payload, "row_count": len(payload)}
+    return {"result": payload}
+
+
+@structured_tool(READ_ONLY)
+async def query_influxdb(query: str, database: str | None = None) -> str | ToolOutput:
     """Query InfluxDB v3 using SQL (read-only).
 
     Executes a SELECT query against the InfluxDB v3 HTTP API.
@@ -818,11 +1129,15 @@ async def query_influxdb(query: str, database: str | None = None) -> str:
         )
 
     client = _make_influxdb_client()
-    return await client.query(validated_query, database=db)
+    result = await client.query(validated_query, database=db)
+    return ToolOutput(
+        result,
+        data={"database": db, **_query_data(result)},
+    )
 
 
-@mcp.tool(annotations=READ_ONLY)
-async def query_prometheus(query: str, time: str | None = None) -> str:
+@structured_tool(READ_ONLY)
+async def query_prometheus(query: str, time: str | None = None) -> str | ToolOutput:
     """Query Prometheus using PromQL (read-only).
 
     Executes an instant query against the Prometheus HTTP API.
@@ -851,11 +1166,12 @@ async def query_prometheus(query: str, time: str | None = None) -> str:
         )
 
     client = _make_prometheus_client()
-    return await client.query(validated_query, time)
+    result = await client.query(validated_query, time)
+    return ToolOutput(result, data=_query_data(result))
 
 
-@mcp.tool(annotations=READ_ONLY)
-async def get_prometheus_targets() -> str:
+@structured_tool(READ_ONLY)
+async def get_prometheus_targets() -> str | ToolOutput:
     """Get scrape targets from Prometheus.
 
     Returns the list of all configured scrape targets and their current state.
@@ -872,11 +1188,12 @@ async def get_prometheus_targets() -> str:
         )
 
     client = _make_prometheus_client()
-    return await client.get_targets()
+    result = await client.get_targets()
+    return ToolOutput(result, data=_query_data(result))
 
 
-@mcp.tool(annotations=READ_ONLY)
-async def get_server_health() -> str:
+@structured_tool(READ_ONLY)
+async def get_server_health() -> str | ToolOutput:
     """Get overall server health (CPU, memory, disk, containers).
 
     Disk usage is reported for each mount point in ``health.disk_paths``
@@ -901,22 +1218,101 @@ async def get_server_health() -> str:
         )
         commands.extend(
             [
-                ("=== Running Services ===", DOCKER_PS.render()),
-                ("=== Unhealthy Containers ===", DOCKER_PS_UNHEALTHY.render()),
+                ("=== Running Services ===", catalog.ps.render()),
+                ("=== Unhealthy Containers ===", catalog.ps_unhealthy.render()),
             ]
         )
 
         results = []
+        sections: dict[str, str] = {}
         for title, cmd in commands:
             output = await executor.execute_safe_command(cmd)
-            results.append(f"{title}\n{output.strip() or '(none)'}")
+            body = output.strip() or "(none)"
+            results.append(f"{title}\n{body}")
+            sections[title] = body
 
-        return _cap_composite("\n\n".join(results))
+        text = _cap_composite("\n\n".join(results))
+        return ToolOutput(
+            text,
+            data={
+                "disk_paths": list(security.health_disk_paths),
+                "container_runtime": catalog.runtime,
+                "sections": sections,
+            },
+        )
     except Exception as e:
         return f"❌ Error getting server health: {e}"
 
 
-async def main(config_path: Path | None = None) -> None:
+# ============================================================================
+# MCP resources (read-only documentation and metadata)
+# ============================================================================
+
+
+def _tool_metadata(name: str) -> dict:
+    """Describe one registered MCP tool."""
+    tool = mcp._tool_manager.get_tool(name)
+    if tool is None:
+        raise ValueError(f"Unknown tool: {name}")
+    annotations = tool.annotations
+    return {
+        "name": tool.name,
+        "description": tool.description,
+        "read_only": bool(annotations and annotations.read_only_hint),
+        "destructive": bool(annotations and annotations.destructive_hint),
+        "idempotent": bool(annotations and annotations.idempotent_hint),
+        "input_schema": tool.parameters,
+        "output_schema": tool.output_schema,
+    }
+
+
+@mcp.resource(
+    "server-mcp://config/schema",
+    name="config-schema",
+    title="Configuration schema",
+    description="Configuration defaults and environment overrides (secrets masked).",
+    mime_type="application/json",
+)
+def config_schema_resource() -> dict:
+    """Return the configuration defaults with credential values masked."""
+    return {"app": APP_NAME, **config_schema()}
+
+
+@mcp.resource(
+    "server-mcp://tools/catalog",
+    name="tool-catalog",
+    title="Tool catalog",
+    description="Read-only, auditable list of the tools this server exposes.",
+    mime_type="application/json",
+)
+def tool_catalog_resource() -> dict:
+    """Return name, description and annotations for every tool."""
+    return {
+        "app": APP_NAME,
+        "tools": [_tool_metadata(tool.name) for tool in mcp._tool_manager.list_tools()],
+    }
+
+
+@mcp.resource(
+    "server-mcp://tools/{name}",
+    name="tool-details",
+    title="Tool details",
+    description="Metadata and JSON schemas for a single tool.",
+    mime_type="application/json",
+)
+def tool_details_resource(name: str) -> dict:
+    """Return metadata for one registered tool."""
+    return _tool_metadata(name)
+
+
+async def main(
+    config_path: Path | None = None,
+    *,
+    transport: str | None = None,
+    http_host: str | None = None,
+    http_port: int | None = None,
+    http_path: str | None = None,
+) -> None:
     """Run the MCP server."""
     configure_logging()
 
@@ -956,12 +1352,29 @@ async def main(config_path: Path | None = None) -> None:
         "Available tools: list_services, list_containers, get_service_logs, "
         "get_service_status, get_container_health, get_host_service_status, "
         "get_host_service_logs, restart_service, start_service, stop_service, "
+        "compose_ps, compose_pull, compose_up, compose_down, "
         "get_service_file, list_service_files, search_service_logs, "
         "get_server_health, query_influxdb, query_prometheus, "
         "get_prometheus_targets"
     )
+
+    transport_config = config.get("transport", {}) or {}
+    selected = transport or str(transport_config.get("type", "stdio"))
     try:
-        await mcp.run_stdio_async()
+        if selected == "stdio":
+            await mcp.run_stdio_async()
+        elif selected in {"streamable-http", "streamable_http", "http"}:
+            host = http_host or str(transport_config.get("host", "127.0.0.1"))
+            port = http_port or int(transport_config.get("port", 8000))
+            path = http_path or str(transport_config.get("path", "/mcp"))
+            token = transport_config.get("token") or None
+            await run_streamable_http(mcp, host=host, port=port, token=token, path=path)
+        else:
+            logger.error("Unknown transport: %s", selected)
+            raise SystemExit(2)
+    except ValueError as e:
+        logger.error("Invalid Streamable HTTP configuration: %s", e)
+        raise SystemExit(2) from e
     finally:
         await close_metric_tunnels(tunnels)
 
@@ -975,8 +1388,38 @@ def cli() -> None:
         default=None,
         help=f"Path to config.yaml (default: ${CONFIG_ENV_VAR} or XDG config)",
     )
+    parser.add_argument(
+        "--transport",
+        choices=("stdio", "streamable-http"),
+        default=None,
+        help="MCP transport (default: transport.type from config, else stdio)",
+    )
+    parser.add_argument(
+        "--http-host",
+        default=None,
+        help="Streamable HTTP bind address (default: 127.0.0.1)",
+    )
+    parser.add_argument(
+        "--http-port",
+        type=int,
+        default=None,
+        help="Streamable HTTP port (default: 8000)",
+    )
+    parser.add_argument(
+        "--http-path",
+        default=None,
+        help="Streamable HTTP endpoint path (default: /mcp)",
+    )
     args = parser.parse_args()
-    asyncio.run(main(args.config))
+    asyncio.run(
+        main(
+            args.config,
+            transport=args.transport,
+            http_host=args.http_host,
+            http_port=args.http_port,
+            http_path=args.http_path,
+        )
+    )
 
 
 if __name__ == "__main__":

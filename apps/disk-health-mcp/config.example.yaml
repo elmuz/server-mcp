@@ -72,6 +72,22 @@ influxdb:
   #   local_host: "127.0.0.1"   # loopback only
   #   local_port: 0             # 0 = ephemeral local port
 
+# MCP transport. stdio is the default. Streamable HTTP is opt-in: keep the
+# bind address on loopback, or set a token (prefer the MCP_HTTP_TOKEN
+# environment variable over putting it in YAML).
+transport:
+  type: stdio            # stdio | streamable-http
+  host: "127.0.0.1"
+  port: 8000
+  path: "/mcp"
+  token: null
+
+# Sliding-window limit for state-changing tool calls.
+rate_limit:
+  enabled: true
+  max_calls: 10
+  window_seconds: 60
+
 # Output safety limits (applies to command output, files and query results)
 output:
   max_bytes: 64000

@@ -6,6 +6,7 @@ Thanks for taking the time to improve Server MCP.
 
 - For security issues, do **not** open a public issue. See [SECURITY.md](SECURITY.md).
 - For larger changes, open an issue first so the design can be discussed.
+- Participation is governed by [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md).
 - By contributing you agree that your work is licensed under the MIT license.
 
 ## Setup

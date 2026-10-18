@@ -11,7 +11,41 @@ dependencies = [
     "aiohttp>=3.9.0",
     "python-dotenv>=1.0.0",
     "sqlparse>=0.5",
+    "pydantic>=2.12",
 ]
+
+authors = [
+    { name = "Alessio Elmi", email = "alessio.elmi@gmail.com" },
+]
+keywords = [
+    "mcp",
+    "model-context-protocol",
+    "linux",
+    "server-management",
+    "docker",
+    "homelab",
+    "self-hosting",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Intended Audience :: System Administrators",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: System :: Systems Administration",
+    "Typing :: Typed",
+]
+
+[project.urls]
+Homepage = "https://github.com/elmuz/server-mcp"
+Repository = "https://github.com/elmuz/server-mcp"
+Documentation = "https://github.com/elmuz/server-mcp/tree/main/docs"
+Issues = "https://github.com/elmuz/server-mcp/issues"
+Changelog = "https://github.com/elmuz/server-mcp/blob/main/CHANGELOG.md"
 
 [build-system]
 requires = ["setuptools>=61.0"]

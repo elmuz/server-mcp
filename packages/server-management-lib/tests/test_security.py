@@ -856,3 +856,95 @@ class TestSMARTTestTypeValidation:
         assert self.security.validate_smart_test_type("invalid") is False
         assert self.security.validate_smart_test_type("") is False
         assert self.security.validate_smart_test_type(None) is False
+
+
+# ============================================================================
+# Container runtime and compose policy
+# ============================================================================
+
+
+class TestContainerRuntime:
+    def test_default_is_docker(self):
+        assert SecurityValidator({}).container_runtime == "docker"
+
+    @pytest.mark.parametrize("runtime", ["docker", "podman", "nerdctl", "Podman"])
+    def test_valid_runtime(self, runtime):
+        security = SecurityValidator({"container_runtime": runtime})
+        assert security.container_runtime == runtime.lower()
+
+    @pytest.mark.parametrize("runtime", ["containerd", "", 42, None])
+    def test_invalid_runtime_falls_back_to_docker(self, runtime):
+        security = SecurityValidator({"container_runtime": runtime})
+        assert security.container_runtime == "docker"
+
+    @pytest.mark.parametrize("runtime", ["podman", "nerdctl"])
+    def test_runtime_catalog_commands_are_allowed(self, runtime):
+        security = SecurityValidator({})
+        commands = [
+            f"{runtime} ps -a --format '{{{{.Names}}}}'",
+            f"{runtime} logs --tail 5 -- app",
+            f"{runtime} inspect --format '{{{{.Name}}}}' -- app",
+            f"{runtime} restart -- app",
+            f"{runtime} stop -- app",
+        ]
+        for command in commands:
+            assert security.is_command_safe(command) is True, command
+
+
+class TestComposeCommandPolicy:
+    def setup_method(self):
+        self.security = SecurityValidator({"security": {"services_path": "/srv"}})
+
+    @pytest.mark.parametrize("runtime", ["docker", "podman", "nerdctl"])
+    @pytest.mark.parametrize(
+        "tail",
+        [
+            "ps --format '{{.Name}} {{.Status}}'",
+            "ps",
+            "pull",
+            "up -d --remove-orphans",
+            "up -d",
+            "down --remove-orphans",
+            "down",
+        ],
+    )
+    def test_catalog_compose_commands_are_allowed(self, runtime, tail):
+        command = f"{runtime} compose --project-directory /srv/app {tail}"
+        assert self.security.is_command_safe(command) is True, command
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            # unknown or dangerous subcommands
+            "docker compose --project-directory /srv/app restart",
+            "docker compose --project-directory /srv/app run evil",
+            "docker compose --project-directory /srv/app exec app sh",
+            # outside services_path
+            "docker compose --project-directory /etc down",
+            "docker compose --project-directory /srv/../etc down",
+            # extra or unknown arguments
+            "docker compose --project-directory /srv/app up --build",
+            "docker compose --project-directory /srv/app pull --quiet",
+            "docker compose --project-directory /srv/app ps --all",
+            # runtime and shape
+            "containerd compose --project-directory /srv/app ps",
+            "docker compose --projects-directory /srv/app ps",
+            "docker compose /srv/app ps",
+        ],
+    )
+    def test_non_catalog_compose_commands_are_rejected(self, command):
+        assert self.security.is_command_safe(command) is False, command
+
+    def test_compose_respects_configured_services_path(self):
+        security = SecurityValidator({"security": {"services_path": "/opt/services"}})
+
+        assert (
+            security.is_command_safe(
+                "docker compose --project-directory /opt/services/app ps"
+            )
+            is True
+        )
+        assert (
+            security.is_command_safe("docker compose --project-directory /srv/app ps")
+            is False
+        )

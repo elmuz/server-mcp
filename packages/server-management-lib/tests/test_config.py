@@ -239,3 +239,39 @@ class TestConfigMerging:
 
         with pytest.raises(ConfigError, match="must be a YAML mapping"):
             load_config(config_file, required=True, use_dotenv=False)
+
+
+class TestConfigSchema:
+    """The config resource must describe defaults without leaking secrets."""
+
+    def test_schema_masks_credentials(self):
+        from server_management_lib.config import config_schema
+
+        schema = config_schema()
+        defaults = schema["defaults"]
+
+        assert defaults["container_runtime"] == "docker"
+        assert defaults["transport"]["type"] == "stdio"
+        assert defaults["rate_limit"]["enabled"] is True
+        assert defaults["influxdb"]["token"] == "***"
+        assert defaults["ssh"]["password"] == "***"
+
+    def test_schema_lists_environment_overrides_without_values(self):
+        from server_management_lib.config import config_schema
+
+        overrides = config_schema()["environment_overrides"]
+
+        assert overrides["MCP_HTTP_TOKEN"] == {
+            "section": "transport",
+            "key": "token",
+        }
+        assert overrides["CONTAINER_RUNTIME"]["section"] == "container_runtime"
+
+    def test_redaction_is_recursive(self):
+        from server_management_lib.config import redact_config_values
+
+        redacted = redact_config_values(
+            {"a": [{"token": "secret", "name": "ok"}], "password": "x"}
+        )
+
+        assert redacted == {"a": [{"token": "***", "name": "ok"}], "password": "***"}

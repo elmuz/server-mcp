@@ -8,6 +8,22 @@ versioning.
 
 ### Added
 
+- Every tool now returns MCP `structuredContent` as a `ToolResponse` (`ok`, `tool`,
+  `summary`, `text`, `data`) alongside the existing readable text block.
+- Both servers expose MCP resources: `server-mcp://config/schema` (defaults with secrets
+  masked), `server-mcp://tools/catalog` and a `server-mcp://tools/{name}` template.
+- Opt-in Streamable HTTP transport (`--transport streamable-http`, `transport.*`). It binds
+  to loopback by default and requires a bearer token for any non-loopback address.
+- `container_runtime` selects `docker` (default), `podman` or `nerdctl` for the
+  remote-server operation catalog.
+- `remote-server-mcp` exposes `compose_ps`, `compose_pull`, `compose_up` and `compose_down`,
+  scoped to `services_path/<service>` and validated by the command policy.
+- Destructive and state-changing tools accept `confirm`; without `confirm=true` they return
+  a dry-run command preview and execute nothing.
+- Per-process sliding-window rate limiting for state-changing tools (`rate_limit`).
+- `[project.urls]`, authors, keywords and classifiers in the published package metadata.
+- CI runs the markdown checks and Python 3.14, and the repository ships issue/PR templates,
+  `CODEOWNERS` and a code of conduct.
 - `remote-server-mcp` exposes `get_container_health`, returning Docker healthcheck status,
   failing streak and recent probe output. `get_service_status` now includes `Health`,
   `FailingStreak` and `ExitCode`.
@@ -43,6 +59,10 @@ versioning.
 
 ### Changed
 
+- `restart_service`, `stop_service`, `compose_pull`, `compose_up` and `compose_down` now
+  require `confirm=true`.
+- A skipped known_hosts entry is reported in one aggregated warning per file instead of one
+  warning per line.
 - `get_service_status`, `get_container_health`, `get_service_logs`, `search_service_logs`,
   `start_service`, `restart_service` and `stop_service` now resolve compose projects to
   all of their containers and label the output per container.

@@ -9,7 +9,7 @@ health without exposing credentials or allowing arbitrary commands.
 This is a **uv workspace monorepo**:
 
 ```text
-apps/remote-server-mcp/          MCP server: Docker/SSH and host-service operations (17 tools)
+apps/remote-server-mcp/          MCP server: Docker/SSH and host-service operations (21 tools)
 apps/disk-health-mcp/            MCP server: SMART/NVMe/ZFS/mdadm/SnapRAID diagnostics (13 tools)
 packages/server-management-lib/  Security policy, executors, config, HTTP clients
 ```
@@ -78,6 +78,11 @@ shell commands. Avoid pipes and shell operators; filter output in Python instead
 `SecurityValidator.is_command_safe()` policy is a strict argv allowlist: unknown executables
 and hand-built shell syntax are rejected. `security.allow_generic_commands` is ignored.
 
+`remote-server-mcp` builds its container operations from `build_container_catalog()` using
+`container_runtime` (`docker`, `podman` or `nerdctl`). Compose operations are scoped to
+`services_path/<service>` and only `ps`, `pull`, `up -d` and `down` with fixed arguments are
+allowed by the policy.
+
 ### Security requirements
 
 Every tool MUST:
@@ -89,6 +94,10 @@ Every tool MUST:
 4. Not expose credentials, tokens or sensitive files.
 5. Not allow command injection. Prefer argv vectors over strings.
 6. Declare MCP `ToolAnnotations` (`read_only_hint`, `destructive_hint`).
+7. Require `confirm=true` for restart/stop/compose actions and pass state-changing calls
+   through the shared `RateLimiter`; never execute on a missing confirmation.
+8. Return a readable string (or `ToolOutput` with `data`) and register the tool through
+   `structured_tool(...)` so clients receive a `ToolResponse` as structured content.
 
 Reads go through SFTP or the local filesystem with a `realpath` check against the service
 base directory. Output is sanitized and capped by the library; do not bypass it.
@@ -96,12 +105,12 @@ base directory. Output is sanitized and capped by the library; do not bypass it.
 ### Adding a tool
 
 ```python
-@mcp.tool(annotations=READ_ONLY)
+@structured_tool(READ_ONLY)
 async def my_tool(service: str) -> str:
     """Describe exactly what the tool does and what it cannot do."""
     if not security.validate_service_name(service):
         return f"❌ Invalid service name: {service}"
-    command = SOME_OPERATION.render(service=service)
+    command = catalog.my_operation.render(service=service)
     return await executor.execute_safe_command(command)
 ```
 

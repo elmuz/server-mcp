@@ -18,7 +18,7 @@ from dataclasses import dataclass
 
 from server_management_lib import Executor, SecurityValidator
 
-from .operations import DOCKER_PS_ALL, LS_SERVICE_DIRS
+from .operations import DEFAULT_CATALOG, LS_SERVICE_DIRS, ContainerCatalog
 
 EXIT_CODE_PATTERN = re.compile(r"⚠️ Exit code:\s*(-?\d+)")
 ERROR_MARKER = "❌"
@@ -79,9 +79,11 @@ def parse_container_listing(output: str) -> list[Container]:
     return containers
 
 
-async def collect_containers(executor: Executor) -> list[Container]:
-    """List every Docker container, including stopped and crashed ones."""
-    output = await executor.execute_safe_command(DOCKER_PS_ALL.render())
+async def collect_containers(
+    executor: Executor, catalog: ContainerCatalog = DEFAULT_CATALOG
+) -> list[Container]:
+    """List every container, including stopped and crashed ones."""
+    output = await executor.execute_safe_command(catalog.ps_all.render())
     failure = command_failure(output)
     if failure is not None:
         raise ResolutionError(f"❌ Could not list Docker containers:\n{failure}")
@@ -156,6 +158,7 @@ async def resolve_service_target(
     executor: Executor,
     security: SecurityValidator,
     target: str,
+    catalog: ContainerCatalog = DEFAULT_CATALOG,
 ) -> Resolution:
     """Resolve a service directory or container name to allowed containers.
 
@@ -164,7 +167,7 @@ async def resolve_service_target(
     """
     base_path = security.services_base_path
     is_service_dir = await executor.check_service_exists(target)
-    containers = await collect_containers(executor)
+    containers = await collect_containers(executor, catalog)
 
     if is_service_dir:
         matches = containers_for_service(containers, target)

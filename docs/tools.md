@@ -4,6 +4,11 @@ Both servers expose a fixed catalog. Tools marked **read-only** are annotated wi
 `readOnlyHint`; **destructive** tools set `destructiveHint`. Output is sanitized and capped
 at `output.max_bytes` (64 KiB by default).
 
+Every tool also returns MCP `structuredContent`: a `ToolResponse` object with `ok`, `tool`,
+`summary`, `text` and a `data` payload (container lists, query rows, file metadata and so
+on). Text-only clients keep receiving the same readable block as before. The config schema
+and the tool catalog are available as MCP resources; see [architecture.md](architecture.md).
+
 ## remote-server-mcp
 
 | Tool | Arguments | Access | What it does |
@@ -22,9 +27,13 @@ at `output.max_bytes` (64 KiB by default).
 | `query_influxdb` | `query`, `database` | read-only | Single `SELECT` against InfluxDB v3 |
 | `query_prometheus` | `query`, `time` | read-only | Instant PromQL query (Prometheus is optional) |
 | `get_prometheus_targets` | — | read-only | Prometheus scrape targets and health (optional) |
+| `compose_ps` | `service` | read-only | `docker compose --project-directory <service> ps` |
 | `start_service` | `service` | write | `docker start` |
-| `restart_service` | `service` | destructive | `docker restart` |
-| `stop_service` | `service` | destructive | `docker stop` |
+| `compose_pull` | `service`, `confirm` | write | `docker compose ... pull` after confirmation |
+| `compose_up` | `service`, `confirm` | write | `docker compose ... up -d --remove-orphans` after confirmation |
+| `restart_service` | `service`, `confirm` | destructive | `docker restart` after confirmation |
+| `stop_service` | `service`, `confirm` | destructive | `docker stop` after confirmation |
+| `compose_down` | `service`, `confirm` | destructive | `docker compose ... down --remove-orphans` after confirmation |
 
 ### Examples
 
@@ -41,6 +50,11 @@ get_service_status("vllm")             # stopped: resource usage is unavailable
 get_service_status("immich")           # resolves to immich-server, immich-postgres, ...
 get_service_status("immich-server")    # container name, via its compose project
 get_container_health("deluge", entries=5)
+compose_ps("immich")
+compose_pull("immich", confirm=True)
+compose_up("immich", confirm=True)
+compose_down("immich", confirm=True)
+restart_service("immich", confirm=True)
 get_host_service_status("telegraf")   # systemd unit, not a container
 get_host_service_logs("telegraf", lines=200)
 get_service_file("grafana", "provisioning/datasources/influxdb.yml")
@@ -122,6 +136,21 @@ Search patterns are matched locally in Python. They are **not** rewritten: quote
 (over 200 characters) or control-character patterns are rejected. No shell or `grep` is
 involved, so a pattern that looks like shell syntax is just text.
 
+## Confirmation and rate limiting
+
+`restart_service`, `stop_service`, `compose_pull`, `compose_up` and `compose_down` accept a
+`confirm` argument that defaults to `false`. Without it, the tool returns the exact command
+it would run and executes nothing. Call the tool again with `confirm=true` after checking
+the target. `start_service` and `compose_ps` do not need confirmation.
+
+Confirmed state-changing calls pass through a sliding-window limiter (`rate_limit` in the
+config: `enabled`, `max_calls`, `window_seconds`; default 10 calls per 60 seconds). When the
+window is exhausted the tool returns a rate-limit error and no command runs. The limiter is
+per server process, so it bounds runaway retries rather than providing multi-user quotas.
+
+The container CLI for all Docker/Compose tools is selected by `container_runtime`
+(`docker`, `podman` or `nerdctl`). The command allowlist is identical for all three.
+
 All responses are capped at `output.max_bytes` (64 KiB by default). Per-command output is
 capped by the executor and composite/listing responses (service files, server health,
 host-service logs, storage summaries and the full disk report) receive a final cap over the
@@ -173,6 +202,8 @@ label explicitly with `--label com.docker.compose.project=<service>`.
 `start_service`, `restart_service` and `stop_service` accept either form. For a
 multi-container project they act on every container and label the output per container;
 this is why `restart_service` on a project restarts all of its containers.
+`compose_ps`, `compose_pull`, `compose_up` and `compose_down` only accept a service
+directory and run Compose with `--project-directory <services_path>/<service>`.
 `get_service_file` and `list_service_files` still require a directory. Use
 `list_containers()` to discover stopped or crashed containers and their compose projects;
 a container whose `SERVICE` column is `-` is not addressable until you create the matching

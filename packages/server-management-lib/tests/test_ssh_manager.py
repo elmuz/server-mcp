@@ -669,3 +669,37 @@ class TestCommandAudit:
 
         result = asyncio.run(manager.execute_safe_command("echo hi"))
         assert result == "red"
+
+
+class TestKnownHostsSummaryLogging:
+    """Skipped entries are reported once per file, not once per line."""
+
+    def test_skipped_entries_are_aggregated(
+        self, tmp_path, security, monkeypatch, caplog
+    ):
+        key = asyncssh.generate_private_key("ssh-ed25519")
+        public_key = key.export_public_key().decode().strip()
+        known_hosts = tmp_path / "known_hosts"
+        known_hosts.write_text(f"example.com {public_key}\ngarbage-one\ngarbage-two\n")
+        monkeypatch.setattr(
+            "server_management_lib.ssh_manager.asyncssh.read_known_hosts",
+            MagicMock(side_effect=ValueError("broken")),
+        )
+        manager = SSHManager(
+            {
+                "ssh": {"host": "example.com", "known_hosts": str(known_hosts)},
+                "security": {"services_path": "/srv"},
+            },
+            security,
+        )
+
+        with caplog.at_level("WARNING"):
+            kwargs = manager.build_connect_kwargs()
+
+        warnings = [
+            record for record in caplog.records if "known_hosts entr" in record.message
+        ]
+        assert len(warnings) == 1
+        assert "2 unsupported" in warnings[0].getMessage()
+        assert "2, 3" in warnings[0].getMessage()
+        assert isinstance(kwargs["known_hosts"], bytes)

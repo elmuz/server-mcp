@@ -17,6 +17,8 @@ values. If a `.env` file exists next to the resolved config, it is loaded first.
 ```yaml
 # ssh (default) or local
 executor: ssh
+# docker (default), podman or nerdctl
+container_runtime: docker
 
 ssh:
   host: "server.example.com"
@@ -76,6 +78,18 @@ prometheus:
   #   local_host: "127.0.0.1"    # loopback only
   #   local_port: 0              # 0 = ephemeral local port
 
+transport:
+  type: stdio                # stdio (default) or streamable-http
+  host: "127.0.0.1"          # non-loopback requires a token
+  port: 8000
+  path: "/mcp"
+  token: null                # prefer MCP_HTTP_TOKEN
+
+rate_limit:
+  enabled: true
+  max_calls: 10
+  window_seconds: 60
+
 output:
   max_bytes: 64000           # cap for command output, files and query results
 
@@ -93,6 +107,37 @@ audit:
 
 Both executors use the same validated operation catalog. The local executor rejects shell
 operators (`|`, `&&`, `;`, redirects) instead of interpreting them.
+
+## Container runtime
+
+`container_runtime` selects the CLI used by the remote-server operation catalog:
+`docker` (default), `podman` or `nerdctl`. The tools use the same subcommands
+(`ps`, `logs`, `inspect`, `stats`, `port`, `start`, `stop`, `restart`, `compose`) and the
+shared argv allowlist, so switching runtimes does not widen the security policy. An
+unrecognised value logs a warning and falls back to `docker`.
+
+## Transport
+
+`stdio` is the default. Streamable HTTP is opt-in:
+
+```bash
+remote-server-mcp --transport streamable-http --http-host 127.0.0.1 --http-port 8000
+```
+
+The endpoint is `/mcp` by default (`transport.path`). A non-loopback bind address is
+refused unless a bearer token is configured. Set `transport.token` or, preferably,
+`MCP_HTTP_TOKEN`; every HTTP request must then send `Authorization: Bearer <token>`.
+`MCP_TRANSPORT`, `MCP_HTTP_HOST`, `MCP_HTTP_PORT` and `MCP_HTTP_PATH` override the matching
+config keys. The CLI flags take precedence over the config file. On a loopback bind without
+a token, any local process can call the server, so keep the default unless a client
+genuinely cannot launch a process.
+
+## Rate limiting
+
+`rate_limit` bounds state-changing tool calls per server process with a sliding window:
+`restart_service`, `stop_service`, `compose_pull`, `compose_up` and `compose_down`.
+Destructive and compose tools also require `confirm=true`; without it they return a dry-run
+preview. Set `enabled: false` for unattended automation or raise `max_calls`.
 
 ## SSH
 
@@ -244,6 +289,7 @@ Environment variables override the YAML file.
 | Variable | Config key |
 |---|---|
 | `EXECUTOR` | `executor` |
+| `CONTAINER_RUNTIME` | `container_runtime` |
 | `SSH_HOST` | `ssh.host` |
 | `SSH_PORT` | `ssh.port` |
 | `SSH_USERNAME` | `ssh.username` |
@@ -259,6 +305,11 @@ Environment variables override the YAML file.
 | `PROMETHEUS_PORT` | `prometheus.port` |
 | `PROMETHEUS_USE_HTTPS` | `prometheus.use_https` |
 | `PROMETHEUS_TOKEN` | `prometheus.token` |
+| `MCP_TRANSPORT` | `transport.type` |
+| `MCP_HTTP_HOST` | `transport.host` |
+| `MCP_HTTP_PORT` | `transport.port` |
+| `MCP_HTTP_PATH` | `transport.path` |
+| `MCP_HTTP_TOKEN` | `transport.token` |
 | `OUTPUT_MAX_BYTES` | `output.max_bytes` |
 | `AUDIT_ENABLED` | `audit.enabled` |
 | `AUDIT_LOG_PATH` | `audit.path` |
