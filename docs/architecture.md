@@ -54,13 +54,15 @@ tool -> executor.read_remote_file(path, allowed_base=service_dir)
 
 | Module | Responsibility |
 |---|---|
-| `security.py` | Service/device/path validation, SQL/PromQL read-only checks, command policy |
+| `security.py` | Service/device/path validation, sensitive-file policy, SQL/PromQL read-only checks, command policy |
 | `base.py` | Shared executor primitives, path confinement, audit/output settings |
 | `ssh_manager.py` | asyncssh connection, host key verification, SFTP file access |
+| `tunnel.py` | Optional loopback SSH forwarding for InfluxDB/Prometheus endpoints |
 | `local_executor.py` | Local argv execution and filesystem access |
 | `executor.py` | `Executor` protocol and `create_executor()` factory |
 | `config.py` | Config resolution, defaults, deep merge, env overrides, `.env` |
 | `output.py` | ANSI/control-character stripping and byte caps |
+| `redaction.py` | Dotenv value masking for readable-but-redacted file reads |
 | `audit.py` | JSONL audit log with secret redaction |
 | `http_clients.py` | InfluxDB v3 and Prometheus read-only clients |
 
@@ -78,15 +80,48 @@ tool -> executor.read_remote_file(path, allowed_base=service_dir)
 The SSH executor keeps one lazily connected session and reconnects after a connection loss.
 The local executor has no connection lifecycle; the methods are no-ops for interface parity.
 
+Metric endpoints are separate from the executor. `tunnel.py` can open an optional loopback
+port forward over a dedicated SSH connection for an InfluxDB or Prometheus server that only
+listens on the target's loopback interface. The server rewrites the database section's
+`host`/`port` to the tunnel endpoint at startup and closes the tunnels on shutdown.
+
+## Host infrastructure services
+
+Not every service is a Docker container. The monitoring collector (`telegraf`), `smartd`,
+`docker`, `snapraid`, `mergerfs` and `smbd` run as systemd units on the host and write to
+the journal. `remote-server-mcp` exposes `get_host_service_status` and
+`get_host_service_logs`, which build `systemctl status` / `journalctl -u` argv vectors from
+the operation catalog.
+
+The unit name is validated twice: `SecurityValidator.validate_host_unit()` requires a
+well-formed systemd unit name and membership in `security.host_units` (default:
+`telegraf`, `smartd`, `docker`, `snapraid`, `mergerfs`, `smbd`), then the rendered command
+passes the shared argv allowlist. An arbitrary unit is rejected before the executor runs
+anything, so host infrastructure services are in scope only through the explicit allowlist.
+
+## Service and container resolution
+
+`remote-server-mcp` treats a directory below `security.services_path` as the primary
+service identifier. `resolution.py` lists containers with `docker ps -a` and maps a
+directory to the containers whose `com.docker.compose.project` label matches; if no label
+matches, it falls back to a container with the same name. A container name is accepted
+directly when its compose project maps to a service directory or when the name is listed
+in `security.allowed_containers`. The resolver rejects unknown targets and never passes a
+raw target to Docker without service-name validation and a `--` terminator.
+
 ## Command construction
 
-`remote-server-mcp` commands are defined once in `operations.py` as `Operation(argv, ...)`
-templates. Values are substituted literally and the vector is rendered with `shlex.join`, so
-a validated service name can never become shell syntax. The only operation that used a pipe
-(log search) now filters lines in Python, which keeps both executors shell-free.
+Both MCP servers define their host commands once in an `operations.py` catalog as
+`Operation(argv, ...)` templates. Values are substituted literally and the vector is
+rendered with `shlex.join`, so a validated service, device or unit name can never become
+shell syntax. Log search filters lines in Python, which keeps both executors shell-free.
+The disk-health catalog also covers the mergerFS + SnapRAID stack (`snapraid status`,
+`findmnt`, `df`) next to the ZFS and mdadm operations.
 
-`disk-health-mcp` builds short commands from validated device names (`sda`, `nvme0n1`,
-`dm-0`, ...) and checks them against the command policy before execution.
+The rendered command still passes `SecurityValidator.is_command_safe()` in the executor. That
+policy is a strict argv allowlist: the command must round-trip through `shlex`, match a known
+executable and subcommand, and contain no shell metacharacters. Unknown commands are
+rejected; there is no fall-through to a permissive default.
 
 ## MCP layer
 

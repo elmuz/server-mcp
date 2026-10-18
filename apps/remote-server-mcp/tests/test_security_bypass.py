@@ -7,7 +7,7 @@ whitelist-based security model. They cover:
 1. Symlink attacks (local resolve vs remote execution mismatch)
 2. Docker option injection
 3. Unicode / encoding bypasses
-4. Grep injection in log search
+4. Literal log-search filtering
 5. Null byte injection
 6. Credential exposure via legitimate files
 7. Environment variable attacks
@@ -186,99 +186,41 @@ class TestDockerOptionInjection:
 
 
 # ============================================================================
-# 3. Grep Injection Tests
+# 3. Literal Log Search Tests
 # ============================================================================
 
 
-class TestGrepInjection:
+class TestLiteralLogSearch:
     """
-    CRITICAL: search_service_logs constructs:
-        grep -F '{sanitized_pattern}'
+    search_service_logs filters lines locally in Python.
 
-    The sanitization removes single quotes, but:
-    1. If pattern becomes empty after sanitization, grep reads from stdin (hangs)
-    2. Backslash handling in grep -F has edge cases
-    3. The grep -F flag treats input as fixed string, but the quotes are still vulnerable
+    The pattern is therefore data, not shell input: quotes, backslashes and
+    other punctuation must keep their exact meaning. Only empty, overlong and
+    control-character patterns are rejected.
     """
 
     def setup_method(self):
         self.security = SecurityValidator({})
 
-    def test_single_quote_stripping(self):
-        """
-        Single quote is NOT stripped by sanitize_search_pattern!
-        The sanitization removes: ' " ` $ \\ ; | & > < ( ) { } \n \r
-        But wait - it DOES strip single quotes. Let me verify:
-        """
+    def test_shell_syntax_is_preserved(self):
         pattern = "'; cat /etc/passwd; #"
-        sanitized = self.security.sanitize_search_pattern(pattern)
-        assert "'" not in sanitized, (
-            "Single quote should be stripped to prevent grep injection"
-        )
+        assert self.security.validate_search_pattern(pattern) == pattern
 
-    def test_empty_pattern_after_sanitization(self):
-        """
-        If the entire pattern consists only of shell special characters,
-        sanitization produces an empty string, causing grep to read from stdin.
+    def test_backslashes_are_preserved(self):
+        for pattern in ("test\\", "foo\\bar", "\\n"):
+            assert self.security.validate_search_pattern(pattern) == pattern
 
-        After fix: sanitize_search_pattern raises ValueError for empty patterns.
-        """
-        pattern = "';|&$"
+    def test_empty_pattern_is_rejected(self):
         with pytest.raises(ValueError, match="empty"):
-            self.security.sanitize_search_pattern(pattern)
+            self.security.validate_search_pattern("")
 
-    def test_grep_backslash_handling(self):
-        """
-        In grep -F, backslash is treated literally, but if the backslash
-        is used to escape the closing quote, it could break the command.
+    def test_control_characters_are_rejected(self):
+        with pytest.raises(ValueError, match="control characters"):
+            self.security.validate_search_pattern("error\ncat /etc/passwd")
 
-        Pattern: test\
-        Result: grep -F 'test\'  <- The backslash escapes the closing quote!
-        Next char becomes part of the pattern, then the closing quote is missing.
-
-        After fix: backslash is stripped, and if the pattern becomes empty,
-        ValueError is raised.
-        """
-        # Patterns that become empty or only contain safe chars after sanitization
-        safe_patterns = [
-            ("test\\", "test"),
-            ("foo\\bar", "foobar"),
-            ("\\n", "n"),
-        ]
-
-        for pattern, expected in safe_patterns:
-            sanitized = self.security.sanitize_search_pattern(pattern)
-            assert sanitized == expected, (
-                f"Expected '{expected}' from {pattern!r}, got '{sanitized}'"
-            )
-
-        # Pattern that becomes entirely special chars should raise ValueError
-        with pytest.raises(ValueError, match="empty"):
-            self.security.sanitize_search_pattern("\\'")
-
-    def test_pattern_with_newline_injection(self):
-        """
-        Newlines in the pattern could inject additional commands.
-        Pattern: "error\ncat /etc/passwd"
-        Command: grep -F 'error
-        cat /etc/passwd'
-        """
-        pattern = "error\ncat /etc/passwd"
-        sanitized = self.security.sanitize_search_pattern(pattern)
-        assert "\n" not in sanitized, "Newlines should be stripped from pattern"
-        assert "\r" not in sanitized, "Carriage returns should be stripped"
-
-    def test_max_lines_bypass(self):
-        """
-        The lines parameter is limited to 5000, but the tool accepts
-        arbitrary integers. An attacker could pass a very large number.
-        """
-        # The security module should enforce the limit
-        # This tests that the SSH manager or tool enforces it
-        # Since we're testing the security module, we verify pattern sanitization
-        # doesn't break with extreme line counts
-        pattern = self.security.sanitize_search_pattern("normal search")
-        assert len(pattern) <= 200, "Pattern should be length-limited"
+    def test_pattern_length_is_bounded(self):
+        with pytest.raises(ValueError, match="too long"):
+            self.security.validate_search_pattern("normal search" * 20)
 
 
 # ============================================================================
@@ -493,8 +435,10 @@ class TestCommandSafetyBypass:
         # Test that even with validated service names, the full command
         # doesn't accidentally become dangerous.
         service = "myapp"  # Validated
-        cmd = f"docker logs --tail 100 {service} 2>&1"
+        cmd = f"docker logs --tail 100 {service}"
         assert self.security.is_command_safe(cmd) is True
+        assert self.security.is_command_safe(cmd + " 2>&1") is False
+        assert self.security.is_command_safe(cmd + "; curl evil") is False
 
     def test_env_variable_in_commands(self):
         """
@@ -560,26 +504,13 @@ class TestLogSearchSpecificity:
     def setup_method(self):
         self.security = SecurityValidator({})
 
-    def test_wildcard_in_grep_pattern(self):
-        """
-        Empty pattern is dangerous - grep reads from stdin (hangs).
-        After fix: sanitize_search_pattern raises ValueError for empty patterns.
-        """
-        pattern = ""
+    def test_empty_pattern_is_rejected(self):
         with pytest.raises(ValueError, match="empty"):
-            self.security.sanitize_search_pattern(pattern)
+            self.security.validate_search_pattern("")
 
-    def test_docker_container_name_in_pattern(self):
-        """
-        If the service name appears in the log search pattern,
-        it could be confused with the container name parameter.
-        """
-        service = "myapp"
-        pattern = self.security.sanitize_search_pattern(f"; docker rm {service}")
-        assert ";" not in pattern
-        assert "docker" not in pattern.lower() or "docker" in pattern.lower(), (
-            "Semicolon should be stripped"
-        )
+    def test_container_name_in_pattern_is_literal(self):
+        pattern = "; docker rm myapp"
+        assert self.security.validate_search_pattern(pattern) == pattern
 
 
 # ============================================================================

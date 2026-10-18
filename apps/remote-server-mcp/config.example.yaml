@@ -27,29 +27,66 @@ security:
   # Service directory base path - all operations restricted to this path
   services_path: "/srv"
 
-  # Generic command execution is never implemented; this key is reserved.
+  # Containers that may be managed without a matching service directory.
+  # Containers belonging to a compose project below services_path do not need
+  # to be listed here. Invalid names are ignored.
+  allowed_containers: []
+  # allowed_containers: ["watchtower", "wud"]
+
+  # Host systemd units that get_host_service_status/get_host_service_logs may
+  # inspect. These are host infrastructure services, not Docker containers.
+  # Arbitrary unit names are rejected; set an empty list to disable them.
+  host_units: ["telegraf", "smartd", "docker", "snapraid", "mergerfs", "smbd"]
+
+  # Generic command execution is never implemented and the allowlist cannot be
+  # extended from configuration. This legacy key has no effect.
   allow_generic_commands: false
 
+health:
+  # Absolute mount points reported by get_server_health. NAS pools are separate
+  # mounts, so list every filesystem that matters (root is the default).
+  disk_paths:
+    - "/"
+    # - "/mnt/storage"
+
 # Database query configuration (optional)
-# These sections enable read-only HTTP API queries against InfluxDB v3 and Prometheus
-# Credentials are optional - leave commented if no auth is required
+# These sections enable read-only HTTP API queries against InfluxDB v3 and Prometheus.
+# Two supported modes for each service:
+#   a) HTTPS reverse proxy (SWAG, Caddy, nginx): host/port of the proxy and
+#      use_https: true. The host is a hostname or IP only, never a URL.
+#   b) loopback-only service: keep a local SSH tunnel open and point host/port
+#      at it, or enable the optional ssh_tunnel block so the MCP creates the
+#      tunnel at startup.
+# Credentials are optional - leave commented if no auth is required.
 
 influxdb:
   # enabled: false  # Set to true to enable InfluxDB query tools
-  # host: "localhost"
-  # port: 8181  # Default InfluxDB v3 port
-  # use_https: false
-  # database: "mydb"  # Default database for queries
+  # host: "influxdb.example.com"  # hostname/IP only (no scheme or path)
+  # port: 443
+  # use_https: true
+  # database: "my-db"  # Default database for queries
   # token: "your-api-token"  # Optional: read-only API token
   # query_limit: 1000  # Maximum rows returned per query (safety limit)
+  # ssh_tunnel:
+  #   enabled: true
+  #   remote_host: "127.0.0.1"  # from the SSH server's point of view
+  #   remote_port: 8181         # defaults to influxdb.port
+  #   local_host: "127.0.0.1"   # loopback only
+  #   local_port: 0             # 0 = ephemeral local port
 
 prometheus:
   # enabled: false  # Set to true to enable Prometheus query tools
-  # host: "localhost"
-  # port: 9090  # Default Prometheus port
-  # use_https: false
+  # host: "prometheus.example.com"  # hostname/IP only (no scheme or path)
+  # port: 443
+  # use_https: true
   # token: "your-bearer-token"  # Optional: read-only bearer token
   # query_timeout: "30s"  # Query timeout parameter
+  # ssh_tunnel:
+  #   enabled: true
+  #   remote_host: "127.0.0.1"  # from the SSH server's point of view
+  #   remote_port: 9090         # defaults to prometheus.port
+  #   local_host: "127.0.0.1"   # loopback only
+  #   local_port: 0             # 0 = ephemeral local port
 
 # Output safety limits (applies to command output, files and query results)
 output:

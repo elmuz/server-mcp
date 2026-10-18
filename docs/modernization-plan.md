@@ -1,17 +1,22 @@
-# Modernization Plan and Backlog
+# Modernization and Remediation Plan
 
-Current tracking document for the Server MCP suite. It replaces the earlier audit-style plan;
-the full findings remain available in git history.
+Single source of truth for the Server MCP suite. This document merges the former
+modernization backlog with the live-deployment findings from the `catafalco` host. Those two
+documents are no longer maintained separately; earlier snapshots remain in git history.
 
-- **Status:** `0.2.0` implemented locally; not pushed or published
-- **Last updated:** 2026-10-17
-- **Legend:** `[ ]` todo, `[~]` partial, `[x]` done, `[!]` blocked
+- **Status:** `0.2.0` is implemented and pushed to `origin/main`; it is not tagged or
+  published. P0-1 through P0-5 and P1-1 through P1-11 are fixed in the unreleased
+  worktree, and the latest remote CI run is red.
+- **Last updated:** 2026-10-18
+- **Target deployment:** `catafalco` (Ubuntu home server/NAS; Docker services under `/srv`)
+- **Legend:** `[ ]` todo, `[~]` in progress, `[x]` done, `[!]` blocked, `[?]` needs decision
+- **Severity:** **P0** correctness/safety, **P1** capability/usability, **P2** polish
 
 ## 1. Context
 
 Server MCP is a security-first proxy between an autonomous agent and a Linux host. Two MCP
 servers (`remote-server-mcp`, `disk-health-mcp`) sit on top of a shared library
-(`server-management-lib`). The suite is now a uv workspace monorepo with one lockfile, one
+(`server-management-lib`). The suite is a uv workspace monorepo with one lockfile, one
 pre-commit configuration and one CI workflow.
 
 The design constraints are:
@@ -22,9 +27,22 @@ The design constraints are:
 - Read-only database access and bounded output.
 - Harness-agnostic documentation and packaging.
 
-## 2. Completed in 0.2.0
+The reference deployment matters because it exposes assumptions the unit tests cannot:
 
-### 2.1 Core security and correctness
+- 43 running containers and 28 directories under `/srv`; container names and service
+  directories are not one-to-one.
+- Telegraf runs as a **host systemd service**, not a container, and writes SMART data to
+  InfluxDB v3 Core (`system-monitor`; measurements `smart_device`, `smart_attribute`).
+- The server uses mergerFS + SnapRAID, not ZFS or mdadm.
+- Prometheus was retired; there is no `node_exporter` and no `smartmon_*` metric family.
+- InfluxDB is reachable over HTTPS through SWAG with a token; it is also bound to
+  `127.0.0.1:8181` on the host.
+
+## 2. Status snapshot
+
+### 2.1 Completed in 0.2.0
+
+#### Core security and correctness
 
 - [x] MCP SDK 2.x (`mcp.server.mcpserver.MCPServer`), console entry points fixed.
 - [x] Config resolution via `--config`, environment, XDG path and `./config.yaml`; fail fast
@@ -36,7 +54,7 @@ The design constraints are:
 - [x] `docker stats` argument order fixed; NVMe device validated before database access.
 - [x] Operation catalog for Docker commands, rendered with `shlex.join`.
 - [x] SFTP file reads/listings with remote `realpath` confinement.
-- [x] Output sanitization (ANSI/control characters) and a 64 KiB cap.
+- [x] Output sanitization (ANSI/control characters) and a 64 KiB cap per command/file/query.
 - [x] Opt-in JSONL audit log with secret redaction.
 - [x] `ToolAnnotations` on all 24 tools (read-only vs destructive/write).
 - [x] Semantic SQL validation (`sqlparse`, single `SELECT`) and usable PromQL validation.
@@ -44,122 +62,508 @@ The design constraints are:
 - [x] Persistent SSH connection in DHM; dead asyncssh ML-KEM patch removed.
 - [x] Unused `pydantic` dependency removed.
 
-### 2.2 Structure, packaging and docs
+#### Structure, packaging and docs
 
 - [x] uv workspace monorepo with imported history, one `uv.lock`, one pre-commit config,
       one CI workflow and shared ruff/ty configuration.
-- [x] `py.typed` in all packages; coverage gates (90% / 60% / 55%).
+- [x] `py.typed` in all packages; coverage gates (90% / 60% / 65%).
 - [x] Harness-agnostic README, `AGENTS.md`, `CLAUDE.md`, docs and examples for pi,
       Claude Code, Codex, Cursor and opencode.
 - [x] `CONTRIBUTING.md`, `SECURITY.md`, `CHANGELOG.md`, `docs/releasing.md`.
 - [x] Qwen/vLLM artifacts and duplicated per-repo tooling removed.
 
+### 2.2 Completed in the reference deployment
+
+These are deployment fixes outside this repository. They are recorded so future MCP work is
+not validated against a broken environment.
+
+- [x] **InfluxDB UI 502.** The SWAG upstream used port 80 while
+      `influxdata/influxdb3-ui` listens on 8080. Added `influxdb_ui_port: 8080` in the
+      catafalco role, rendered the config and reloaded SWAG. The UI now returns 200.
+- [x] **InfluxDB enabled in the live MCP configs.** Both `remote-server-mcp` and
+      `disk-health-mcp` point at the SWAG HTTPS endpoint with `use_https: true` and
+      `database: system-monitor`; the token lives in `.env` next to each config (mode 0600).
+      Prometheus was retired from the host and is disabled in both configs.
+- [x] **vLLM, OpenWebUI and Prometheus retired.** Roles, containers, directories, stale SWAG
+      vhosts, the Grafana Prometheus datasource and the vLLM dashboard were removed;
+      `/srv/openwebui` data was preserved intentionally.
+- [x] **SMART polling reduced.** Telegraf now polls SMART every 5 minutes and disk usage
+      every minute instead of every 10 seconds; `nocheck = "standby"` is unchanged.
+- [x] **`hd_idle` typo fixed.** Removed a reference to an undefined variable.
+- [x] **Deluge healthcheck fixed.** The image grepped for an `openvpn|wg` process, but kernel
+      WireGuard has no daemon. The override checks `wg show` and the Deluge web UI; the
+      container now reports healthy.
+
+Operational note: running MCP server processes still hold the old config. Restart the MCP
+client/session before re-validating live behavior.
+
 ## 3. Open work
 
-### 3.1 Deferred from the original plan
+### 3.1 P0 — correctness and safety
 
-- [ ] **Structured tool outputs.** Tools return formatted strings; clients cannot consume
-      typed results. Return pydantic models/dicts (and keep a readable text fallback) using
-      `MCPServer` structured output.
-- [ ] **Streamable HTTP transport.** Only stdio is implemented. Add an opt-in
-      `--transport streamable-http` path (loopback/token protected) for clients that cannot
-      launch a process.
-- [ ] **Container runtime adapter.** `docker` is hardcoded in
+#### P0-1 `get_disk_health` fabricates a healthy report when data is unavailable
+
+- [x] **Fix and test.** `apps/disk-health-mcp/src/disk_health_mcp/server.py`
+      (`get_disk_health`) returns a full report with `Health Score: 100/100`,
+      `Power-On Hours: 0`, `Temperature: 0°C` and `✅ No issues detected` when both data
+      sources are unavailable.
+- **Root cause:** `_run_command` only prefixes `❌` on executor exceptions. A
+  command-not-found produces `zsh:1: command not found: smartctl` plus
+  `⚠️ Exit code: 127`. That string is not `❌`, so it is treated as success: `json.loads`
+  fails, the text fallback (`smartctl -a`) also fails, and `parse_smart_text()` returns an
+  empty `SmartDevice`. `format_smart_summary()` in `smart_parser.py` renders empty fields as
+  zeros and prints `✅ No issues detected` when no attributes are flagged.
+- **Repro (live):** `get_disk_health("sda")` on a host without `smartctl` on `PATH`.
+- **Required behaviour:** return an explicit error ("no SMART data available; InfluxDB
+  disabled and smartctl unavailable/failed") and never render a health score without a data
+  source.
+- **Implementation sketch:**
+  - Treat `⚠️ Exit code:` and `command not found` as failures before JSON parsing.
+  - Make `parse_smart_text()` fail (return `None`) when it finds no device/health/attribute
+    data; make `format_smart_summary()` refuse empty devices.
+  - Prefer InfluxDB; only fall back to `smartctl` when a usable response is parsed.
+- **Tests:** add cases for exit-code text, empty text, and JSON parse failure asserting an
+  error string and the absence of `100/100` / `No issues detected`.
+- **Done (unreleased):** command failures are detected before parsing;
+  `parse_smart_text()` returns `None` for unusable text; `format_smart_summary()` refuses
+  empty devices; regression tests cover the error paths.
+
+#### P0-2 NVMe device names do not match InfluxDB tag values
+
+- [x] **Fix and test.** `list_disks` returns `nvme0n1` / `nvme1n1`, but Telegraf writes
+      `device=nvme0` / `device=nvme1` (namespace-less). `_get_influxdb_latest_device` and
+      `_get_influxdb_latest_attributes` use exact equality (`WHERE device = 'nvme0n1'`), so
+      they never match and silently fall through to the broken smartctl path from P0-1.
+      `get_nvme_health` already strips the `n1` suffix; `get_disk_health` and
+      `get_smart_attributes` do not.
+- **Repro (live):** InfluxDB `SELECT DISTINCT device ...` returns
+      `sda,sdb,sdc,sdd,nvme0,nvme1`; `list_disks` returns `nvme0n1,nvme1n1`.
+- **Options:** normalize `nvmeXnY` → `nvmeX` in the lookup, or match
+      `device = '<base>' OR device LIKE '<base>%'`, or expose aliases in config.
+- **Tests:** a lookup test that seeds `device=nvme0` and queries `nvme0n1`; cover both
+      `get_disk_health` and `get_smart_attributes`.
+- **Docs:** update the device-name section and the `get_smart_attributes("nvme0n1")` example
+      in `docs/tools.md`.
+- **Done (unreleased):** both InfluxDB lookups normalize `nvmeXnY` to `nvmeX`; live
+  `get_disk_health("nvme0n1")`, `get_smart_attributes("nvme0n1")` and
+  `get_nvme_health("nvme0n1")` now return real InfluxDB data.
+
+#### P0-3 SMART fallback cannot work on a standard Ubuntu host
+
+- [x] **Fix.** The fallback commands use bare `smartctl` / `nvme` (in `get_disk_health`,
+      `get_smart_attributes`, `get_nvme_health`, `run_smart_test` and
+      `_get_full_report_via_ssh`). Non-interactive SSH sessions do not include `/usr/sbin`
+      in `PATH`, so the commands fail even when `smartmontools` is installed.
+- [x] Use absolute paths (`/usr/sbin/smartctl`, `/usr/sbin/nvme`); they are already in
+      `SAFE_COMMAND_PREFIXES` in `security.py`.
+- [x] **Decide the `sudo` policy.** Keep the global `sudo` block: the MCP requires the
+      executor user to have block-device access (for example the `disk` group), and
+      InfluxDB remains the preferred source. Documentation and error hints now match this
+      policy.
+- **Acceptance:** `get_smart_attributes("sda")` either returns data or a clear
+      permission/availability error, never a command-not-found.
+- **Done (unreleased):** absolute paths are used for every host-tool fallback. Live
+  verification reaches `/usr/sbin/smartctl` and `/usr/sbin/nvme`, but the executor user
+  currently gets `Permission denied`; the tools now report that clearly instead of
+  fabricating health data or claiming the command is missing.
+
+#### P0-4 `get_service_status` cannot report container health
+
+- [x] **Fix and test.** `INSPECT_FORMAT` in
+      `apps/remote-server-mcp/src/remote_server_mcp/operations.py` omits `.State.Health`, so
+      an unhealthy container looks healthy. Example: `deluge` has been `unhealthy` for days
+      while `get_service_status("deluge")` shows `State: running`.
+- [x] Add `Health`, `FailingStreak`, and `ExitCode` to the inspect format.
+- [x] Add a `get_container_health` tool that returns `State.Health.Log` (last N entries)
+      with a read-only annotation, or expose it through `get_service_status` as an extra
+      section.
+- **Acceptance:** `get_service_status("deluge")` shows `Health: unhealthy`; the failing
+  probe output is retrievable.
+- **Done (unreleased):** `get_service_status` reports the health fields and
+  `get_container_health` returns the last N probe results. Tests cover health, no-healthcheck,
+  Docker-error and entry-clamping paths.
+
+#### P0-5 Secure the command policy fall-through
+
+- [x] **Fix and test.** `packages/server-management-lib/src/server_management_lib/security.py`
+      has a permissive blacklist: `is_command_safe` falls through to `return True` for
+      unknown commands, and `security.allow_generic_commands` is never read. RSM is
+      protected by its operation catalog; DHM still relies on this policy.
+- [x] Choose one and enforce it:
+  - Convert DHM to an operation catalog (preferred; it also makes command construction
+    consistent with RSM) and delete the fall-through.
+  - Or make the policy explicitly allowlist-based for every executable.
+- [x] Add tests that unknown commands are rejected and that
+      `security.allow_generic_commands` cannot enable arbitrary execution.
+- **Done (unreleased):** `disk-health-mcp` now uses `operations.py` with the shared
+  `Operation` template, and `is_command_safe()` rejects anything outside an exact argv
+  allowlist. Shell syntax, unknown executables and `docker run`/`docker exec` are rejected;
+  `allow_generic_commands` has no effect. Tests assert both catalogs pass the policy and that
+  unknown commands fail.
+
+### 3.2 P1 — capability, usability and library hardening
+
+#### P1-1 The service model assumes `/srv/<dir> == container name`
+
+- [x] **Fix.** 19 of 43 running containers are unreachable because the tool requires a
+      matching `/srv/<service>` directory *and* uses that name for `docker inspect/logs/stats`.
+      Examples: `immich-server`, `immich-postgres`, `dawarich-sidekiq`, `cypht-db`,
+      `influxdb-explorer`, `socket-proxy`, `watchtower`, `wud`.
+- **Repro:** `get_service_status("immich")` → `error: no such object: immich`;
+  `get_service_status("immich-server")` → `❌ Service 'immich-server' does not exist in /srv/`.
+- [x] Add `list_containers` (`docker ps -a`) so stopped/crashed containers are discoverable.
+      Today a container that never started is invisible (`vllm` is a live example).
+- [x] Accept either a service directory or a container name. When a directory is given,
+      resolve its containers via the `com.docker.compose.project` label; otherwise use the
+      container name directly.
+- [x] Keep the security boundary: still require the target to belong to a directory under
+      `services_path` (or an explicit container allowlist via
+      `security.allowed_containers`), and never accept arbitrary `docker` arguments.
+- **Tests:** resolve `immich` → its containers; reject `../../etc`; parse `docker ps -a`.
+- **Docs:** replace the "container is assumed to have the same name" statement in
+  `docs/tools.md` with the real resolution rules.
+- **Done (unreleased):** `resolution.py` resolves directories through the compose project
+  label (with a same-name fallback for legacy deployments) and accepts container names
+  that map to a service directory or are allowlisted. `list_containers` reports stopped and
+  crashed containers, and the container tools label multi-container output per container.
+  Tests cover project resolution, container-name resolution, the allowlist, unknown and
+  traversal targets, `docker ps -a` parsing and `list_containers` errors.
+
+#### P1-2 No host-service or NAS-aware diagnostics
+
+- [x] **Add tools.** `remote-server-mcp` now exposes read-only `get_host_service_status`
+      and `get_host_service_logs`, backed by `systemctl status` / `journalctl -u`. Unit
+      names are validated by `SecurityValidator.validate_host_unit()` against the new
+      `security.host_units` allowlist (default: `telegraf`, `smartd`, `docker`, `snapraid`,
+      `mergerfs`, `smbd`); arbitrary units are rejected before execution.
+- [x] `disk-health-mcp` now exposes `get_snapraid_status` (`snapraid status`) and
+      `get_mount_status` (`findmnt` plus `df`), gated by `host.enabled`.
+- [x] `get_zfs_status`/`get_raid_status` are kept. `docs/tools.md` maps ZFS, mdadm and
+      mergerFS + SnapRAID to the matching tools; `README.md` and `docs/architecture.md`
+      state that host infrastructure services are in scope through the allowlist.
+- **Acceptance:** `get_host_service_logs("telegraf", lines=200)` renders
+  `journalctl -u telegraf -n 200 ...`; arbitrary unit names are rejected; SnapRAID and
+  mergerFS state are reported. Covered by app and library tests.
+
+#### P1-3 `.env` files are blocked, with a misleading error
+
+- [x] **Fix.** `SENSITIVE_FILE_PATTERNS` in `security.py` substring-matches `.env`,
+      `secret`, `token`, `password`, `.key`, etc. against the path.
+      `get_service_file("cypht", ".env")` returns
+      `❌ Invalid file path: .env / File must be within /srv/cypht/`, which is both wrong and
+      unhelpful. This blocks the primary way to debug compose stacks whose `compose.yml` only
+      contains `${VARS}`.
+- [x] Prefer reading and **redacting values** (`KEY=***`) over rejecting the file; if full
+      rejection is kept, return a specific "blocked by sensitive-file policy" error.
+- [x] Remove substring false positives (`monkey.txt` matching `.key`, `tokenizer.json`
+      matching `token`); match path components / extensions instead.
+- **Tests:** `.env` read returns redacted output; `../../etc/shadow` is still blocked; add a
+  regression test for the misleading message.
+- **Done (unreleased):** the substring list is replaced by `BLOCKED_PATH_COMPONENTS`,
+  `BLOCKED_PATH_SUFFIXES` and the `REDACTED_PATH_*` sets, matched per path component and
+  extension. `SecurityValidator.check_service_file_path()` returns a `ServiceFilePath` with
+  `ALLOW`, `REDACT`, `BLOCKED_INVALID` or `BLOCKED_SENSITIVE`, so `get_service_file` can
+  distinguish a policy refusal from a bad path. `.env`/`.env.*`/`*.env` reads are returned
+  with `KEY=***` via `redact_env_content()`; keys, comments and blank lines are preserved.
+  Tests cover redaction, the false positives, policy vs invalid errors and the
+  `../../etc/shadow` regression.
+
+#### P1-4 `get_server_health` is NAS-blind
+
+- [x] **Fix.** `DISK_USAGE` in `operations.py` ran `df -h /srv`, which is on the root
+      filesystem. The 48 TB mergerFS pool (`/mnt/storage`) and `/mnt/data*`, `/mnt/parity*`
+      were never shown.
+- [x] Add configurable `health.disk_paths` (default `["/"]`) or report all local mounts and
+      deduplicate. Include unhealthy containers in the summary.
+- **Acceptance:** the tool reports the mergerFS pool and root usage separately.
+- **Done (unreleased):** `SecurityValidator.health_disk_paths` reads
+  `health.disk_paths`, validates each entry as a shell-safe absolute path, normalises it
+  with `PurePosixPath` and deduplicates without reordering. `get_server_health` renders
+  one `df -h <path>` block per mount (default `["/"]`), so `/` and `/mnt/storage` are
+  reported separately, and adds an `=== Unhealthy Containers ===` section backed by
+  `docker ps -a --filter health=unhealthy`. Tests cover ordering, normalisation,
+  deduplication, invalid/relative/traversal entries, the root fallback, the per-path
+  commands and the unhealthy section.
+
+#### P1-5 Log and search tools are limited for incident work
+
+- [x] Add `--since`/`--until` and timestamps to `docker logs`; `--tail N` alone makes time
+      correlation hard.
+- [x] Let `get_service_logs`/`search_service_logs` target a specific container in a compose
+      project (depends on P1-1).
+- [x] `search_service_logs` sanitizes the pattern and then matches the **sanitized** string,
+      so characters such as `!`, `#`, `~`, quotes silently change the search. Filter with the
+      exact pattern (matching happens locally, so no shell escaping is needed) and validate
+      length/control characters only.
+- [x] Show `docker stats` as "not running" instead of `0B / 0B` for stopped containers.
+- **Done (unreleased):** `docker logs` always renders `--timestamps`; both log tools accept
+  optional `since`/`until` and `container` arguments. `SecurityValidator.validate_log_time()`
+  accepts only RFC3339 timestamps, dates or relative durations, so a value cannot become a
+  Docker option. `sanitize_search_pattern()` is replaced by `validate_search_pattern()`,
+  which preserves the exact pattern and rejects only empty, overlong or control-character
+  input. `get_service_status` replaces zeroed stats for a stopped container with an explicit
+  "not running" message. Tests cover exact punctuation matching, time-filter rendering and
+  validation, per-container targeting and stopped-container stats.
+
+#### P1-6 Standby rows are formatted as health data
+
+- [x] **Fix and test.** With `nocheck=standby`, Telegraf emits a `smart_device` row every
+      interval with `exit_status=2` and no `health_ok`/`temp_c`. `get_disk_health` currently
+      treats that row as real data and renders `Unknown`/0°C/0 hours.
+- [x] Filter `exit_status != 0` and use the last valid sample (look back 24h), reporting its
+      age. The hardcoded 10-minute lookback is also too narrow for a 5-minute poll plus
+      sleeping disks.
+- **Tests:** a standby-only series returns an explicit "no recent valid sample" message, not
+  zeroed health fields.
+- **Done (unreleased):** `smart_device` and `smart_attribute` lookups require
+  `exit_status = 0` and use a 24-hour lookback. Health reports and the disk overview show the
+  sample timestamp and age, and missing fields are omitted instead of rendered as zero. With
+  InfluxDB only and a standby-only series, `get_disk_health` returns an explicit no-valid-
+  sample error. Tests cover the standby row shape, the filtered queries, age formatting,
+  missing fields and the InfluxDB-only path.
+
+#### P1-7 Metric endpoints: HTTPS proxy and loopback SSH tunnel
+
+- [x] **Live configs.** InfluxDB is enabled in both configs with the SWAG HTTPS endpoint,
+      `use_https: true`, `database: system-monitor`, and the token from `.env`. Prometheus is
+      disabled because the service was retired from the host.
+- [x] **Fix the sample configs and docs.** `apps/disk-health-mcp/.env.example` uses a
+      generic database name and both `.env.example` files show `use_https`. The sample
+      configs and `docs/configuration.md` now use non-loopback HTTPS examples and explain
+      that `host` is a hostname/IP, never a URL.
+- [x] Document both supported modes: (a) HTTPS reverse proxy (SWAG) + token, (b) an
+      explicit local SSH tunnel for loopback-only deployments.
+- [x] Optional `ssh_tunnel` config block. `tunnel.py` opens a loopback-only local forward
+      over the configured SSH connection at server startup, rewrites the section's
+      `host`/`port` to the endpoint, and closes it on shutdown. The destination and remote
+      port are operator configuration; the model cannot influence them.
+- [x] Clarify that `query_prometheus_disk`'s `smartmon_*` examples require
+      `node_exporter` (smartmon collector). Prometheus is optional and is not a
+      prerequisite for disk health; Telegraf -> InfluxDB remains the SMART source.
+- **Done (unreleased):** `.env.example` files, both `config.example.yaml` files,
+  `README.md`, the app READMEs, `docs/configuration.md`, `docs/tools.md`,
+  `docs/architecture.md`, `docs/security-model.md` and `CHANGELOG.md` describe the two
+  endpoint modes. Unit tests cover tunnel validation, startup/open failure cleanup and
+  shutdown; no live tunnel was available on the reference deployment because InfluxDB is
+  reached over SWAG.
+- **Acceptance:** with a token and the SWAG URL, `query_influxdb` returns data on this
+  deployment (verified at the library level; re-verify through the MCP tools after
+  restarting the server processes). `query_prometheus`/`get_prometheus_targets` report
+  "not enabled" while Prometheus is retired.
+
+#### P1-8 Local path resolution in `validate_service_file_path`
+
+- [x] **Fix.** `security.py` still called `Path.resolve()` on the MCP host for a remote path.
+      The SFTP layer performs the authoritative remote `realpath` check, but a local `/srv`
+      symlink could still change or break the constructed path. The remote path is now built
+      lexically with `PurePosixPath` and resolution is left to the executor.
+- **Tests:** the returned path is lexical (a symlink below `services_path` on the MCP host is
+  not followed) and traversal is still rejected.
+- **Done (unreleased):** `check_service_file_path()` joins the service base and the relative
+  path with `PurePosixPath`, checks the lexical result is still below the base, and no longer
+  imports or calls `Path.resolve()`. The SSH executor still verifies the remote `realpath`
+  before reading; the local executor does the equivalent on the target filesystem.
+
+#### P1-9 Single response cap for composite/list results
+
+- [x] **Fix.** `execute_safe_command` caps each command, but `list_service_files`,
+      `get_service_status`, `get_full_disk_report` and directory listings can concatenate
+      multiple capped outputs or return a very large listing.
+- [x] Apply a final `sanitize_output` cap to the complete tool response.
+- **Tests:** a composite response larger than `output.max_bytes` is truncated exactly once
+  with the standard marker.
+- **Done (unreleased):** both MCP servers apply a final `sanitize_output` cap (`tool output`)
+  to composite and listing responses, including service files, server health, host-service
+  logs, ZFS/RAID/SnapRAID/mount summaries and the full disk report. `sanitize_output()` is
+  idempotent at the same limit, so a nested cap cannot append a second truncation marker.
+  Tests cover oversized directory listings and composite command output.
+
+#### P1-10 Audit HTTP queries
+
+- [x] **Fix.** The audit log covered commands, blocked operations and file access. InfluxDB
+      and Prometheus queries were not recorded. `InfluxDBClient` and `PrometheusClient` now
+      accept an `AuditLogger` and log query metadata (length/SHA-256, database, status,
+      duration) without storing query text that may contain secrets.
+- **Tests:** enabled audit log records an InfluxDB and a Prometheus query with redacted
+  metadata.
+- **Done (unreleased):** `create_audit_logger()` builds the logger from the shared `audit`
+  config section. Both servers pass it to their HTTP clients. `influxdb_query` and
+  `prometheus_query` records contain `query_length`, `query_sha256`, `status`,
+  `duration_ms` and (for InfluxDB) `database`; connection errors and timeouts are recorded
+  by exception type. The query text is never written to the log.
+
+#### P1-11 `run_smart_test` pre-flight
+
+- [x] **Fix.** `run_smart_test` is not covered by a host-availability test. Pre-flight
+      `smartctl` and return a clear error when it is unavailable.
+- [x] Do not run tests on disks that may be spun down without an explicit user action.
+- **Tests:** mock an unavailable `smartctl` and assert the error, with no write operation
+  attempted.
+- **Done (unreleased):** `run_smart_test` runs `/usr/sbin/smartctl --version` first. That
+  pre-flight never opens a block device, so it cannot spin up a sleeping disk. If the
+  version check fails, the tool returns "SMART self-tests unavailable ... No test was
+  started" and never renders the write command. The test itself uses `-n standby`, so
+  smartctl skips a sleeping disk (exit status 2) instead of waking it; the tool reports that
+  no self-test was started and asks the operator to wake the disk explicitly and retry.
+  Tests cover both the missing-tool and standby paths.
+
+### 3.3 P2 — modernization and polish
+
+#### P2-1 Structured tool outputs
+
+- [ ] **Fix.** Tools return formatted strings; clients cannot consume typed results. Return
+      pydantic models/dicts (and keep a readable text fallback) using `MCPServer` structured
+      output.
+
+#### P2-2 Streamable HTTP transport
+
+- [ ] **Fix.** Only stdio is implemented. Add an opt-in `--transport streamable-http` path
+      (loopback/token protected) for clients that cannot launch a process.
+
+#### P2-3 Container runtime adapter
+
+- [ ] **Fix.** `docker` is hardcoded in
       `apps/remote-server-mcp/src/remote_server_mcp/operations.py`. Add
       `container_runtime: docker|podman|nerdctl` and build operations from the selected
       runtime.
-- [ ] **Compose deployment operations.** There is no `compose up/down/pull/ps`. Add a small,
-      explicit set of compose operations scoped to `services_path/<service>/`, with a
-      dry-run or confirmation argument.
-- [ ] **Rate limiting and destructive-action confirmation.** `restart_service` and
-      `stop_service` execute immediately. Add a `confirm` parameter or MCP elicitation, and
-      a simple per-session rate limit.
 
-### 3.2 Partial implementations to finish
+#### P2-4 Compose deployment operations
 
-- [ ] **`is_command_safe` is still a permissive blacklist.**
-      `packages/server-management-lib/src/server_management_lib/security.py` falls through
-      to `return True` for unknown commands, and `security.allow_generic_commands` is never
-      read. RSM is protected by its operation catalog; DHM still relies on this policy.
-      Either convert DHM to an operation catalog and delete the fall-through, or make the
-      policy explicitly allowlist-based.
-- [ ] **Local path resolution in `validate_service_file_path`.**
-      `security.py` still calls `Path.resolve()` on the MCP host for a remote path. The SFTP
-      layer now performs the authoritative remote `realpath` check, but a local `/srv`
-      symlink can still change or break the constructed path. Build the remote path
-      lexically with `PurePosixPath` and leave resolution to the executor.
-- [ ] **Single response cap for composite/list results.**
-      `execute_safe_command` caps each command, but `list_service_files`,
-      `get_service_status`, `get_full_disk_report` and directory listings can concatenate
-      multiple capped outputs or return a very large listing. Apply a final
-      `sanitize_output` cap to the complete tool response.
-- [ ] **Audit HTTP queries.**
-      The audit log covers commands, blocked operations and file access. InfluxDB and
-      Prometheus queries are not recorded. Pass an `AuditLogger` to the HTTP clients and log
-      query metadata (length/hash, database, status, duration) without storing secrets.
-- [ ] **DHM operation catalog.**
-      Disk-health commands are inline strings in
-      `apps/disk-health-mcp/src/disk_health_mcp/server.py`. They are built from validated
-      device names, but moving them into `operations.py` (or a shared catalog) makes the
-      construction model consistent with RSM.
-- [ ] **CI markdown enforcement.**
-      `.github/workflows/ci.yml` runs ruff, format, ty and pytest, but not `pymarkdown` or
-      `check-md-links`. Add both steps (or run `pre-commit` in CI) so documentation checks
-      are enforced remotely.
-- [ ] **Known_hosts summary logging.**
-      The loader logs up to three skipped entries plus a count. Aggregate skipped entries
-      into one summary warning per file.
+- [ ] **Fix.** There is no `compose up/down/pull/ps`. Add a small, explicit set of compose
+      operations scoped to `services_path/<service>/`, with a dry-run or confirmation
+      argument.
 
-### 3.3 Release and migration
+#### P2-5 Rate limiting and destructive-action confirmation
 
-- [ ] **Create the remote repository.** Recommended: new `elmuz/server-mcp`; archive the
-      three old repositories after adding a “moved” notice. Commands are in
-      `docs/releasing.md`.
-- [ ] **Push `main` and create the `v0.2.0` tag.** No remote or tag exists yet.
-- [ ] **Publish to PyPI.** `server-management-lib` first, then the two apps. All three names
-      are currently free. Until then `uvx remote-server-mcp` does not work; only
-      `uv run` from the workspace does.
-- [ ] **Archive the old repositories.** `remote-server-mcp`, `disk-health-mcp` and
-      `server-management-lib` are still live and could be mistaken for the current code.
-- [ ] **Make the CI badge live.** The README badge points at the future repository.
-- [ ] **Prerequisite:** `gh` is not installed in the development environment; use it or the
-      GitHub web UI for the push/archive steps.
+- [ ] **Fix.** `restart_service` and `stop_service` execute immediately. Add a `confirm`
+      parameter or MCP elicitation, and a simple per-session rate limit.
 
-### 3.4 Community and packaging polish
+#### P2-6 CI markdown enforcement
+
+- [ ] **Fix.** `.github/workflows/ci.yml` runs ruff, format, ty and pytest, but not
+      `pymarkdown` or `check-md-links`. Add both steps (or run `pre-commit` in CI) so
+      documentation checks are enforced remotely.
+
+#### P2-7 Known_hosts summary logging
+
+- [ ] **Fix.** The loader logs up to three skipped entries plus a count. Aggregate skipped
+      entries into one summary warning per file.
+
+#### P2-8 MCP resources and resource templates
+
+- [ ] **Optional.** No MCP resources are exposed (`list_mcp_resources` is empty). Consider
+      exposing the config schema and tool catalog as resources.
+
+#### P2-9 Community and packaging polish
 
 - [ ] Add `[project.urls]`, `classifiers`, `keywords` and `authors` to the package metadata.
 - [ ] Add `CODE_OF_CONDUCT.md`, issue templates, a pull-request template and `CODEOWNERS`.
-- [ ] Consider Python 3.14 in the CI matrix (currently 3.11–3.13).
+- [ ] Consider Python 3.14 in the CI matrix (currently 3.11–3.13; local verification already
+      runs on 3.14).
 - [ ] Consider a short demo/screenshot section in the README once the repository is public.
 
-## 4. Verification snapshot (0.2.0)
+### 3.4 Release and migration
 
-From a clean clone:
+- [ ] **Fix the red CI run before tagging.** Run
+      [39123943472](https://github.com/elmuz/server-mcp/actions/runs/39123943472) failed in
+      `remote-server-mcp` tests on Python 3.12. A local run on Python 3.12.15 passes, so
+      inspect the job log or rerun to distinguish a flake from an environment-specific
+      failure.
+- [x] **Create the remote repository.** `elmuz/server-mcp` exists and is configured as
+      `origin`.
+- [x] **Push `main`.** `origin/main` matches the local `main` at `a8c55db`.
+- [ ] **Create and push the `v0.2.0` tag.** No tag exists locally or remotely. Commands are
+      in `docs/releasing.md`.
+- [ ] **Publish to PyPI.** `server-management-lib` first, then the two apps. PyPI currently
+      returns 404 for all three names, so `uvx remote-server-mcp` does not work; only
+      `uv run` from the workspace does.
+- [x] **Archive the old repositories.** `remote-server-mcp`, `disk-health-mcp` and
+      `server-management-lib` are archived on GitHub.
+- [x] **Make the CI badge live.** The README badge URL resolves; it is red until the CI item
+      above is fixed.
+- **Prerequisite:** `gh` is not installed in the development environment. Use `git` to push
+  the tag and the GitHub web UI/API for any remaining repository settings.
 
-| Check | Result |
-|---|---|
-| `uv sync --locked --all-packages --all-extras` | passes |
-| `server-management-lib` tests | 177 passed, 92% coverage |
-| `remote-server-mcp` tests | 144 passed (+17 integration opt-in), 61% coverage |
-| `disk-health-mcp` tests | 65 passed, 57% coverage |
-| `ruff check`, `ruff format --check`, `ty check` | pass |
-| `pre-commit run --all-files` | all hooks pass |
-| `uv build --all-packages` | all three wheels/sdists build, `py.typed` included |
+### 3.5 Cross-repo prerequisites (`~/projects/catafalco`)
 
-## 5. Decisions
+These are deployment issues, not server-mcp bugs, but they change what the MCP can observe.
+They are listed so the MCP work is not "fixed" against a broken environment.
 
-- Monorepo with a uv workspace; the two MCP servers stay separate for least privilege.
-- History imported with `git subtree` (merge commit per repository) because
-  `git-filter-repo` was unavailable.
-- Recommended remote is a new `elmuz/server-mcp` repository; reusing/renaming
-  `remote-server-mcp` is documented as an alternative.
-- Local executor instead of multi-target support (explicit user decision).
-- No runtime SMART database refresh; generation is an explicit offline script.
+- [ ] **The `containers` list does not gate role execution.** Only SWAG network discovery and
+      backups consume it. `redlib` was in the list but not in the playbook (now removed);
+      `vllm` was in the playbook but not running (now removed). Either implement gating or
+      correct the docs/AGENTS.md.
+- [ ] **InfluxDB 3 Core has no read-only tokens.** Version 3.12.1 only supports
+      `influxdb3 create token --admin` (permissions `*:*:*`); there is no `--permission` flag.
+      Use a dedicated named admin token (shorter expiry, separate from Telegraf/Grafana) plus
+      a query-only reverse proxy or an SSH tunnel, or move to InfluxDB 3 Enterprise if
+      fine-grained tokens are required.
+- [ ] **Optional SMART hardening.** Set an explicit `[[inputs.smart]] devices = [...]` list
+      using `/dev/disk/by-id/...` paths with `-d sat` / `-d nvme`. This removes the
+      theoretical device-type-autodetection spin-up path and the per-interval `--scan`. The
+      current `nocheck="standby"` setup is empirically safe (hd-idle log shows ~3 h standby
+      periods), so this is belt-and-braces, not urgent.
+- [ ] **AGENTS.md examples that cannot work in the catafalco repo:**
+      `restart_service(service="telegraf")` / `get_service_logs(service="telegraf")` (host
+      service), Telegraf deploy via `--tags containers` (tags are `telegraf`, `monitoring`),
+      and `docker-compose.yml` (actual name is `compose.yml` or no file at all).
+- [x] **Do not add `node_exporter`.** SMART data comes from Telegraf/InfluxDB; there are no
+      `smartmon_*` metrics. Prometheus remains optional and is retired on this host.
 
-## 6. Resume instructions
+## 4. Documentation drift
 
-1. Pick an item from section 3; each checkbox names the file or area to change.
-2. Run the full suite:
+These are part of their parent items; do not close a parent until the documentation is
+updated.
+
+- **P0-2:** device-name section and `get_smart_attributes("nvme0n1")` example must mention
+  InfluxDB tag normalisation.
+- **P0-3:** `docs/tools.md` recommends passwordless sudo for `smartctl`, but `sudo` is
+  blocked by `is_command_safe`; make the docs and policy agree.
+- [x] **P1-8/P1-9/P1-10:** `docs/security-model.md` describes the lexical path construction,
+  the final composite cap and HTTP query auditing; `docs/configuration.md` documents the
+  audit metadata.
+- [x] **P1-11:** `docs/tools.md` documents the `smartctl --version` pre-flight and the
+  `-n standby` skip.
+- [x] **P1-1:** replace the "Docker container is assumed to have the same name" statement
+  with the real resolution rules (`docs/tools.md`, `docs/configuration.md`,
+  `docs/architecture.md`, README and `config.example.yaml`).
+- **P1-2:** `README.md` and `docs/architecture.md` must mention host infrastructure services
+  and the `systemctl`/`journalctl` allowlist.
+- [x] **P1-7:** `apps/disk-health-mcp/.env.example` now uses `INFLUXDB_DATABASE=my-db`, and
+  the configuration docs describe the HTTPS reverse-proxy and SSH-tunnel modes.
+- **All tool changes:** update `README.md`, `docs/tools.md`, `docs/configuration.md`,
+  `docs/security-model.md` and `CHANGELOG.md` in the same change.
+- `docs/tools.md` example `get_service_file("grafana", "docker-compose.yml")` is wrong:
+  Grafana is deployed with `community.docker.docker_container` and has no compose file. Use
+  a real file (for example `provisioning/datasources/influxdb.yml`).
+
+## 5. Implementation order
+
+1. **P0:** complete (P0-1 through P0-5).
+2. **Observability:** P1-1 container resolution + `list_containers`.
+3. **Host and NAS:** P1-2 host services + SnapRAID/mergerFS, P1-4 health mounts.
+4. **Usability:** P1-3 `.env` redaction, P1-5 log filters, P1-6 standby rows, P1-11
+   `run_smart_test` pre-flight.
+5. **Library hardening:** P1-8 path resolution, P1-9 response cap, P1-10 HTTP audit.
+6. **Config/docs:** P1-7 and section 4.
+7. **Modernization:** P2 items individually.
+8. **Release:** section 3.4 after the P0/P1 work is merged and verified.
+
+Suggested PR split:
+
+- PR 1 (unreleased): P0 disk-health correctness (P0-1, P0-2, P0-3) + tests.
+- PR 2 (unreleased): P0 command policy (P0-5) and the DHM operation-catalog move.
+- PR 3: container health + resolution + `list_containers` (P0-4, P1-1). Both are complete
+  in the unreleased worktree.
+- PR 4: host-service tools + SnapRAID/mergerFS (P1-2, P1-4).
+- PR 5: file/log/health usability (P1-3, P1-5, P1-6, P1-11).
+- PR 6: library hardening (P1-8, P1-9, P1-10).
+- PR 7: config examples and docs (P1-7, section 4).
+- Later PRs: P2 items, then release/migration.
+
+## 6. Verification
+
+### 6.1 Local suite
 
 ```bash
 cd ~/code/server-mcp
@@ -171,7 +575,130 @@ uv run --directory packages/server-management-lib pytest -q
 uv run --directory apps/remote-server-mcp pytest -q
 uv run --directory apps/disk-health-mcp pytest -q
 env -u VIRTUAL_ENV pre-commit run --all-files
+uv build --all-packages
 ```
 
-1. Update this file and `CHANGELOG.md` when an item is completed.
-2. For release steps, follow `docs/releasing.md`.
+### 6.2 Current snapshot
+
+| Check | Result |
+|---|---|
+| `server-management-lib` tests | 271 passed, 93% coverage |
+| `remote-server-mcp` tests | 224 passed (+17 integration opt-in), 84% coverage |
+| `disk-health-mcp` tests | 113 passed, 77% coverage |
+| Python version used locally | 3.14.8 |
+| `ruff check`, `ruff format --check`, `ty check` | pass (verified 2026-10-18) |
+| `pre-commit run --all-files` | all hooks pass (verified 2026-10-18) |
+| `uv build --all-packages` | all three wheels/sdists build, `py.typed` included (0.2.0 snapshot) |
+
+### 6.3 Live smoke checks (read-only)
+
+Run after restarting the MCP servers with the updated config and again after each P0/P1 PR
+that touches the relevant tool.
+
+```text
+get_server_health()
+list_services()
+list_containers()                                  # stopped and crashed containers too
+get_service_status("deluge")                       # expect Health: unhealthy
+get_container_health("deluge")                     # expect the failing probe output
+get_service_status("immich-server")                # expect it to work after P1-1
+get_host_service_status("telegraf")                # after P1-2
+get_host_service_logs("telegraf", lines=200)       # after P1-2; journalctl -u
+get_host_service_status("sshd")                    # expect "Host unit not allowed"
+get_disk_health("nvme0n1")                         # expect real InfluxDB data after P0-2
+get_snapraid_status()                              # after P1-2
+get_mount_status()                                 # after P1-2; mergerFS + df
+get_service_logs("immich-server", lines=100, since="1h")   # after P1-5
+search_service_logs("immich", "connection refused", since="1h")  # after P1-5
+get_service_status("vllm")                         # stopped: no zeroed stats
+get_disk_health("sda")                             # expect valid data plus sample age after P1-6
+get_disk_health("vda")                             # expect explicit no-data error, not 100/100
+get_smart_attributes("sda")
+get_service_file("cypht", ".env")                  # expect redacted values after P1-3
+query_influxdb("SELECT device, health_ok FROM smart_device WHERE time > now() - INTERVAL '1 hour' ORDER BY time DESC LIMIT 10")
+query_prometheus("up")                             # expected: "not enabled" (Prometheus retired)
+```
+
+Observed on 2026-10-18: `nvme0n1` and `sda` returned real InfluxDB data, `vda`
+returned the explicit no-data error, and the absolute `smartctl`/`nvme` commands reached
+the host but the executor user received `Permission denied`. That permission result is the
+expected no-sudo policy; use InfluxDB or grant block-device access.
+
+For P1-5/P1-6, after the worktree changes: `get_service_logs("immich")` with
+`lines=5`, `since="1h"` and `container="immich-server"` rendered
+`docker logs --tail 5 --timestamps --since 1h -- immich-server` and returned timestamped
+lines; `search_service_logs` matched the literal phrase. `get_disk_health("sda")` used the
+last valid sample from 21:05 despite newer standby rows and reported
+`Sample: 55 minutes ago`; the overview reported sample ages for all six devices instead of
+`0°C`/`0 hours`.
+
+For P1-1, after the worktree changes: `list_containers()` reported all 43 containers and
+their service mapping; `get_service_status("immich")` returned `immich-server`,
+`immich-machine-learning`, `immich-postgres` and `immich-redis`;
+`get_service_status("immich-server")` resolved through the `immich` project; `watchtower`
+was rejected with the allowlist hint. Remaining containers without a directory or project
+label (for example `watchtower`, `wud`, `socket-proxy`) still need
+`security.allowed_containers`.
+
+## 7. Decisions
+
+- Monorepo with a uv workspace; the two MCP servers stay separate for least privilege.
+- History imported with `git subtree` (merge commit per repository) because
+  `git-filter-repo` was unavailable.
+- Recommended remote is a new `elmuz/server-mcp` repository; reusing/renaming
+  `remote-server-mcp` is documented as an alternative.
+- Local executor instead of multi-target support (explicit user decision).
+- No runtime SMART database refresh; generation is an explicit offline script.
+- InfluxDB is the primary SMART source; `smartctl` is an explicit fallback and must never
+  fabricate a healthy result.
+- Do not add `node_exporter` for the reference deployment; Prometheus is optional and
+  retired there.
+- Host infrastructure services are in scope only through a configured unit allowlist.
+
+## 8. Resume instructions
+
+1. Pick an item from section 3. Each checkbox names the file or area to change.
+2. Read the relevant code/doc section before editing; keep the security model in
+   `docs/security-model.md` intact.
+3. Add or update tests in the same PR (P0 items require regression tests).
+4. Run the local suite in section 6.1.
+5. Run the relevant live smoke checks in section 6.3.
+6. Update this file and `CHANGELOG.md` when an item is completed; move remaining items if
+   priorities change.
+7. Do not commit `config.yaml`, `.env`, keys or tokens. Use environment variables or a
+   `.env` file next to the config with mode `0600`.
+8. For release steps, follow `docs/releasing.md`.
+
+## Appendix A — Live evidence snapshot (2026-10-18)
+
+Observed during the investigation. Values are illustrative; secrets are omitted.
+
+| Check | Observation |
+|---|---|
+| `get_server_health` disk section | Only `/dev/sdd2` mounted on `/`; no `/mnt/storage` |
+| `get_disk_health("sda")` | `Health Score: 100/100`, `Power-On Hours: 0`, `✅ No issues detected` |
+| `get_smart_attributes("sda")` | `zsh:1: command not found: smartctl`, exit 127 |
+| `get_nvme_health("nvme0n1")` | `zsh:1: command not found: nvme`, exit 127 |
+| `get_io_stats()` | `zsh:1: command not found: iostat`, exit 127 |
+| `get_raid_status()` | `cat: /proc/mdstat: No such file or directory` |
+| `get_zfs_status()` | `zsh:1: command not found: zpool`, exit 127 |
+| `list_disks()` | `sda,sdb,sdc,sdd,nvme1n1,nvme0n1` |
+| InfluxDB `smart_device.device` | `sda,sdb,sdc,sdd,nvme0,nvme1` (no `n` suffix on NVMe) |
+| `get_service_status("immich")` | `error: no such object: immich` |
+| `get_service_status("immich-server")` | `❌ Service 'immich-server' does not exist in /srv/` |
+| `get_service_status("deluge")` | `State: running` (no health), while `docker ps` says `unhealthy` |
+| `get_service_status("influxdb")` | Works; `8181/tcp -> 127.0.0.1:8181` |
+| `get_service_logs("telegraf")` | `❌ Service 'telegraf' does not exist in /srv/` |
+| `get_service_file("cypht", ".env")` | `❌ Invalid file path` (misleading; path is valid) |
+| `get_service_file("../../etc/hostname")` | Rejected (path traversal protection works) |
+| `query_influxdb(...)` | Disabled in config before the live config fix |
+| `query_prometheus(...)` | Disabled in config |
+| Prometheus `up` | Single vLLM target, value `0`, `lastError: 502 Bad Gateway` |
+| Prometheus `smartmon_*` metrics | 0 |
+| `get_service_status("vllm")` | `❌ Service 'vllm' does not exist in /srv/` (cannot see stopped containers) |
+| Deluge `State.Health.Log` | `Process 'openvpn\|wg' is not running`; `wg0` is UP and `http://127.0.0.1:8112/` returns 200 |
+| `hd-idle` log | `Data2` stayed `stopped` for 10,811 s (~3 h) while Telegraf polled SMART every 10 s |
+| InfluxDB `smart_device` | `sda` 465/720 and `sdb` 400/720 rows had `exit_status=2` (standby skip) |
+| Grafana `/api/datasources` | After cleanup: only `InfluxDB_v3_SQL` remains |
+| Grafana `/api/search` | No vLLM dashboard; System Monitor / Docker / SMART / Temperature remain |
+| `influxdb-ui` | 502 before the port fix, HTTP 200 after |

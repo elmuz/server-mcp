@@ -20,6 +20,8 @@ import asyncio
 import json
 import logging
 import os
+import re
+from datetime import UTC, datetime
 from pathlib import Path
 
 from mcp.server.mcpserver import MCPServer
@@ -31,21 +33,100 @@ from server_management_lib import (
     InfluxDBClient,
     PrometheusClient,
     SecurityValidator,
+    close_metric_tunnels,
+    create_audit_logger,
     create_executor,
     load_config,
+    open_metric_tunnels,
     parse_duration,
     resolve_config_path,
+    sanitize_output,
 )
 
+from .operations import (
+    CAT_MDSTAT,
+    DF_REAL_FILESYSTEMS,
+    FINDMNT_MERGERFS,
+    FINDMNT_MOUNTS,
+    IOSTAT,
+    LIST_DISKS,
+    MDADM_DETAIL,
+    NVME_CLI_PATH,
+    NVME_SMART_LOG,
+    SMART_JSON,
+    SMART_TEST,
+    SMART_TEXT,
+    SMART_VERSION,
+    SMARTCTL_PATH,
+    SNAPRAID_STATUS,
+    ZPOOL_LIST,
+    ZPOOL_STATUS,
+)
 from .smart_parser import (
     SmartDevice,
     format_smart_summary,
+    has_usable_smart_data,
     parse_smart_json,
     parse_smart_text,
 )
 
 APP_NAME = "disk-health-mcp"
 CONFIG_ENV_VAR = "DISK_HEALTH_MCP_CONFIG"
+
+NVME_NAMESPACE_PATTERN = re.compile(r"^(nvme\d+)n\d+$")
+EXIT_CODE_PATTERN = re.compile(r"⚠️ Exit code:\s*(-?\d+)")
+
+# A sleeping disk is sampled by Telegraf with exit_status=2 and no health,
+# temperature or wear fields. Those rows are not health data, so look back far
+# enough to find the last successful sample instead of a 10-minute window that
+# a 5-minute poll plus one sleep cycle can miss.
+SMART_LOOKBACK = "24 hours"
+INFLUX_SUCCESS_PREFIX = "✅ Query successful"
+
+
+def _parse_influx_rows(result: str) -> list[dict]:
+    """Parse an InfluxDB client response into row dictionaries."""
+    if not result.startswith(INFLUX_SUCCESS_PREFIX):
+        return []
+    try:
+        data = json.loads(result.split("\n\n", 1)[1])
+    except (json.JSONDecodeError, IndexError):
+        return []
+    if not isinstance(data, list):
+        return []
+    return [row for row in data if isinstance(row, dict)]
+
+
+def _parse_influx_time(value: object) -> datetime | None:
+    """Parse an InfluxDB timestamp, treating naive values as UTC."""
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=UTC)
+    return parsed.astimezone(UTC)
+
+
+def _format_sample_age(row: dict) -> str | None:
+    """Describe how old an InfluxDB sample is, with its UTC timestamp."""
+    timestamp = _parse_influx_time(row.get("time"))
+    if timestamp is None:
+        return None
+
+    seconds = max(0, int((datetime.now(UTC) - timestamp).total_seconds()))
+    if seconds < 60:
+        age = f"{seconds} seconds"
+    elif seconds < 3600:
+        age = f"{seconds // 60} minutes"
+    elif seconds < 86400:
+        age = f"{seconds // 3600} hours"
+    else:
+        age = f"{seconds // 86400} days"
+    return f"{age} ago ({timestamp.strftime('%Y-%m-%dT%H:%M:%SZ')})"
+
 
 logger = logging.getLogger(__name__)
 
@@ -76,6 +157,16 @@ def configure_logging() -> None:
     level_name = os.environ.get("MCP_LOG_LEVEL", "INFO").upper()
     level = getattr(logging, level_name, logging.INFO)
     logging.basicConfig(level=level)
+
+
+def _max_output_bytes() -> int:
+    output_config = config.get("output", {}) or {}
+    return int(output_config.get("max_bytes", DEFAULT_MAX_OUTPUT_BYTES))
+
+
+def _cap_composite(text: str) -> str:
+    """Apply the response cap to a tool response built from several sources."""
+    return sanitize_output(text, _max_output_bytes(), label="tool output")
 
 
 def apply_config(config_path: Path | None = None) -> Path:
@@ -116,11 +207,52 @@ async def _run_command(cmd: str) -> str:
         return f"❌ SSH error: {e}"
 
 
-def _enrich_error_output(raw_output: str, device: str = "") -> str:
-    """Add helpful hints when smartctl/nvme-cli fail due to privilege issues.
+def _command_failed(output: str) -> bool:
+    """Return True when executor output represents a failed command.
 
-    These tools require root/sudo on most systems. If the MCP server runs
-    without elevated privileges, the agent should suggest this as a likely cause.
+    The SSH executor appends ``⚠️ Exit code: N`` for non-zero exits instead of
+    raising, and some shells report command-not-found on stderr. Both must be
+    treated as failures before attempting to parse smartctl output.
+    """
+    if "❌" in output:
+        return True
+
+    match = EXIT_CODE_PATTERN.search(output)
+    if match:
+        return int(match.group(1)) != 0
+
+    return "command not found" in output.lower()
+
+
+def _influxdb_device_name(device: str) -> str:
+    """Map a kernel NVMe namespace name to the Telegraf tag value.
+
+    Telegraf's smart plugin stores ``nvme0``/``nvme1`` (namespace-less) while
+    Linux exposes ``nvme0n1``/``nvme1n1``. Other device names are unchanged.
+    """
+    match = NVME_NAMESPACE_PATTERN.match(device)
+    return match.group(1) if match else device
+
+
+def _no_smart_data_message(device: str, detail: str = "") -> str:
+    """Build an explicit no-data error instead of a fabricated health report."""
+    message = (
+        f"❌ No SMART data available for /dev/{device}.\n"
+        "InfluxDB returned no recent valid sample (or is disabled). Only rows "
+        f"with exit_status = 0 from the last {SMART_LOOKBACK} are used, so "
+        "standby rows for a sleeping disk are ignored. The smartctl fallback "
+        "did not produce data either. No health status is being inferred."
+    )
+    if detail.strip():
+        message += f"\n\n{detail.strip()}"
+    return message
+
+
+def _enrich_error_output(raw_output: str, device: str = "") -> str:
+    """Add helpful hints when smartctl/nvme-cli fail due to environment issues.
+
+    The MCP does not run commands through sudo. Direct SMART access therefore
+    requires the executor user to be able to open the block device.
     """
     lower = raw_output.lower()
     hints: list[str] = []
@@ -134,12 +266,10 @@ def _enrich_error_output(raw_output: str, device: str = "") -> str:
         "eacces",
         "epem",
     ]
-    # Detect command-not-found or empty output (often means path requires sudo)
+    # Detect missing tool paths, not arbitrary smartctl messages.
     not_found_patterns = [
         "command not found",
-        "not found",
-        "no such file",
-        "unable to detect",
+        "no such file or directory",
         "smartctl not found",
         "nvme not found",
     ]
@@ -150,22 +280,33 @@ def _enrich_error_output(raw_output: str, device: str = "") -> str:
         "open failed",
         "device or resource busy",
     ]
+    # Detect devices that do not exist or do not support SMART
+    device_detection_patterns = [
+        "unable to detect device type",
+        "no such device",
+    ]
 
     has_privilege_error = any(p in lower for p in privilege_patterns)
     has_not_found_error = any(p in lower for p in not_found_patterns)
     has_device_fail = any(p in lower for p in device_fail_patterns)
+    has_device_detection_error = any(p in lower for p in device_detection_patterns)
 
     if has_privilege_error or has_device_fail:
         hints.append(
-            "💡 Hint: smartctl/nvme-cli require root privileges (sudo). "
-            "Ensure the MCP server runs with elevated permissions or configure "
-            "sudoers to allow passwordless smartctl access."
+            "💡 Hint: the executor user needs read access to the block device "
+            "(usually membership in the 'disk' group). This MCP does not run "
+            "sudo; InfluxDB is the preferred source for read-only SMART data."
         )
     if has_not_found_error:
         hints.append(
-            "💡 Hint: smartctl/nvme-cli may be installed but only accessible "
-            "to root. Check that the tools are installed and the MCP server "
-            "has sudo access."
+            "💡 Hint: check that smartmontools/nvme-cli are installed and that "
+            f"{SMARTCTL_PATH} and {NVME_CLI_PATH} are executable by the executor "
+            "user. InfluxDB remains the preferred source for read-only SMART data."
+        )
+    if has_device_detection_error:
+        hints.append(
+            "💡 Hint: the device may not exist or may not support SMART. "
+            "Verify the name with list_disks."
         )
 
     if hints:
@@ -182,24 +323,29 @@ async def _is_influxdb_available() -> bool:
 
 
 async def _get_influxdb_latest_device(device: str) -> dict | None:
-    """Get the latest smart_device row for a specific device from InfluxDB.
+    """Get the latest *valid* smart_device row for a device from InfluxDB.
 
-    Returns a dict of the latest reading, or None if unavailable.
+    Telegraf keeps writing rows while a disk sleeps, but those rows carry
+    ``exit_status=2`` and no health, temperature or wear fields. Only successful
+    samples (``exit_status = 0``) are health data, so they are the only rows
+    considered. The lookback covers a full sleep cycle plus the poll interval.
+
+    Returns a dict of the latest valid reading, or None if unavailable.
     """
     if not await _is_influxdb_available():
         return None
 
+    influx_device = _influxdb_device_name(device)
     client = _make_influxdb_client()
     query = (
-        f"SELECT * FROM smart_device WHERE device = '{device}' "
-        f"AND time > now() - INTERVAL '10 minutes' ORDER BY time DESC LIMIT 1"
+        f"SELECT * FROM smart_device WHERE device = '{influx_device}' "
+        f"AND exit_status = 0 AND time > now() - INTERVAL '{SMART_LOOKBACK}' "
+        f"ORDER BY time DESC LIMIT 1"
     )
     try:
         result = await client.query(query)
-        if result.startswith("✅ Query successful"):
-            data = json.loads(result.split("\n\n", 1)[1])
-            if isinstance(data, list) and len(data) > 0:
-                return data[0]
+        rows = _parse_influx_rows(result)
+        return rows[0] if rows else None
     except (json.JSONDecodeError, IndexError, KeyError):
         pass
     return None
@@ -208,43 +354,51 @@ async def _get_influxdb_latest_device(device: str) -> dict | None:
 async def _get_influxdb_latest_attributes(device: str) -> list[dict] | None:
     """Get the latest smart_attribute rows for a device from InfluxDB.
 
+    Only rows from successful samples are returned; standby rows carry no
+    attributes and must not be rendered as wear data.
+
     Returns a list of attribute dicts, or None if unavailable.
     """
     if not await _is_influxdb_available():
         return None
 
+    influx_device = _influxdb_device_name(device)
     client = _make_influxdb_client()
     query = (
         f"SELECT name, raw_value, device FROM smart_attribute "
-        f"WHERE device = '{device}' AND time > now() - INTERVAL '10 minutes' "
+        f"WHERE device = '{influx_device}' AND exit_status = 0 "
+        f"AND time > now() - INTERVAL '{SMART_LOOKBACK}' "
         f"ORDER BY time DESC LIMIT 100"
     )
     try:
         result = await client.query(query)
-        if result.startswith("✅ Query successful"):
-            data = json.loads(result.split("\n\n", 1)[1])
-            if isinstance(data, list) and len(data) > 0:
-                # Deduplicate by name (take the latest for each attribute)
-                seen: dict[str, dict] = {}
-                for row in data:
-                    name = row.get("name", "")
-                    if name not in seen:
-                        seen[name] = row
-                return list(seen.values())
+        rows = _parse_influx_rows(result)
+        if rows:
+            # Deduplicate by name (take the latest for each attribute)
+            seen: dict[str, dict] = {}
+            for row in rows:
+                name = row.get("name", "")
+                if name not in seen:
+                    seen[name] = row
+            return list(seen.values())
     except (json.JSONDecodeError, IndexError, KeyError):
         pass
     return None
 
 
-def _format_influxdb_device_health(row: dict) -> str:
-    """Format an InfluxDB smart_device row into a human-readable health report."""
-    device = row.get("device", "unknown")
+def _format_influxdb_device_health(row: dict, device: str | None = None) -> str:
+    """Format an InfluxDB smart_device row into a human-readable health report.
+
+    ``device`` lets callers display the kernel name (for example ``nvme0n1``)
+    while the InfluxDB row uses the Telegraf tag (``nvme0``).
+    """
+    device = device or row.get("device", "unknown")
     model = row.get("model", "unknown")
     serial = row.get("serial_no", "unknown")
     health_ok = row.get("health_ok", None)
-    temp = row.get("temp_c", 0)
-    power_on_hours = row.get("power_on_hours", 0)
-    power_cycles = row.get("power_cycle_count", 0)
+    temp = row.get("temp_c")
+    power_on_hours = row.get("power_on_hours")
+    power_cycles = row.get("power_cycle_count")
 
     # Health assessment
     if health_ok is True:
@@ -261,13 +415,25 @@ def _format_influxdb_device_health(row: dict) -> str:
         f"{health_emoji} Device Health Report: /dev/{device}",
         f"{'=' * 50}",
         "  Source: InfluxDB (Telegraf smart plugin)",
-        f"  Model: {model}",
-        f"  Serial: {serial}",
-        f"  Health: {health_text}",
-        f"  Temperature: {temp}°C{' 🔥' if temp > 55 else ''}",
-        f"  Power-On Hours: {power_on_hours:,} ({power_on_hours / 8760:.1f} years)",
-        f"  Power Cycles: {power_cycles}",
     ]
+    age = _format_sample_age(row)
+    if age:
+        lines.append(f"  Sample: {age}")
+    lines.extend(
+        [
+            f"  Model: {model}",
+            f"  Serial: {serial}",
+            f"  Health: {health_text}",
+        ]
+    )
+    if temp is not None:
+        lines.append(f"  Temperature: {temp}°C{' 🔥' if temp > 55 else ''}")
+    if power_on_hours is not None:
+        lines.append(
+            f"  Power-On Hours: {power_on_hours:,} ({power_on_hours / 8760:.1f} years)"
+        )
+    if power_cycles is not None:
+        lines.append(f"  Power Cycles: {power_cycles}")
 
     # NVMe-specific fields
     if "percentage_used" in row:
@@ -306,10 +472,10 @@ async def list_disks() -> str:
             "Set 'host.enabled: true' in config.yaml."
         )
 
-    cmd = "lsblk -d -o NAME,MODEL,SERIAL,SIZE,TYPE,TRAN --json 2>&1"
+    cmd = LIST_DISKS.render()
     if not security.is_command_safe(cmd):
         return "❌ Command not in safe whitelist"
-    return await _run_command(cmd)
+    return _cap_composite(await _run_command(cmd))
 
 
 @mcp.tool(annotations=READ_ONLY)
@@ -318,7 +484,7 @@ async def get_disk_health(device: str) -> str:
 
     Data source priority:
     1. InfluxDB (Telegraf smart plugin) - no root required
-    2. Direct smartctl via SSH - requires sudo
+    2. Direct smartctl via SSH - requires device access
 
     Args:
         device: Block device name (e.g., 'sda', 'nvme0n1')
@@ -332,35 +498,48 @@ async def get_disk_health(device: str) -> str:
     # Priority 1: Try InfluxDB (no root needed)
     influx_data = await _get_influxdb_latest_device(device)
     if influx_data:
-        return _format_influxdb_device_health(influx_data)
+        return _cap_composite(_format_influxdb_device_health(influx_data, device))
 
     # Priority 2: Fall back to smartctl via SSH
     if not config.get("host", {}).get("enabled", False):
+        if await _is_influxdb_available():
+            return _no_smart_data_message(device)
         return (
             "❌ No data sources available.\n"
             "Enable at least one: host.enabled or influxdb.enabled in config.yaml."
         )
 
-    cmd = f"smartctl -j -a /dev/{device} 2>&1"
+    cmd = SMART_JSON.render(device=device)
     if not security.is_command_safe(cmd):
         return "❌ Command not in safe whitelist"
 
     raw_output = await _run_command(cmd)
-    if "❌" in raw_output:
-        return _enrich_error_output(raw_output, device)
+    if _command_failed(raw_output):
+        return _enrich_error_output(_no_smart_data_message(device, raw_output), device)
 
     try:
         data = json.loads(raw_output)
         smart_device: SmartDevice = parse_smart_json(data)
-        return format_smart_summary(smart_device)
+        if not has_usable_smart_data(smart_device):
+            return _enrich_error_output(
+                _no_smart_data_message(device, raw_output), device
+            )
+        return _cap_composite(format_smart_summary(smart_device))
     except (json.JSONDecodeError, KeyError, TypeError) as e:
         logger.warning(f"JSON parse failed, falling back to text: {e}")
-        text_cmd = f"smartctl -a /dev/{device} 2>&1"
+        text_cmd = SMART_TEXT.render(device=device)
         raw_text = await _run_command(text_cmd)
-        if "❌" not in raw_text:
-            smart_device = parse_smart_text(raw_text)
-            return format_smart_summary(smart_device)
-        return _enrich_error_output(raw_text, device)
+        if _command_failed(raw_text):
+            return _enrich_error_output(
+                _no_smart_data_message(device, raw_text), device
+            )
+
+        text_device = parse_smart_text(raw_text)
+        if text_device is None:
+            return _enrich_error_output(
+                _no_smart_data_message(device, raw_text), device
+            )
+        return _cap_composite(format_smart_summary(text_device))
 
 
 @mcp.tool(annotations=READ_ONLY)
@@ -369,7 +548,7 @@ async def get_smart_attributes(device: str) -> str:
 
     Data source priority:
     1. InfluxDB (Telegraf smart_attribute table) - no root required
-    2. Direct smartctl via SSH - requires sudo
+    2. Direct smartctl via SSH - requires device access
 
     Args:
         device: Block device name (e.g., 'sda', 'nvme0n1')
@@ -450,26 +629,30 @@ async def get_smart_attributes(device: str) -> str:
                 note = "(spare blocks)"
 
             lines.append(f"{name:<30} {raw_val:>15} {note:<35} {icon} {severity:<8}")
-        return "\n".join(lines)
+        return _cap_composite("\n".join(lines))
 
     # Priority 2: Fall back to smartctl via SSH
     if not config.get("host", {}).get("enabled", False):
+        if await _is_influxdb_available():
+            return _no_smart_data_message(device)
         return (
             "❌ No data sources available.\n"
             "Enable at least one: host.enabled or influxdb.enabled in config.yaml."
         )
 
-    cmd = f"smartctl -j -a /dev/{device} 2>&1"
+    cmd = SMART_JSON.render(device=device)
     if not security.is_command_safe(cmd):
         return "❌ Command not in safe whitelist"
 
     result = await _run_command(cmd)
-    if "❌" in result:
-        return _enrich_error_output(result, device)
+    if _command_failed(result):
+        return _enrich_error_output(_no_smart_data_message(device, result), device)
 
     try:
         data = json.loads(result)
         smart_device = parse_smart_json(data)
+        if not has_usable_smart_data(smart_device):
+            return _enrich_error_output(_no_smart_data_message(device, result), device)
         lines = [
             f"SMART Attributes for {device} ({smart_device.model})",
             "",
@@ -491,9 +674,9 @@ async def get_smart_attributes(device: str) -> str:
                 f"{attr.thresh:>7} {attr.raw_value:>15} "
                 f"{attr.attr_type:<10} {severity_icon} {attr.severity:<8}"
             )
-        return "\n".join(lines)
+        return _cap_composite("\n".join(lines))
     except (json.JSONDecodeError, KeyError, TypeError):
-        return _enrich_error_output(result, device)
+        return _enrich_error_output(_no_smart_data_message(device, result), device)
 
 
 @mcp.tool(annotations=READ_ONLY)
@@ -502,7 +685,7 @@ async def get_nvme_health(device: str) -> str:
 
     Data source priority:
     1. InfluxDB (Telegraf smart_device table) - no root required
-    2. Direct nvme-cli via SSH - requires sudo
+    2. Direct nvme-cli via SSH - requires device access
 
     Args:
         device: NVMe device name (e.g., 'nvme0n1')
@@ -513,28 +696,27 @@ async def get_nvme_health(device: str) -> str:
     if not security.validate_device_name(device):
         return f"❌ Invalid device name: {device}"
 
-    # Normalize device name (nvme0n1 -> nvme0 for InfluxDB matching)
-    influx_device = device
-    if device.endswith("n1"):
-        influx_device = device[:-2]
-
-    # Priority 1: Try InfluxDB first
-    influx_data = await _get_influxdb_latest_device(influx_device)
+    # Priority 1: Try InfluxDB first. The lookup normalizes nvme0n1 -> nvme0.
+    influx_data = await _get_influxdb_latest_device(device)
     if influx_data:
-        return _format_influxdb_device_health(influx_data)
+        return _cap_composite(_format_influxdb_device_health(influx_data, device))
 
     # Priority 2: Fall back to nvme-cli
     if not config.get("host", {}).get("enabled", False):
+        if await _is_influxdb_available():
+            return _no_smart_data_message(device)
         return (
             "❌ No data sources available.\n"
             "Enable at least one: host.enabled or influxdb.enabled in config.yaml."
         )
 
-    cmd = f"nvme smart-log /dev/{device} 2>&1"
+    cmd = NVME_SMART_LOG.render(device=device)
     if not security.is_command_safe(cmd):
         return "❌ Command not in safe whitelist"
     result = await _run_command(cmd)
-    return _enrich_error_output(result, device)
+    if _command_failed(result):
+        return _enrich_error_output(result, device)
+    return _cap_composite(result)
 
 
 @mcp.tool(annotations=WRITE_ACTION)
@@ -568,10 +750,34 @@ async def run_smart_test(device: str, test_type: str = "short") -> str:
     if not security.validate_smart_test_type(test_type):
         return f"❌ Invalid test type: {test_type}. Use: short, long, conveyance"
 
-    cmd = f"smartctl -t {test_type} /dev/{device} 2>&1"
+    # Pre-flight only asks smartctl for its version, so it never opens the
+    # device and never spins up a sleeping disk. A missing or non-executable
+    # smartctl must be reported before the write operation is attempted.
+    preflight = await _run_command(SMART_VERSION.render())
+    if _command_failed(preflight):
+        return _enrich_error_output(
+            "❌ SMART self-tests unavailable: "
+            f"{SMARTCTL_PATH} is missing or not executable by the executor "
+            "user. No test was started.\n\n" + preflight,
+            device,
+        )
+
+    cmd = SMART_TEST.render(device=device, test_type=test_type.lower())
     if not security.is_command_safe(cmd):
         return "❌ Command not in safe whitelist"
-    return await _run_command(cmd)
+
+    result = await _run_command(cmd)
+    exit_match = EXIT_CODE_PATTERN.search(result)
+    if exit_match and int(exit_match.group(1)) == 2:
+        return (
+            f"⚠️ No self-test started: /dev/{device} is in standby mode.\n"
+            "The test command uses smartctl's `-n standby`, so it will not spin "
+            "the disk up. Wake the disk explicitly (for example by reading from "
+            "it) and call run_smart_test again."
+        )
+    if _command_failed(result):
+        return _enrich_error_output(result, device)
+    return _cap_composite(result)
 
 
 @mcp.tool(annotations=READ_ONLY)
@@ -590,13 +796,18 @@ async def get_zfs_status() -> str:
             "Set 'host.enabled: true' in config.yaml."
         )
 
-    cmd = (
-        "zpool status -x 2>&1 && echo '---' && "
-        "zpool list -o name,size,alloc,free,cap,dedup,health 2>&1"
-    )
-    if not security.is_command_safe(cmd):
-        return "❌ Command not in safe whitelist"
-    return await _run_command(cmd)
+    parts = [
+        ("ZFS Pool Status", ZPOOL_STATUS.render()),
+        ("ZFS Pool List", ZPOOL_LIST.render()),
+    ]
+    for _, cmd in parts:
+        if not security.is_command_safe(cmd):
+            return "❌ Command not in safe whitelist"
+
+    results = []
+    for title, cmd in parts:
+        results.append(f"=== {title} ===\n{await _run_command(cmd)}")
+    return _cap_composite("\n\n".join(results))
 
 
 @mcp.tool(annotations=READ_ONLY)
@@ -615,10 +826,73 @@ async def get_raid_status() -> str:
             "Set 'host.enabled: true' in config.yaml."
         )
 
-    cmd = "cat /proc/mdstat 2>&1 && echo '---' && mdadm --detail --scan --verbose 2>&1"
+    parts = [
+        ("MDSTAT", CAT_MDSTAT.render()),
+        ("MDADM Detail", MDADM_DETAIL.render()),
+    ]
+    for _, cmd in parts:
+        if not security.is_command_safe(cmd):
+            return "❌ Command not in safe whitelist"
+
+    results = []
+    for title, cmd in parts:
+        results.append(f"=== {title} ===\n{await _run_command(cmd)}")
+    return _cap_composite("\n\n".join(results))
+
+
+@mcp.tool(annotations=READ_ONLY)
+async def get_snapraid_status() -> str:
+    """Get SnapRAID parity and sync status.
+
+    SnapRAID is a snapshot/parity tool for collections of disks. Unlike ZFS or
+    mdadm it does not provide a single block device, so this is the storage
+    stack check for mergerFS + SnapRAID deployments.
+
+    Returns:
+        SnapRAID status (parity age, sync state, disk errors)
+    """
+    if not config.get("host", {}).get("enabled", False):
+        return (
+            "❌ Host data source is not enabled.\n"
+            "Set 'host.enabled: true' in config.yaml."
+        )
+
+    cmd = SNAPRAID_STATUS.render()
     if not security.is_command_safe(cmd):
         return "❌ Command not in safe whitelist"
-    return await _run_command(cmd)
+    return _cap_composite(await _run_command(cmd))
+
+
+@mcp.tool(annotations=READ_ONLY)
+async def get_mount_status() -> str:
+    """Get mounted filesystems and mergerFS pool state.
+
+    mergerFS pools several disks behind one mount point and does not appear in
+    ZFS or mdadm output. This tool reports the real mounts (`findmnt`), the
+    mergerFS branches (when a pool is mounted) and filesystem usage (`df`).
+
+    Returns:
+        Mount, mergerFS and usage summary
+    """
+    if not config.get("host", {}).get("enabled", False):
+        return (
+            "❌ Host data source is not enabled.\n"
+            "Set 'host.enabled: true' in config.yaml."
+        )
+
+    parts = [
+        ("Mounted Filesystems", FINDMNT_MOUNTS.render()),
+        ("mergerFS Pools", FINDMNT_MERGERFS.render()),
+        ("Filesystem Usage", DF_REAL_FILESYSTEMS.render()),
+    ]
+    for _, cmd in parts:
+        if not security.is_command_safe(cmd):
+            return "❌ Command not in safe whitelist"
+
+    results = []
+    for title, cmd in parts:
+        results.append(f"=== {title} ===\n{await _run_command(cmd)}")
+    return _cap_composite("\n\n".join(results))
 
 
 @mcp.tool(annotations=READ_ONLY)
@@ -637,10 +911,10 @@ async def get_io_stats() -> str:
             "Set 'host.enabled: true' in config.yaml."
         )
 
-    cmd = "iostat -x 1 1 2>&1"
+    cmd = IOSTAT.render()
     if not security.is_command_safe(cmd):
         return "❌ Command not in safe whitelist"
-    return await _run_command(cmd)
+    return _cap_composite(await _run_command(cmd))
 
 
 # ============================================================================
@@ -658,9 +932,8 @@ def _make_influxdb_client() -> InfluxDBClient:
         database=cfg.get("database"),
         token=cfg.get("token"),
         query_limit=cfg.get("query_limit", 1000),
-        max_output_bytes=config.get("output", {}).get(
-            "max_bytes", DEFAULT_MAX_OUTPUT_BYTES
-        ),
+        max_output_bytes=_max_output_bytes(),
+        audit=create_audit_logger(config),
     )
 
 
@@ -672,10 +945,9 @@ def _make_prometheus_client() -> PrometheusClient:
         port=cfg.get("port", 9090),
         use_https=cfg.get("use_https", False),
         token=cfg.get("token"),
-        max_output_bytes=config.get("output", {}).get(
-            "max_bytes", DEFAULT_MAX_OUTPUT_BYTES
-        ),
+        max_output_bytes=_max_output_bytes(),
         timeout=parse_duration(cfg.get("query_timeout", "30s")),
+        audit=create_audit_logger(config),
     )
 
 
@@ -683,12 +955,16 @@ def _make_prometheus_client() -> PrometheusClient:
 async def query_prometheus_disk(query: str) -> str:
     """Query Prometheus for disk-related metrics.
 
-    Useful for checking node_exporter smartmon and disk I/O metrics.
+    Prometheus is optional. The smartmon_* metric family exists only when
+    node_exporter runs with its smartmon collector; node_disk_* metrics come
+    from node_exporter's disk collector. Without node_exporter, use
+    query_influxdb_disk and the Telegraf smart_device/smart_attribute tables.
 
     Common queries:
-    - smartmon_health_ok
-    - smartmon_temperature_celsius
     - node_disk_io_time_seconds_total
+    - node_filesystem_avail_bytes
+    - smartmon_health_ok          (requires node_exporter smartmon)
+    - smartmon_temperature_celsius (requires node_exporter smartmon)
 
     Args:
         query: PromQL expression for disk metrics
@@ -749,13 +1025,34 @@ async def query_influxdb_disk(query: str, database: str | None = None) -> str:
 # ============================================================================
 
 
+async def _influxdb_devices_with_recent_data() -> list[str]:
+    """Return devices with at least one valid sample in the lookback window."""
+    client = _make_influxdb_client()
+    query = (
+        "SELECT device FROM smart_device "
+        f"WHERE exit_status = 0 AND time > now() - INTERVAL '{SMART_LOOKBACK}' "
+        "GROUP BY device ORDER BY device"
+    )
+    try:
+        result = await client.query(query)
+    except (json.JSONDecodeError, IndexError, KeyError):
+        return []
+
+    devices: list[str] = []
+    for row in _parse_influx_rows(result):
+        device = row.get("device")
+        if isinstance(device, str) and device and device not in devices:
+            devices.append(device)
+    return devices
+
+
 @mcp.tool(annotations=READ_ONLY)
 async def get_full_disk_report(device: str | None = None) -> str:
     """Get a comprehensive disk health report combining multiple data sources.
 
     Data source priority:
     1. InfluxDB (Telegraf smart_device table) - no root required
-    2. Direct smartctl via SSH - requires sudo
+    2. Direct smartctl via SSH - requires device access
 
     If device is specified: detailed analysis of that device.
     If no device: overview of all disks with severity summary.
@@ -777,60 +1074,72 @@ async def get_full_disk_report(device: str | None = None) -> str:
     lines = ["=== Disk Health Overview ===\n"]
 
     if await _is_influxdb_available():
-        # Get all devices from InfluxDB
-        client = _make_influxdb_client()
-        query = (
-            "SELECT DISTINCT device, model, health_ok, temp_c, "
-            "power_on_hours, serial_no FROM smart_device "
-            "WHERE time > now() - INTERVAL '10 minutes'"
+        devices = await _influxdb_devices_with_recent_data()
+        if not devices:
+            note = (
+                "⚠️  No valid SMART sample in InfluxDB "
+                f"(last {SMART_LOOKBACK}; standby rows are ignored), "
+                "falling back to SSH..."
+            )
+            return _cap_composite(f"{note}\n\n{await _get_full_report_via_ssh()}")
+
+        lines.append("Source: InfluxDB (Telegraf smart plugin)\n")
+        lines.append(
+            f"Found {len(devices)} devices with a valid sample in the last "
+            f"{SMART_LOOKBACK}:\n"
         )
-        try:
-            result = await client.query(query)
-            if result.startswith("✅ Query successful"):
-                data = json.loads(result.split("\n\n", 1)[1])
-                if isinstance(data, list) and len(data) > 0:
-                    lines.append("Source: InfluxDB (Telegraf smart plugin)\n")
-                    lines.append(f"Found {len(data)} devices:\n")
-                    for row in data:
-                        dev_name = row.get("device", "unknown")
-                        model = row.get("model", "unknown")
-                        health_ok = row.get("health_ok", None)
-                        temp = row.get("temp_c", 0)
-                        poh = row.get("power_on_hours", 0)
+        for dev_name in devices:
+            row = await _get_influxdb_latest_device(dev_name)
+            if not row:
+                continue
 
-                        if health_ok is True:
-                            emoji = "✅"
-                        elif health_ok is False:
-                            emoji = "🔴"
-                        else:
-                            emoji = "⚠️"
+            model = row.get("model", "unknown")
+            health_ok = row.get("health_ok")
+            temp = row.get("temp_c")
+            poh = row.get("power_on_hours")
+            age = _format_sample_age(row)
 
-                        temp_flag = " 🔥" if temp > 55 else ""
-                        lines.append(
-                            f"  {emoji} /dev/{dev_name} - {model} | "
-                            f"Temp: {temp}°C{temp_flag} | "
-                            f"POH: {poh:,} | "
-                            f"Health: {'PASSED' if health_ok else 'UNKNOWN'}"
-                        )
-                    lines.append(f"\n{'=' * 50}\n")
-                else:
-                    lines.append(
-                        "⚠️  No recent data in InfluxDB, falling back to SSH...\n"
-                    )
-                    return await _get_full_report_via_ssh()
-        except (json.JSONDecodeError, IndexError, KeyError):
-            lines.append("⚠️  InfluxDB parse error, falling back to SSH...\n")
-            return await _get_full_report_via_ssh()
+            if health_ok is True:
+                emoji = "✅"
+                health_text = "PASSED"
+            elif health_ok is False:
+                emoji = "🔴"
+                health_text = "FAILED"
+            else:
+                emoji = "⚠️"
+                health_text = "UNKNOWN"
+
+            temp_flag = " 🔥" if isinstance(temp, int | float) and temp > 55 else ""
+            parts = [
+                f"  {emoji} /dev/{dev_name} - {model}",
+                f"Health: {health_text}",
+            ]
+            if temp is not None:
+                parts.append(f"Temp: {temp}°C{temp_flag}")
+            if poh is not None:
+                parts.append(f"POH: {poh:,}")
+            if age:
+                parts.append(f"Sample: {age}")
+            lines.append(" | ".join(parts))
+        lines.append(f"\n{'=' * 50}\n")
     else:
         lines.append("⚠️  InfluxDB not enabled, using SSH fallback\n")
         return await _get_full_report_via_ssh()
 
-    return "\n".join(lines)
+    return _cap_composite("\n".join(lines))
 
 
 async def _get_full_report_via_ssh() -> str:
-    """Generate full disk health report via SSH (requires sudo)."""
+    """Generate full disk health report via SSH (requires device access)."""
     if not config.get("host", {}).get("enabled", False):
+        if await _is_influxdb_available():
+            return (
+                "❌ No recent valid SMART sample available.\n"
+                "InfluxDB has no sample with exit_status = 0 in the last "
+                f"{SMART_LOOKBACK}, and host.enabled is false so there is no "
+                "smartctl fallback. Standby rows (exit_status != 0) are not "
+                "health data."
+            )
         return (
             "❌ No data sources available.\n"
             "Enable at least one: host.enabled or influxdb.enabled in config.yaml."
@@ -839,18 +1148,21 @@ async def _get_full_report_via_ssh() -> str:
     lines = ["=== Disk Health Overview ===\n"]
 
     disk_list = await list_disks()
-    if "❌" not in disk_list:
-        try:
-            data = json.loads(disk_list)
-            blockdevs = data.get("blockdevices", [])
-            lines.append(f"Found {len(blockdevs)} block devices:\n")
-            for dev in blockdevs:
-                name = dev.get("name", "")
-                model = dev.get("model", "")
-                size = dev.get("size", "")
-                lines.append(f"  • /dev/{name} - {model} ({size})")
-        except (json.JSONDecodeError, KeyError):
-            lines.append(f"Disk list: {disk_list[:500]}")
+    if _command_failed(disk_list):
+        lines.append(f"Disk list unavailable:\n{disk_list[:500]}")
+        return _cap_composite("\n".join(lines))
+
+    try:
+        data = json.loads(disk_list)
+        blockdevs = data.get("blockdevices", [])
+        lines.append(f"Found {len(blockdevs)} block devices:\n")
+        for dev in blockdevs:
+            name = dev.get("name", "")
+            model = dev.get("model", "")
+            size = dev.get("size", "")
+            lines.append(f"  • /dev/{name} - {model} ({size})")
+    except (json.JSONDecodeError, KeyError):
+        lines.append(f"Disk list: {disk_list[:500]}")
 
     lines.append("\n=== Individual Health Checks ===\n")
 
@@ -860,13 +1172,13 @@ async def _get_full_report_via_ssh() -> str:
         for dev in blockdevs:
             name = dev.get("name", "")
             lines.append(f"\n--- /dev/{name} ---")
-            cmd = f"smartctl -j -a /dev/{name} 2>&1"
+            cmd = SMART_JSON.render(device=name)
             if not security.is_command_safe(cmd):
                 lines.append("  ❌ Command blocked by security")
                 continue
 
             health = await _run_command(cmd)
-            if "❌" in health:
+            if _command_failed(health):
                 enriched = _enrich_error_output(health, name)
                 lines.append(f"  {enriched.replace(chr(10), chr(10) + '  ')}")
                 continue
@@ -874,6 +1186,9 @@ async def _get_full_report_via_ssh() -> str:
             try:
                 smart_data = json.loads(health)
                 smart_device = parse_smart_json(smart_data)
+                if not has_usable_smart_data(smart_device):
+                    lines.append("  ❌ No usable SMART data in the response")
+                    continue
                 health_emoji = (
                     "🔴"
                     if smart_device.health_score < 50
@@ -897,7 +1212,7 @@ async def _get_full_report_via_ssh() -> str:
     except (json.JSONDecodeError, KeyError):
         lines.append("Could not parse disk list for health checks")
 
-    return "\n".join(lines)
+    return _cap_composite("\n".join(lines))
 
 
 async def main(config_path: Path | None = None) -> None:
@@ -911,14 +1226,32 @@ async def main(config_path: Path | None = None) -> None:
         raise SystemExit(2) from e
 
     logger.info("Using configuration: %s", resolved)
+
+    tunnels: list = []
+    try:
+        tunnels = await open_metric_tunnels(config)
+    except Exception as e:
+        logger.error("Failed to open a configured SSH tunnel: %s", e)
+        raise SystemExit(2) from e
+    for active in tunnels:
+        logger.info(
+            "SSH tunnel for %s: %s:%s",
+            active.section,
+            active.endpoint.host,
+            active.endpoint.port,
+        )
+
     logger.info("Starting Disk Health MCP...")
     logger.info(
         "Available tools: list_disks, get_disk_health, get_smart_attributes, "
         "get_nvme_health, run_smart_test, get_zfs_status, get_raid_status, "
-        "get_io_stats, query_prometheus_disk, query_influxdb_disk, "
-        "get_full_disk_report"
+        "get_snapraid_status, get_mount_status, get_io_stats, "
+        "query_prometheus_disk, query_influxdb_disk, get_full_disk_report"
     )
-    await mcp.run_stdio_async()
+    try:
+        await mcp.run_stdio_async()
+    finally:
+        await close_metric_tunnels(tunnels)
 
 
 def cli() -> None:

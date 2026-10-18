@@ -5,12 +5,15 @@ Provides read-only query clients for both time-series databases
 with built-in security validation.
 """
 
+import hashlib
 import json
 import logging
 import re
+from time import monotonic
 
 import aiohttp
 
+from .audit import AuditLogger
 from .output import DEFAULT_MAX_OUTPUT_BYTES, sanitize_output
 
 logger = logging.getLogger(__name__)
@@ -41,6 +44,7 @@ class InfluxDBClient:
         query_limit: int = 1000,
         max_output_bytes: int = DEFAULT_MAX_OUTPUT_BYTES,
         timeout: float = 30,
+        audit: AuditLogger | None = None,
     ):
         self.host = host
         self.port = port
@@ -50,7 +54,36 @@ class InfluxDBClient:
         self.query_limit = min(query_limit, 10000)
         self.max_output_bytes = max_output_bytes
         self.timeout = timeout
+        self.audit = audit
         self.scheme = "https" if use_https else "http"
+
+    def _log_audit(
+        self,
+        query: str,
+        database: str | None,
+        status: str | int,
+        started: float,
+        *,
+        error: str | None = None,
+    ) -> None:
+        """Record query metadata without storing the query text.
+
+        SQL and PromQL may contain literal values that the model should not
+        persist in a local log. Length plus SHA-256 keeps queries correlatable
+        without copying their contents.
+        """
+        if self.audit is None:
+            return
+        fields: dict[str, object] = {
+            "database": database,
+            "status": status,
+            "duration_ms": round((monotonic() - started) * 1000, 1),
+            "query_length": len(query),
+            "query_sha256": hashlib.sha256(query.encode("utf-8")).hexdigest(),
+        }
+        if error is not None:
+            fields["error"] = error
+        self.audit.log("influxdb_query", **fields)
 
     async def query(self, sql_query: str, database: str | None = None) -> str:
         """
@@ -63,8 +96,10 @@ class InfluxDBClient:
         Returns:
             Query results in JSON format
         """
+        started = monotonic()
         db = database or self.database
         if not db:
+            self._log_audit(sql_query, db, "no_database", started)
             return (
                 "❌ No database specified. Provide 'database' parameter or set "
                 "'influxdb.database' in config.yaml."
@@ -102,6 +137,7 @@ class InfluxDBClient:
                         formatted = sanitize_output(
                             formatted, self.max_output_bytes, label="InfluxDB result"
                         )
+                        self._log_audit(sql_query, db, response.status, started)
                         return f"✅ Query successful\n\n{formatted}"
                     else:
                         error_body = sanitize_output(
@@ -123,14 +159,19 @@ class InfluxDBClient:
                                 "   WHERE time > now() - INTERVAL '1 hour'\n\n"
                             )
 
+                        self._log_audit(sql_query, db, response.status, started)
                         return (
                             f"{hint}"
                             f"❌ InfluxDB query failed (HTTP {response.status})\n"
                             f"{error_body}"
                         )
         except aiohttp.ClientError as e:
+            self._log_audit(
+                sql_query, db, "connection_error", started, error=type(e).__name__
+            )
             return f"❌ Connection error: {e}"
         except TimeoutError:
+            self._log_audit(sql_query, db, "timeout", started)
             return f"❌ Query timed out after {self.timeout} seconds"
 
 
@@ -145,6 +186,7 @@ class PrometheusClient:
         token: str | None = None,
         max_output_bytes: int = DEFAULT_MAX_OUTPUT_BYTES,
         timeout: float = 30,
+        audit: AuditLogger | None = None,
     ):
         self.host = host
         self.port = port
@@ -152,7 +194,29 @@ class PrometheusClient:
         self.token = token
         self.max_output_bytes = max_output_bytes
         self.timeout = timeout
+        self.audit = audit
         self.scheme = "https" if use_https else "http"
+
+    def _log_audit(
+        self,
+        query: str,
+        status: str | int,
+        started: float,
+        *,
+        error: str | None = None,
+    ) -> None:
+        """Record query metadata without storing the PromQL text."""
+        if self.audit is None:
+            return
+        fields: dict[str, object] = {
+            "status": status,
+            "duration_ms": round((monotonic() - started) * 1000, 1),
+            "query_length": len(query),
+            "query_sha256": hashlib.sha256(query.encode("utf-8")).hexdigest(),
+        }
+        if error is not None:
+            fields["error"] = error
+        self.audit.log("prometheus_query", **fields)
 
     async def query(self, promql: str, time: str | None = None) -> str:
         """
@@ -165,6 +229,7 @@ class PrometheusClient:
         Returns:
             Query results in JSON format
         """
+        started = monotonic()
         url = f"{self.scheme}://{self.host}:{self.port}/api/v1/query"
 
         params: dict[str, str] = {"query": promql}
@@ -192,10 +257,14 @@ class PrometheusClient:
                                 self.max_output_bytes,
                                 label="Prometheus result",
                             )
+                            self._log_audit(promql, response.status, started)
                             return f"✅ Query successful\n\n{formatted}"
                         else:
                             error_type = data.get("errorType", "unknown")
                             error_msg = data.get("error", "Unknown error")
+                            self._log_audit(
+                                promql, f"promql_error:{error_type}", started
+                            )
                             return (
                                 f"❌ PromQL query error\n"
                                 f"Type: {error_type}\n"
@@ -207,13 +276,16 @@ class PrometheusClient:
                             self.max_output_bytes,
                             label="Prometheus error",
                         )
+                        self._log_audit(promql, response.status, started)
                         return (
                             f"❌ Prometheus query failed (HTTP {response.status})\n"
                             f"{error_body}"
                         )
         except aiohttp.ClientError as e:
+            self._log_audit(promql, "connection_error", started, error=type(e).__name__)
             return f"❌ Connection error: {e}"
         except TimeoutError:
+            self._log_audit(promql, "timeout", started)
             return f"❌ Query timed out after {self.timeout} seconds"
 
     async def get_targets(self) -> str:

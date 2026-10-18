@@ -10,6 +10,7 @@ Handles SSH connections with strict security:
 
 import logging
 import os
+import re
 import shlex
 import time
 from pathlib import Path
@@ -362,12 +363,13 @@ class SSHManager(ExecutorBase):
         """
         try:
             service_path = f"{self.services_base_path.rstrip('/')}/{service}"
-            cmd = (
-                f"test -d {shlex.quote(service_path)} "
-                "&& echo 'exists' || echo 'not_exists'"
-            )
+            cmd = f"test -d {shlex.quote(service_path)}"
             result = await self.execute_safe_command(cmd)
-            return "exists" in result and "not_exists" not in result
+            if "❌" in result:
+                return False
+
+            match = re.search(r"⚠️ Exit code:\s*(-?\d+)", result)
+            return match is None or int(match.group(1)) == 0
         except Exception:
             return False
 

@@ -48,24 +48,60 @@ class TestLocalCommands:
         result = asyncio.run(
             _executor(tmp_path).execute_safe_command("echo hi && echo bye")
         )
-        assert "Shell operators" in result
+        assert "Security violation" in result
 
-    def test_missing_command(self, tmp_path):
+    def test_unknown_command_rejected(self, tmp_path):
         result = asyncio.run(
             _executor(tmp_path).execute_safe_command(
                 "definitely-not-a-real-command-xyz"
             )
         )
+        assert "Security violation" in result
+
+    def test_missing_command(self, tmp_path, monkeypatch):
+        async def missing(*args, **kwargs):
+            raise FileNotFoundError
+
+        monkeypatch.setattr(asyncio, "create_subprocess_exec", missing)
+        result = asyncio.run(
+            _executor(tmp_path).execute_safe_command("smartctl -a /dev/sda")
+        )
         assert "Command not found" in result
 
-    def test_timeout(self, tmp_path):
+    def test_timeout(self, tmp_path, monkeypatch):
+        class SlowProcess:
+            returncode = 0
+
+            async def communicate(self):
+                await asyncio.sleep(10)
+
+            def kill(self):
+                return None
+
+            async def wait(self):
+                return 0
+
+        async def slow(*args, **kwargs):
+            return SlowProcess()
+
+        monkeypatch.setattr(asyncio, "create_subprocess_exec", slow)
         result = asyncio.run(
-            _executor(tmp_path).execute_safe_command("sleep 5", timeout=0.05)
+            _executor(tmp_path).execute_safe_command("echo hi", timeout=0.01)
         )
         assert "timed out" in result
 
-    def test_nonzero_exit_is_reported(self, tmp_path):
-        result = asyncio.run(_executor(tmp_path).execute_safe_command("false"))
+    def test_nonzero_exit_is_reported(self, tmp_path, monkeypatch):
+        class FailedProcess:
+            returncode = 1
+
+            async def communicate(self):
+                return b"", b""
+
+        async def failed(*args, **kwargs):
+            return FailedProcess()
+
+        monkeypatch.setattr(asyncio, "create_subprocess_exec", failed)
+        result = asyncio.run(_executor(tmp_path).execute_safe_command("echo hi"))
         assert "Exit code: 1" in result
 
 

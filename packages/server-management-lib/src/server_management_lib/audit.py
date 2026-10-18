@@ -56,3 +56,16 @@ class AuditLogger:
             if not self._warned:
                 logger.warning("Cannot write audit log %s: %s", self.path, e)
                 self._warned = True
+
+
+def create_audit_logger(config: dict) -> AuditLogger:
+    """Build an :class:`AuditLogger` from the ``audit`` config section.
+
+    The HTTP clients receive the same logger as the executors so query
+    metadata is recorded in one audit log.
+    """
+    audit_config = config.get("audit", {}) or {}
+    return AuditLogger(
+        audit_config.get("path"),
+        enabled=audit_config.get("enabled", False),
+    )

@@ -138,11 +138,14 @@ uv run --directory apps/remote-server-mcp python -c \
 | Server exits with code 2 | No config found; pass `--config` or set the config env var |
 | `known_hosts file not found` | Add the host key: `ssh-keyscan -H HOST >> ~/.ssh/known_hosts` |
 | `Permission denied (publickey)` | `ssh -v HOST true`, check `key_path` and agent |
-| `smartctl` permission errors | Run the MCP as a user with device access, or configure sudoers |
-| `Service ... does not exist` | `services_path` must contain one directory per service |
+| `smartctl` permission errors | Give the executor user block-device access (for example the `disk` group) or use InfluxDB; the MCP does not use sudo |
+| `Unknown service or container` | Use `list_services()` and `list_containers()`; containers outside `services_path` must be added to `security.allowed_containers` |
 | `Error reading file` / SFTP errors | The SSH server must allow the SFTP subsystem |
-| Docker commands fail | The container name is assumed to match the service directory name |
+| Docker commands fail | Use `list_containers()`; a compose project is resolved through its `com.docker.compose.project` label |
 | InfluxDB HTTP 500 | Add a `WHERE time > ...` clause; InfluxDB 3 has a file-scan limit |
+| InfluxDB connection refused on a loopback port | The service is loopback-only: use `ssh_tunnel` or keep `ssh -N -L` running |
+| `Prometheus is not enabled` | Prometheus is optional; enable it in config.yaml or use InfluxDB |
+| `smartmon_*` returns no data | `node_exporter` with the smartmon collector is not deployed; use the Telegraf/InfluxDB SMART tables |
 | Truncated output | Raise `output.max_bytes` (default 64 KiB) deliberately |
 
 More: [configuration.md](configuration.md) and [security-model.md](security-model.md).

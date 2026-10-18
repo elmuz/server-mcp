@@ -7,7 +7,7 @@ implementations share output limits, audit logging and path-confinement rules.
 
 from dataclasses import dataclass
 
-from .audit import AuditLogger
+from .audit import create_audit_logger
 from .output import DEFAULT_MAX_OUTPUT_BYTES
 from .security import SecurityValidator
 
@@ -52,8 +52,4 @@ class ExecutorBase:
             output_config.get("max_bytes", DEFAULT_MAX_OUTPUT_BYTES)
         )
 
-        audit_config = config.get("audit", {}) or {}
-        self.audit = AuditLogger(
-            audit_config.get("path"),
-            enabled=audit_config.get("enabled", False),
-        )
+        self.audit = create_audit_logger(config)

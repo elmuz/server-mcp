@@ -119,18 +119,20 @@ class TestCommandSafety:
         self.security = SecurityValidator({})
 
     def test_safe_commands_accepted(self):
-        """Test safe diagnostic commands are accepted."""
+        """Test catalog diagnostic commands are accepted."""
         safe_commands = [
             "smartctl -a /dev/sda",
-            "smartctl -j -a /dev/sda",
-            "smartctl -j -i /dev/nvme0n1",
-            "smartctl -t short /dev/sda",
-            "smartctl -t long /dev/sda",
-            "smartctl -t conveyance /dev/sdb",
-            "smartctl -l error /dev/sda",
-            "smartctl -l selftest /dev/sda",
+            "/usr/sbin/smartctl -j -a /dev/sda",
+            "/usr/sbin/smartctl -j -i /dev/nvme0n1",
+            "/usr/sbin/smartctl --version",
+            "/usr/sbin/smartctl -n standby -t short /dev/sda",
+            "/usr/sbin/smartctl -t short /dev/sda",
+            "/usr/sbin/smartctl -t long /dev/sda",
+            "/usr/sbin/smartctl -t conveyance /dev/sdb",
+            "/usr/sbin/smartctl -l error /dev/sda",
+            "/usr/sbin/smartctl -l selftest /dev/sda",
             "smartctl -c /dev/sda",
-            "nvme smart-log /dev/nvme0n1",
+            "/usr/sbin/nvme smart-log /dev/nvme0n1",
             "nvme id-ctrl /dev/nvme0n1",
             "nvme id-ns /dev/nvme0n1",
             "nvme error-log /dev/nvme0n1",
@@ -152,7 +154,7 @@ class TestCommandSafety:
             assert self.security.is_command_safe(cmd) is True, f"Should accept: {cmd}"
 
     def test_dangerous_commands_blocked(self):
-        """Test dangerous commands are blocked."""
+        """Test dangerous and unknown commands are blocked."""
         dangerous_commands = [
             "sudo smartctl -a /dev/sda",
             "smartctl -a /dev/sda; cat /etc/shadow",
@@ -172,9 +174,19 @@ class TestCommandSafety:
             "su root",
             "passwd",
             "useradd hacker",
+            "whoami",
+            "smartctl --scan",
+            "/usr/sbin/smartctl -s on /dev/sda",
+            "cat /etc/shadow",
         ]
         for cmd in dangerous_commands:
             assert self.security.is_command_safe(cmd) is False, f"Should block: {cmd}"
+
+    def test_generic_commands_flag_has_no_effect(self):
+        """The legacy config flag must not enable arbitrary execution."""
+        security = SecurityValidator({"security": {"allow_generic_commands": True}})
+        assert security.is_command_safe("whoami") is False
+        assert security.is_command_safe("/usr/sbin/smartctl -a /dev/sda") is True
 
 
 # ============================================================================
@@ -225,6 +237,8 @@ class TestToolRegistration:
             "run_smart_test",
             "get_zfs_status",
             "get_raid_status",
+            "get_snapraid_status",
+            "get_mount_status",
             "get_io_stats",
             "query_prometheus_disk",
             "query_influxdb_disk",
@@ -263,13 +277,14 @@ class TestErrorEnrichment:
     """Test smartctl/nvme privilege hint enrichment."""
 
     def test_privilege_error_gets_hint(self):
-        """Permission denied errors should include sudo hint."""
+        """Permission denied errors should explain the no-sudo policy."""
         from disk_health_mcp.server import _enrich_error_output
 
         output = "smartctl: /dev/sda: Permission denied"
         result = _enrich_error_output(output)
-        assert "require root privileges" in result
-        assert "sudo" in result.lower()
+        assert "read access" in result
+        assert "does not run sudo" in result
+        assert "InfluxDB" in result
 
     def test_command_not_found_gets_hint(self):
         """Command not found should include installation hint."""
@@ -278,14 +293,15 @@ class TestErrorEnrichment:
         output = "bash: smartctl: command not found"
         result = _enrich_error_output(output)
         assert "Hint" in result
+        assert "/usr/sbin/smartctl" in result
 
     def test_unable_to_open_gets_hint(self):
-        """Unable to open device should include privilege hint."""
+        """Unable to open device should include access hint."""
         from disk_health_mcp.server import _enrich_error_output
 
         output = "Unable to open /dev/sda: Operation not permitted"
         result = _enrich_error_output(output)
-        assert "require root privileges" in result
+        assert "read access" in result
 
     def test_clean_output_unchanged(self):
         """Normal output should not be modified."""
@@ -296,9 +312,9 @@ class TestErrorEnrichment:
         assert result == output
 
     def test_access_denied_gets_hint(self):
-        """Access denied should include privilege hint."""
+        """Access denied should include access hint."""
         from disk_health_mcp.server import _enrich_error_output
 
         output = "NVMe: access denied for /dev/nvme0n1"
         result = _enrich_error_output(output)
-        assert "require root privileges" in result
+        assert "read access" in result

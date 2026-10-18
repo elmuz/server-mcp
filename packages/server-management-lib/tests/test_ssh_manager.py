@@ -235,10 +235,8 @@ class TestSSHManagerServiceCheck:
             manager._connected = True
 
             mock_conn = AsyncMock()
-            # check_service_exists runs: test -d /srv/{service} && echo 'exists' || echo 'not_exists'
-            mock_conn.run.return_value = MagicMock(
-                stdout="exists", stderr="", exit_status=0
-            )
+            # check_service_exists runs: test -d /srv/{service}
+            mock_conn.run.return_value = MagicMock(stdout="", stderr="", exit_status=0)
             manager.connection = mock_conn
 
             result = await manager.check_service_exists("myapp")
@@ -252,9 +250,7 @@ class TestSSHManagerServiceCheck:
             manager._connected = True
 
             mock_conn = AsyncMock()
-            mock_conn.run.return_value = MagicMock(
-                stdout="not_exists", stderr="", exit_status=0
-            )
+            mock_conn.run.return_value = MagicMock(stdout="", stderr="", exit_status=1)
             manager.connection = mock_conn
 
             result = await manager.check_service_exists("nonexistent")
@@ -443,7 +439,7 @@ class TestServicePathHandling:
                 "security": {"services_path": "/opt/services/"},
             }
             manager = SSHManager(config, SecurityValidator(config))
-            execute = AsyncMock(return_value="exists")
+            execute = AsyncMock(return_value="")
 
             with patch.object(manager, "execute_safe_command", new=execute):
                 assert await manager.check_service_exists("myapp") is True

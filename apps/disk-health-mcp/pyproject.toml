@@ -36,7 +36,7 @@ source = ["disk_health_mcp"]
 branch = true
 
 [tool.coverage.report]
-fail_under = 55
+fail_under = 65
 show_missing = true
 skip_covered = true
 exclude_lines = [

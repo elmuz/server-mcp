@@ -216,9 +216,9 @@ class TestToolRegistration:
         assert "get_prometheus_targets" in tools
 
     def test_total_tool_count(self):
-        """We expect 13 tools total (10 SSH + 3 database)."""
+        """We expect 17 tools total (14 SSH/host + 3 database)."""
         tools = list(mcp_server.mcp._tool_manager._tools.keys())
-        assert len(tools) == 13, f"Expected 13 tools, got {len(tools)}: {tools}"
+        assert len(tools) == 17, f"Expected 17 tools, got {len(tools)}: {tools}"
 
     def test_only_safe_tools_registered(self):
         """Verify no unexpected/generic command tools exist."""
@@ -226,8 +226,12 @@ class TestToolRegistration:
 
         expected_tools = {
             "list_services",
+            "list_containers",
             "get_service_logs",
             "get_service_status",
+            "get_container_health",
+            "get_host_service_status",
+            "get_host_service_logs",
             "restart_service",
             "start_service",
             "stop_service",

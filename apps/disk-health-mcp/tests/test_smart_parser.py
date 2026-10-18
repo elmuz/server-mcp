@@ -13,8 +13,10 @@ from disk_health_mcp.smart_parser import (
     compute_health_score,
     detect_manufacturer,
     format_smart_summary,
+    has_usable_smart_data,
     parse_seagate_raw_value,
     parse_smart_json,
+    parse_smart_text,
 )
 
 # ============================================================================
@@ -417,8 +419,37 @@ class TestSmartJSONParsing:
 # ============================================================================
 
 
+class TestSmartTextParsing:
+    """Text parsing must fail closed when smartctl did not return data."""
+
+    def test_command_not_found_returns_none(self):
+        output = "zsh:1: command not found: smartctl\n\n⚠️ Exit code: 127"
+        assert parse_smart_text(output) is None
+
+    def test_empty_output_returns_none(self):
+        assert parse_smart_text("") is None
+
+    def test_valid_text_returns_device(self):
+        output = (
+            "Device Model:     WDC WD40EFRX-68N32N0\n"
+            "Serial Number:    WD-WMC7K1234567\n"
+            "SMART overall-health self-assessment test result: PASSED\n"
+        )
+        device = parse_smart_text(output)
+        assert device is not None
+        assert device.model == "WDC WD40EFRX-68N32N0"
+        assert device.overall_health == "PASSED"
+        assert has_usable_smart_data(device) is True
+
+
 class TestSummaryFormatting:
     """Test human-readable summary formatting."""
+
+    def test_empty_device_is_refused(self):
+        summary = format_smart_summary(SmartDevice())
+        assert "No usable SMART data" in summary
+        assert "100/100" not in summary
+        assert "No issues detected" not in summary
 
     def test_healthy_drive_summary(self):
         """A healthy drive should produce a clean summary."""

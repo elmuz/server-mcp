@@ -9,6 +9,7 @@ All HTTP operations are mocked - no real network calls.
 """
 
 import asyncio
+import json
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import aiohttp
@@ -614,6 +615,91 @@ class TestPrometheusClientTargets:
                 assert "Unexpected response" in result
 
         asyncio.run(run())
+
+
+class TestQueryAudit:
+    """HTTP query metadata is audited without persisting the query text."""
+
+    def test_influxdb_query_audit_metadata(self, tmp_path):
+        from server_management_lib import AuditLogger
+
+        log_path = tmp_path / "audit.jsonl"
+        audit = AuditLogger(log_path, enabled=True)
+        client = InfluxDBClient(host="localhost", database="testdb", audit=audit)
+        query = "SELECT * FROM cpu WHERE note = 'supersecret'"
+
+        async def run():
+            mock_response = MagicMock()
+            mock_response.status = 200
+            mock_response.json = AsyncMock(return_value=[{"time": "2024-01-01"}])
+
+            mock_cm = AsyncMock()
+            mock_cm.__aenter__ = AsyncMock(return_value=mock_response)
+            mock_cm.__aexit__ = AsyncMock(return_value=None)
+
+            mock_session = MagicMock()
+            mock_session.post.return_value = mock_cm
+            mock_session.__aenter__ = AsyncMock(return_value=mock_session)
+            mock_session.__aexit__ = AsyncMock(return_value=None)
+
+            with patch(
+                "server_management_lib.http_clients.aiohttp.ClientSession",
+                return_value=mock_session,
+            ):
+                await client.query(query)
+
+        asyncio.run(run())
+
+        raw = log_path.read_text(encoding="utf-8")
+        record = json.loads(raw.splitlines()[0])
+        assert record["event"] == "influxdb_query"
+        assert record["database"] == "testdb"
+        assert record["status"] == 200
+        assert record["query_length"] == len(query + "\nLIMIT 1000")
+        assert len(record["query_sha256"]) == 64
+        assert "duration_ms" in record
+        assert "SELECT" not in raw
+        assert "supersecret" not in raw
+
+    def test_prometheus_query_audit_metadata(self, tmp_path):
+        from server_management_lib import AuditLogger
+
+        log_path = tmp_path / "audit.jsonl"
+        audit = AuditLogger(log_path, enabled=True)
+        client = PrometheusClient(host="localhost", audit=audit)
+        query = 'up{instance="topsecret"}'
+
+        async def run():
+            mock_response = MagicMock()
+            mock_response.status = 200
+            mock_response.json = AsyncMock(
+                return_value={"status": "success", "data": {"resultType": "vector"}}
+            )
+
+            mock_cm = MagicMock()
+            mock_cm.__aenter__ = AsyncMock(return_value=mock_response)
+            mock_cm.__aexit__ = AsyncMock(return_value=None)
+
+            mock_session = MagicMock()
+            mock_session.get.return_value = mock_cm
+            mock_session.__aenter__ = AsyncMock(return_value=mock_session)
+            mock_session.__aexit__ = AsyncMock(return_value=None)
+
+            with patch(
+                "server_management_lib.http_clients.aiohttp.ClientSession",
+                return_value=mock_session,
+            ):
+                await client.query(query)
+
+        asyncio.run(run())
+
+        raw = log_path.read_text(encoding="utf-8")
+        record = json.loads(raw.splitlines()[0])
+        assert record["event"] == "prometheus_query"
+        assert record["status"] == 200
+        assert record["query_length"] == len(query)
+        assert len(record["query_sha256"]) == 64
+        assert "topsecret" not in raw
 
 
 class TestQueryHelpers:

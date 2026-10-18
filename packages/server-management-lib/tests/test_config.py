@@ -24,10 +24,23 @@ class TestDefaultConfiguration:
         assert "host" in DEFAULT_CONFIG
         assert "influxdb" in DEFAULT_CONFIG
         assert "prometheus" in DEFAULT_CONFIG
+        assert "health" in DEFAULT_CONFIG
+
+    def test_health_disk_paths_default_to_root(self):
+        """get_server_health must have a disk path even without configuration."""
+        assert DEFAULT_CONFIG["health"]["disk_paths"] == ["/"]
 
     def test_security_settings(self):
         """Generic command execution must be disabled by default."""
         assert DEFAULT_CONFIG["security"]["allow_generic_commands"] is False
+        assert DEFAULT_CONFIG["security"]["host_units"] == [
+            "telegraf",
+            "smartd",
+            "docker",
+            "snapraid",
+            "mergerfs",
+            "smbd",
+        ]
 
     def test_load_example_config(self):
         """Example config file should load without error."""

@@ -7,13 +7,16 @@ Covers:
 - Command safety (whitelist + dangerous pattern blocking)
 - File path validation (traversal prevention)
 - Database query validation (InfluxDB + Prometheus)
-- Search pattern sanitization
+- Log search pattern and time-filter validation
 - SMART test type validation
 """
 
 import pytest
 
-from server_management_lib.security import SecurityValidator
+from server_management_lib.security import (
+    FileAccess,
+    SecurityValidator,
+)
 
 # ============================================================================
 # Device Name Validation
@@ -162,9 +165,186 @@ class TestServiceNameValidation:
             )
 
 
+class TestAllowedContainers:
+    """Container names allowed outside a service directory."""
+
+    def test_default_is_empty(self):
+        assert SecurityValidator({}).allowed_containers == frozenset()
+
+    def test_valid_names_are_kept(self):
+        security = SecurityValidator(
+            {"security": {"allowed_containers": ["watchtower", "wud"]}}
+        )
+
+        assert security.allowed_containers == frozenset({"watchtower", "wud"})
+
+    def test_invalid_names_are_dropped(self):
+        security = SecurityValidator(
+            {
+                "security": {
+                    "allowed_containers": [
+                        "watchtower",
+                        "../../etc",
+                        42,
+                        "--privileged",
+                    ]
+                }
+            }
+        )
+
+        assert security.allowed_containers == frozenset({"watchtower"})
+
+    def test_single_string_is_accepted(self):
+        security = SecurityValidator({"security": {"allowed_containers": "watchtower"}})
+
+        assert security.allowed_containers == frozenset({"watchtower"})
+
+    def test_non_list_value_is_ignored(self):
+        security = SecurityValidator({"security": {"allowed_containers": 42}})
+
+        assert security.allowed_containers == frozenset()
+
+    def test_none_is_empty(self):
+        security = SecurityValidator({"security": {"allowed_containers": None}})
+
+        assert security.allowed_containers == frozenset()
+
+
+class TestHostUnits:
+    """Host infrastructure units are restricted by an explicit allowlist."""
+
+    def test_default_allowlist(self):
+        allowed = SecurityValidator({}).allowed_host_units
+
+        assert {
+            "telegraf",
+            "smartd",
+            "docker",
+            "snapraid",
+            "mergerfs",
+            "smbd",
+        } <= allowed
+
+    def test_allowlisted_unit_is_accepted(self):
+        security = SecurityValidator({})
+
+        assert security.validate_host_unit("telegraf") is True
+        assert security.validate_host_unit("docker") is True
+
+    def test_arbitrary_unit_is_rejected(self):
+        security = SecurityValidator({})
+
+        for unit in ("sshd", "telegraf.service", "../../etc/passwd", "cron"):
+            assert security.validate_host_unit(unit) is False
+
+    def test_injection_and_path_syntax_is_rejected(self):
+        security = SecurityValidator({})
+
+        for unit in (
+            "telegraf;rm -rf /",
+            "telegraf$(id)",
+            "telegraf --now",
+            "telegraf\nmalicious",
+            "",
+            None,
+            123,
+        ):
+            assert security.validate_host_unit(unit) is False
+
+    def test_configured_allowlist_replaces_default(self):
+        security = SecurityValidator({"security": {"host_units": ["nginx"]}})
+
+        assert security.allowed_host_units == frozenset({"nginx"})
+        assert security.validate_host_unit("nginx") is True
+        assert security.validate_host_unit("telegraf") is False
+
+    def test_empty_allowlist_disables_host_tools(self):
+        security = SecurityValidator({"security": {"host_units": []}})
+
+        assert security.allowed_host_units == frozenset()
+        assert security.validate_host_unit("telegraf") is False
+
+    def test_invalid_entries_are_dropped(self):
+        security = SecurityValidator(
+            {"security": {"host_units": ["nginx", "bad name", 42]}}
+        )
+
+        assert security.allowed_host_units == frozenset({"nginx"})
+
+
 # ============================================================================
 # Command Safety
 # ============================================================================
+
+
+class TestHealthDiskPaths:
+    """Mount points reported by get_server_health are validated and deduplicated."""
+
+    def test_default_is_root(self):
+        assert SecurityValidator({}).health_disk_paths == ("/",)
+
+    def test_configured_paths_preserve_order(self):
+        security = SecurityValidator(
+            {"health": {"disk_paths": ["/", "/mnt/storage", "/mnt/data1"]}}
+        )
+
+        assert security.health_disk_paths == ("/", "/mnt/storage", "/mnt/data1")
+
+    def test_paths_are_normalised_and_deduplicated(self):
+        security = SecurityValidator(
+            {"health": {"disk_paths": ["/mnt//storage/.", "/mnt/storage", "/"]}}
+        )
+
+        assert security.health_disk_paths == ("/mnt/storage", "/")
+
+    def test_single_string_is_accepted(self):
+        security = SecurityValidator({"health": {"disk_paths": "/mnt/storage"}})
+
+        assert security.health_disk_paths == ("/mnt/storage",)
+
+    def test_invalid_entries_are_dropped(self):
+        security = SecurityValidator(
+            {
+                "health": {
+                    "disk_paths": [
+                        "/mnt/storage",
+                        "relative/path",
+                        "/mnt/../etc",
+                        "/mnt/storage;rm -rf /",
+                        "/mnt/$(id)",
+                        "~/storage",
+                        42,
+                    ]
+                }
+            }
+        )
+
+        assert security.health_disk_paths == ("/mnt/storage",)
+
+    def test_no_valid_entry_falls_back_to_root(self):
+        security = SecurityValidator({"health": {"disk_paths": []}})
+
+        assert security.health_disk_paths == ("/",)
+
+    def test_non_list_value_falls_back_to_root(self):
+        security = SecurityValidator({"health": {"disk_paths": 42}})
+
+        assert security.health_disk_paths == ("/",)
+
+    def test_non_mapping_section_falls_back_to_root(self):
+        security = SecurityValidator({"health": "/mnt/storage"})
+
+        assert security.health_disk_paths == ("/",)
+
+    def test_none_falls_back_to_root(self):
+        security = SecurityValidator({"health": {"disk_paths": None}})
+
+        assert security.health_disk_paths == ("/",)
+
+    def test_validate_disk_path_rejects_control_characters(self):
+        security = SecurityValidator({})
+
+        assert security.validate_disk_path("/mnt/storage\n/malicious") is None
 
 
 class TestCommandSafety:
@@ -174,27 +354,41 @@ class TestCommandSafety:
         self.security = SecurityValidator({})
 
     def test_disk_safe_commands_accepted(self):
-        """Disk diagnostic commands must pass the whitelist."""
+        """Disk diagnostic catalog commands must pass the allowlist."""
         safe = [
             "smartctl -a /dev/sda",
-            "smartctl -j -a /dev/sda",
-            "smartctl -t short /dev/sda 2>&1",
-            "smartctl -t long /dev/sda 2>&1",
-            "lsblk -d -o NAME,MODEL,SERIAL,SIZE,TYPE,TRAN --json 2>&1",
-            "zpool status -x 2>&1 && echo '---' && zpool list -o name,size 2>&1",
-            "cat /proc/mdstat 2>&1 && echo '---' && mdadm --detail --scan 2>&1",
-            "iostat -x 1 1 2>&1",
+            "/usr/sbin/smartctl -j -a /dev/sda",
+            "/usr/sbin/smartctl --version",
+            "/usr/sbin/smartctl -n standby -t short /dev/sda",
+            "/usr/sbin/smartctl -t short /dev/sda",
+            "/usr/sbin/smartctl -t long /dev/sda",
+            "lsblk -d -o NAME,MODEL,SERIAL,SIZE,TYPE,TRAN --json",
+            "zpool status -x",
+            "zpool list -o name,size,alloc,free,cap,dedup,health",
+            "cat /proc/mdstat",
+            "mdadm --detail --scan --verbose",
+            "iostat -x 1 1",
+            "snapraid status",
+            "findmnt --real -o TARGET,SOURCE,FSTYPE,SIZE,USED,AVAIL,USE%",
+            "findmnt -t fuse.mergerfs -o TARGET,SOURCE,FSTYPE,OPTIONS",
+            "df -h -x tmpfs -x devtmpfs -x overlay -x squashfs",
         ]
         for cmd in safe:
             assert self.security.is_command_safe(cmd) is True, f"Should accept: {cmd}"
 
     def test_general_safe_commands_accepted(self):
-        """General safe commands (non-disk whitelist) must pass."""
+        """remote-server catalog commands must pass the allowlist."""
         safe = [
             "docker ps",
-            "docker logs myapp",
+            "docker logs --tail 10 -- myapp",
             "uptime",
             "free -h",
+            "df -h /srv",
+            "ls -1 /srv/",
+            "test -d '/srv/my app'",
+            "echo 'Connection successful'",
+            "systemctl status --no-pager --full telegraf",
+            "journalctl -u telegraf -n 200 --no-pager --output short-iso",
         ]
         for cmd in safe:
             assert self.security.is_command_safe(cmd) is True, f"Should accept: {cmd}"
@@ -212,42 +406,41 @@ class TestCommandSafety:
         for cmd in dangerous:
             assert self.security.is_command_safe(cmd) is False, f"Should block: {cmd}"
 
-    def test_redirect_outside_2and1_blocked(self):
-        """Output redirection (except 2>&1) must be blocked for disk commands."""
+    def test_shell_syntax_blocked(self):
+        """Hand-built shell syntax must be rejected even for known executables."""
         dangerous = [
             "smartctl -a /dev/sda > /dev/sda",
             "smartctl -j -a /dev/sda > /tmp/evil",
-        ]
-        for cmd in dangerous:
-            assert self.security.is_command_safe(cmd) is False
-
-    def test_output_redirection_blocked(self):
-        """Output redirection (except 2>&1) should be blocked for disk commands."""
-        dangerous = [
-            "smartctl -a /dev/sda > /tmp/output",
-            "smartctl -j -a /dev/sda > /dev/null",
-            "nvme smart-log /dev/nvme0n1 > /tmp/output",
-        ]
-        for cmd in dangerous:
-            assert self.security.is_command_safe(cmd) is False
-
-    def test_2and1_redirect_allowed(self):
-        """2>&1 redirect should be allowed for disk commands."""
-        safe = [
             "smartctl -a /dev/sda 2>&1",
-            "nvme smart-log /dev/nvme0n1 2>&1",
-        ]
-        for cmd in safe:
-            assert self.security.is_command_safe(cmd) is True
-
-    def test_shell_chaining_allowed(self):
-        """Shell chaining (&&, ||) should be allowed for disk commands."""
-        safe = [
             "smartctl -a /dev/sda && echo success",
             "lsblk -d || echo failed",
+            "docker ps; curl evil",
+            "docker ps\ncurl evil",
+            "cat /proc/mdstat /etc/shadow",
         ]
-        for cmd in safe:
-            assert self.security.is_command_safe(cmd) is True
+        for cmd in dangerous:
+            assert self.security.is_command_safe(cmd) is False, f"Should block: {cmd}"
+
+    def test_unknown_commands_blocked(self):
+        """Executables outside the catalog are rejected instead of allowed."""
+        unknown = [
+            "whoami",
+            "docker run --privileged alpine",
+            "docker exec app sh",
+            "smartctl --scan",
+            "nvme list",
+            "ls -la /",
+            "cat /etc/passwd",
+        ]
+        for cmd in unknown:
+            assert self.security.is_command_safe(cmd) is False, f"Should block: {cmd}"
+
+    def test_allow_generic_commands_flag_has_no_effect(self):
+        """The legacy config flag must not re-enable arbitrary execution."""
+        security = SecurityValidator({"security": {"allow_generic_commands": True}})
+        assert security.is_command_safe("whoami") is False
+        assert security.is_command_safe("docker exec app sh") is False
+        assert security.is_command_safe("smartctl -a /dev/sda") is True
 
     def test_net_tools_blocked(self):
         """Network exfiltration tools should be blocked."""
@@ -283,8 +476,35 @@ class TestFilePathValidation:
             result = self.security.validate_service_file_path(service, path)
             assert result is not None, f"Should accept: {path}"
 
+    def test_path_construction_is_lexical(self, tmp_path):
+        """The path belongs to the target host, so it must not be resolved here."""
+        service_dir = tmp_path / "services" / "myapp"
+        service_dir.mkdir(parents=True)
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        (service_dir / "link").symlink_to(outside)
+
+        security = SecurityValidator(
+            {"security": {"services_path": str(tmp_path / "services")}}
+        )
+        result = security.validate_service_file_path("myapp", "link/file.txt")
+
+        assert result == f"{service_dir}/link/file.txt"
+        assert str(outside) not in result
+
+    def test_dot_components_are_normalised_lexically(self):
+        result = self.security.validate_service_file_path("myapp", "logs/./app.log")
+        assert result == "/srv/myapp/logs/app.log"
+
+    def test_service_must_be_a_single_path_component(self):
+        for service in ("", ".", "..", "/etc", "../myapp", "myapp/other"):
+            check = self.security.check_service_file_path(service, "config.yml")
+            assert check.path is None, f"Should reject service: {service!r}"
+            assert check.access is FileAccess.BLOCKED_INVALID
+
     def test_valid_paths_return_correct_structure(self):
         """Valid file paths should return paths within /srv/{service}/."""
+
         valid_paths = [
             ("myapp", "docker-compose.yml"),
             ("myapp", "config.yaml"),
@@ -307,13 +527,53 @@ class TestFilePathValidation:
 
     def test_sensitive_files_blocked(self):
         sensitive = [
-            ("myapp", ".env"),
             ("myapp", "secrets/password.txt"),
             ("myapp", "keys/server.key"),
+            ("myapp", "certs/server.pem"),
+            ("myapp", "credentials.json"),
+            ("myapp", "token.txt"),
+            ("myapp", ".ssh/id_rsa"),
+            ("myapp", "config/id_ed25519"),
+            ("myapp", ".git/config"),
         ]
         for service, path in sensitive:
             result = self.security.validate_service_file_path(service, path)
             assert result is None, f"Should block sensitive file: {path}"
+
+    def test_sensitive_files_report_a_policy_block(self):
+        check = self.security.check_service_file_path("myapp", "keys/server.key")
+        assert check.path is None
+        assert check.access is FileAccess.BLOCKED_SENSITIVE
+        assert check.reason
+
+    def test_sensitive_matching_is_not_substring_based(self):
+        """Components like 'monkey' or 'tokenizer' are not secret names."""
+        allowed = [
+            ("myapp", "monkey.txt"),
+            ("myapp", "tokenizer.json"),
+            ("myapp", "hockey.txt"),
+            ("myapp", "keyboard.conf"),
+        ]
+        for service, path in allowed:
+            result = self.security.validate_service_file_path(service, path)
+            assert result is not None, f"Should accept: {path}"
+
+    def test_env_files_are_readable_but_redacted(self):
+        for path in [
+            ".env",
+            ".env.local",
+            ".env.production",
+            ".envrc",
+            "config/app.env",
+        ]:
+            check = self.security.check_service_file_path("myapp", path)
+            assert check.path is not None, f"Should accept: {path}"
+            assert check.access is FileAccess.REDACT, f"Should redact: {path}"
+
+    def test_regular_files_are_not_redacted(self):
+        check = self.security.check_service_file_path("myapp", "docker-compose.yml")
+        assert check.path is not None
+        assert check.access is FileAccess.ALLOW
 
     def test_none_input(self):
         result = self.security.validate_service_file_path("myapp", None)
@@ -493,46 +753,87 @@ class TestPrometheusQueryValidation:
 # ============================================================================
 
 
-class TestSearchPatternSanitization:
-    """Test search pattern sanitization."""
+class TestSearchPatternValidation:
+    """Log search patterns are matched locally, so they are never rewritten."""
 
     def setup_method(self):
         self.security = SecurityValidator({})
 
-    def test_safe_patterns_preserved(self):
-        safe = ["error", "connection failed", "timeout", "192.168.1.1"]
-        for p in safe:
-            assert self.security.sanitize_search_pattern(p) == p
-
-    def test_dangerous_patterns_sanitized(self):
-        result = self.security.sanitize_search_pattern("'; rm -rf /")
-        assert "'" not in result
-        assert ";" not in result
+    def test_patterns_are_preserved_exactly(self):
+        patterns = [
+            "error",
+            "connection failed",
+            "192.168.1.1",
+            'it\'s a quoted "value"',
+            "'; rm -rf /",
+            "$(whoami)",
+            "error;ls|cat",
+            "!important #tag ~home",
+            "$(rm -rf /)",
+        ]
+        for pattern in patterns:
+            assert self.security.validate_search_pattern(pattern) == pattern
 
     def test_empty_pattern_raises(self):
         with pytest.raises(ValueError, match="empty"):
-            self.security.sanitize_search_pattern("';|&$")
+            self.security.validate_search_pattern("")
 
     def test_none_input_raises(self):
         with pytest.raises(ValueError, match="empty"):
-            self.security.sanitize_search_pattern(None)
-
-    def test_empty_string_raises(self):
-        with pytest.raises(ValueError, match="empty"):
-            self.security.sanitize_search_pattern("")
+            self.security.validate_search_pattern(None)  # type: ignore[arg-type]
 
     def test_non_string_input_raises(self):
         with pytest.raises(ValueError, match="empty"):
-            self.security.sanitize_search_pattern(123)  # type: ignore[arg-type]
+            self.security.validate_search_pattern(123)  # type: ignore[arg-type]
 
-    def test_becomes_empty_after_sanitization_raises(self):
-        with pytest.raises(ValueError, match="empty"):
-            self.security.sanitize_search_pattern("';|&$")
+    def test_long_pattern_raises(self):
+        with pytest.raises(ValueError, match="too long"):
+            self.security.validate_search_pattern("a" * 201)
 
-    def test_pattern_truncated(self):
-        long_pattern = "a" * 300
-        result = self.security.sanitize_search_pattern(long_pattern)
-        assert len(result) <= 200
+    @pytest.mark.parametrize("pattern", ["bad\npattern", "bad\tpattern", "bad\x00"])
+    def test_control_characters_raise(self, pattern):
+        with pytest.raises(ValueError, match="control characters"):
+            self.security.validate_search_pattern(pattern)
+
+
+class TestLogTimeValidation:
+    """``docker logs --since/--until`` accepts a bounded set of formats."""
+
+    @pytest.fixture
+    def security(self):
+        return SecurityValidator({})
+
+    @pytest.mark.parametrize(
+        "value",
+        [
+            "2026-10-18T21:00:00Z",
+            "2026-10-18T21:00:00.123456+02:00",
+            "2026-10-18",
+            "30m",
+            "1h30m",
+            "2.5s",
+            "500ms",
+        ],
+    )
+    def test_valid_values(self, security, value):
+        assert security.validate_log_time(value) is True
+
+    @pytest.mark.parametrize(
+        "value",
+        [
+            "",
+            None,
+            "--help",
+            "-1h",
+            "yesterday",
+            "1h30",
+            "2026-13-99T99:00:00Z",
+            "2026-10-18 21:00:00",
+            "a" * 65,
+        ],
+    )
+    def test_invalid_values(self, security, value):
+        assert security.validate_log_time(value) is False  # type: ignore[arg-type]
 
 
 # ============================================================================

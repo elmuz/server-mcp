@@ -19,6 +19,11 @@ ANSI_ESCAPE_PATTERN = re.compile(
 # Control characters except tab, newline and carriage return.
 CONTROL_CHAR_PATTERN = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
 
+# A response that was already truncated at this limit must not be truncated
+# again: composite tools assemble several capped blocks and then apply a final
+# cap, which would otherwise append a second marker.
+TRUNCATION_MARKER_PATTERN = re.compile(r"\n… \[[^\]]+ truncated to (\d+) bytes\]$")
+
 
 def strip_ansi(text: str) -> str:
     """Remove ANSI terminal escape sequences."""
@@ -42,6 +47,10 @@ def sanitize_output(
     cleaned = CONTROL_CHAR_PATTERN.sub("", strip_ansi(text))
 
     if max_bytes <= 0:
+        return cleaned
+
+    existing = TRUNCATION_MARKER_PATTERN.search(cleaned)
+    if existing is not None and int(existing.group(1)) == max_bytes:
         return cleaned
 
     encoded = cleaned.encode("utf-8")

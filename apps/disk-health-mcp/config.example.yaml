@@ -24,44 +24,53 @@ ssh:
   connect_timeout: 10
 
 security:
-  # Generic command execution is never implemented; this key is reserved.
+  # The command allowlist is built into the library and cannot be extended
+  # from configuration. This legacy key has no effect.
   allow_generic_commands: false
 
-  # Allowed disk diagnostic commands (whitelist)
-  # These are the ONLY commands the MCP can run on the host
-  allowed_commands:
-    - smartctl
-    - nvme
-    - lsblk
-    - zpool
-    - zfs
-    - mdadm
-    - iostat
-    - cat  # only for /proc/mdstat
-
 # Data sources: configure at least one
-# host: SSH-based smartctl and system tools
+# host: SSH-based smartctl, nvme, zfs/mdadm/snapraid, mount and iostat tools
+#       (includes get_snapraid_status and get_mount_status for mergerFS + SnapRAID)
 host:
   enabled: true
 
-# prometheus: Query node_exporter disk metrics via Prometheus
+# prometheus: Optional. Query disk metrics from Prometheus.
+# smartmon_* metrics exist only when node_exporter has the smartmon collector;
+# Prometheus is not required for disk health. Telegraf -> InfluxDB is the
+# recommended SMART source.
 prometheus:
   enabled: false
-  host: "prometheus.example.com"
+  host: "prometheus.example.com"  # hostname/IP only, no scheme or path
   port: 443
   use_https: true
   token: "your-api-token"
   query_timeout: "30s"
+  # Optional: reach a loopback-only Prometheus through the configured SSH host.
+  # ssh_tunnel:
+  #   enabled: true
+  #   remote_host: "127.0.0.1"  # from the SSH server's point of view
+  #   remote_port: 9090         # defaults to prometheus.port
+  #   local_host: "127.0.0.1"   # loopback only
+  #   local_port: 0             # 0 = ephemeral local port
 
 # influxdb: Query historical disk metrics from InfluxDB
 influxdb:
   enabled: false
-  host: "influxdb.example.com"
+  # Mode A: HTTPS reverse proxy (SWAG, Caddy, nginx) with a read-only token.
+  host: "influxdb.example.com"  # hostname/IP only, no scheme or path
   port: 443
   use_https: true
-  database: "telegraf"  # Default database (Telegraf collects smart/diskio)
+  # Mode B: keep a local SSH tunnel open and point host/port at it, or let
+  # the MCP create the tunnel with the optional ssh_tunnel block below.
+  database: "my-db"  # Database that holds the Telegraf measurements
   token: "your-api-token"
   query_limit: 1000  # Maximum rows returned per query
+  # ssh_tunnel:
+  #   enabled: true
+  #   remote_host: "127.0.0.1"  # from the SSH server's point of view
+  #   remote_port: 8181         # defaults to influxdb.port
+  #   local_host: "127.0.0.1"   # loopback only
+  #   local_port: 0             # 0 = ephemeral local port
 
 # Output safety limits (applies to command output, files and query results)
 output:

@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from server_management_lib import SecurityValidator, load_config
+from server_management_lib import FileAccess, SecurityValidator, load_config
 
 # ============================================================================
 # Security Validator Tests
@@ -116,9 +116,6 @@ class TestFilePathValidation:
     def test_sensitive_file_patterns(self):
         """Test access to sensitive files is blocked."""
         sensitive_paths = [
-            ("myapp", ".env"),
-            ("myapp", ".env.local"),
-            ("myapp", "config/.env"),
             ("myapp", "secrets/password.txt"),
             ("myapp", "keys/server.key"),
             ("myapp", "certs/server.pem"),
@@ -131,6 +128,31 @@ class TestFilePathValidation:
         for service, path in sensitive_paths:
             result = self.security.validate_service_file_path(service, path)
             assert result is None, f"Should block sensitive file: {path}"
+
+    def test_env_files_are_readable_but_redacted(self):
+        """Dotenv files are the primary way to debug a compose stack."""
+        env_paths = [
+            ("myapp", ".env"),
+            ("myapp", ".env.local"),
+            ("myapp", "config/.env"),
+        ]
+
+        for service, path in env_paths:
+            check = self.security.check_service_file_path(service, path)
+            assert check.path is not None, f"Should accept: {path}"
+            assert check.access is FileAccess.REDACT, f"Should redact: {path}"
+
+    def test_sensitive_matching_is_not_substring_based(self):
+        """Names such as monkey.txt and tokenizer.json are not secrets."""
+        for path in ["monkey.txt", "tokenizer.json", "keyboard.conf"]:
+            result = self.security.validate_service_file_path("myapp", path)
+            assert result is not None, f"Should accept: {path}"
+
+    def test_traversal_is_not_reported_as_a_sensitive_file(self):
+        """../../etc/shadow must stay blocked as a traversal, not as .env."""
+        check = self.security.check_service_file_path("myapp", "../../etc/shadow")
+        assert check.path is None
+        assert check.access is FileAccess.BLOCKED_INVALID
 
     def test_path_resolution_escape(self):
         """Test that path resolution can't escape service directory."""
@@ -147,51 +169,33 @@ class TestFilePathValidation:
                 assert result.startswith(f"/srv/{service}/"), f"Path escaped: {result}"
 
 
-class TestSearchPatternSanitization:
-    """Test search pattern sanitization."""
+class TestSearchPatternValidation:
+    """Search patterns are matched locally and must keep their exact text."""
 
     def setup_method(self):
         self.security = SecurityValidator({})
 
-    def test_safe_patterns_preserved(self):
-        """Test normal search patterns are preserved."""
-        safe_patterns = [
+    def test_patterns_are_preserved_exactly(self):
+        """Punctuation that is harmless in local filtering must not change."""
+        patterns = [
             "error",
             "connection failed",
-            "timeout",
             "HTTP 500",
-            "Exception in thread",
             "192.168.1.1",
+            'it\'s a quoted "value"',
+            "!important #tag ~home",
+            "error;ls|cat",
+            "$(whoami)",
+            "error>output.txt",
+            "error$HOME",
         ]
 
-        for pattern in safe_patterns:
-            sanitized = self.security.sanitize_search_pattern(pattern)
-            assert pattern == sanitized, f"Safe pattern should be preserved: {pattern}"
+        for pattern in patterns:
+            assert self.security.validate_search_pattern(pattern) == pattern
 
-    def test_dangerous_patterns_sanitized(self):
-        """Test shell injection patterns are removed."""
-        dangerous_patterns = [
-            "'; rm -rf /",  # Quote + command
-            "$(whoami)",  # Command substitution
-            "`id`",  # Command substitution
-            "error;ls",  # Command separator
-            "error|cat /etc/passwd",  # Pipe
-            "error>output.txt",  # Redirect
-            "error\nevil_command",  # Newline
-            "error$HOME",  # Variable
-        ]
-
-        for original in dangerous_patterns:
-            sanitized = self.security.sanitize_search_pattern(original)
-            # Should not contain shell special characters
-            assert "'" not in sanitized
-            assert '"' not in sanitized
-            assert "`" not in sanitized
-            assert "$" not in sanitized
-            assert ";" not in sanitized
-            assert "|" not in sanitized
-            assert "\n" not in sanitized
-            assert "\r" not in sanitized
+    def test_control_characters_are_rejected(self):
+        with pytest.raises(ValueError, match="control characters"):
+            self.security.validate_search_pattern("error\nevil_command")
 
 
 class TestCommandSafety:
@@ -201,18 +205,18 @@ class TestCommandSafety:
         self.security = SecurityValidator({})
 
     def test_safe_commands_accepted(self):
-        """Test safe commands are accepted."""
+        """Test catalog commands are accepted."""
         safe_commands = [
             "docker ps",
-            "docker logs myapp",
-            "docker restart myapp",
-            "ls -lah /srv/myapp",
-            "cat /srv/myapp/config.yml",
+            "docker logs --tail 100 -- myapp",
+            "docker restart -- myapp",
+            "ls -1 /srv/",
             "free -h",
             "df -h /srv",
             "uptime",
-            "docker inspect myapp",
+            "docker inspect --format '{{json .State.Health}}' -- myapp",
             "docker stats --no-stream myapp",
+            "test -d /srv/myapp",
         ]
 
         for cmd in safe_commands:
@@ -237,10 +241,19 @@ class TestCommandSafety:
             "iptables -F",  # Firewall
             "kill -9 1",  # Kill init
             "mkfs.ext4 /dev/sda",  # Format disk
+            "whoami",  # Not in the catalog
+            "docker run --privileged alpine",  # Not in the catalog
+            "docker ps; curl evil",  # Shell chaining
         ]
 
         for cmd in dangerous_commands:
             assert self.security.is_command_safe(cmd) is False, f"Should block: {cmd}"
+
+    def test_allow_generic_commands_cannot_enable_execution(self):
+        """The legacy flag must not turn the policy into a generic executor."""
+        security = SecurityValidator({"security": {"allow_generic_commands": True}})
+        assert security.is_command_safe("whoami") is False
+        assert security.is_command_safe("docker exec app sh") is False
 
 
 # ============================================================================
@@ -319,8 +332,12 @@ class TestToolSecurity:
         # Should only have these safe tools
         expected_tools = {
             "list_services",
+            "list_containers",
             "get_service_logs",
             "get_service_status",
+            "get_container_health",
+            "get_host_service_status",
+            "get_host_service_logs",
             "restart_service",
             "start_service",
             "stop_service",
@@ -377,28 +394,33 @@ class TestAttackScenarios:
             assert result is None, f"Should block: {path}"
 
     def test_sensitive_data_extraction(self):
-        """Test attempts to access sensitive data."""
-        attacks = [
+        """Dotenv files are masked; credential files are refused."""
+        redacted = [
             ("myapp", ".env"),
             ("myapp", ".env.production"),
+        ]
+        for service, path in redacted:
+            check = self.security.check_service_file_path(service, path)
+            assert check.path is not None, f"Should accept: {path}"
+            assert check.access is FileAccess.REDACT, f"Should redact: {path}"
+
+        blocked = [
             ("myapp", "config/database.yml"),
             ("myapp", "secrets/api_key.txt"),
             ("myapp", ".git/config"),  # Git config might have credentials
-            ("myapp", "docker-compose.yml"),  # Might contain passwords
         ]
-
-        # Some of these might be legitimate, but sensitive patterns should be caught
-        for service, path in attacks:
+        for service, path in blocked:
             result = self.security.validate_service_file_path(service, path)
-            # Files with 'secret', 'password', 'token', 'key' should be blocked
-            if any(
-                pattern in path.lower()
-                for pattern in ["secret", "password", "token", ".env", "key"]
-            ):
-                assert result is None, f"Should block sensitive file: {path}"
+            assert result is None, f"Should block sensitive file: {path}"
 
-    def test_log_search_injection(self):
-        """Test injection via log search patterns."""
+        # A compose file is readable; its ${VARS} are resolved through .env.
+        assert (
+            self.security.validate_service_file_path("myapp", "docker-compose.yml")
+            is not None
+        )
+
+    def test_log_search_pattern_is_not_shell_input(self):
+        """Shell-looking patterns are literal data for the local filter."""
         attacks = [
             "'; cat /etc/passwd #",
             "$(rm -rf /)",
@@ -407,12 +429,7 @@ class TestAttackScenarios:
         ]
 
         for attack in attacks:
-            sanitized = self.security.sanitize_search_pattern(attack)
-            # Should not contain executable content
-            assert "'" not in sanitized
-            assert '"' not in sanitized
-            assert "`" not in sanitized
-            assert "$" not in sanitized
+            assert self.security.validate_search_pattern(attack) == attack
 
 
 # ============================================================================

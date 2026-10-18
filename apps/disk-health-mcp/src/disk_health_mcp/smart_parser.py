@@ -397,11 +397,28 @@ def parse_smart_json(data: dict) -> SmartDevice:
     return device
 
 
-def parse_smart_text(output: str) -> SmartDevice:
+def has_usable_smart_data(device: SmartDevice) -> bool:
+    """Return True when a parsed device contains actual SMART information.
+
+    An empty or error response must never be rendered as a healthy disk. A valid
+    smartctl response normally has at least a device path, a model, a SMART
+    verdict, or an attribute table.
+    """
+    return bool(
+        device.device_path
+        or device.model
+        or device.attributes
+        or device.overall_health in ("PASSED", "FAILED")
+        or device.smart_supported
+    )
+
+
+def parse_smart_text(output: str) -> SmartDevice | None:
     """
     Parse smartctl text output as fallback.
 
-    Used when JSON output is not available.
+    Used when JSON output is not available. Returns ``None`` when the text does
+    not contain usable SMART data (for example command-not-found output).
     """
     device = SmartDevice()
     device.attributes = []
@@ -460,6 +477,9 @@ def parse_smart_text(output: str) -> SmartDevice:
             elif line.strip() == "" or not line.startswith(" "):
                 in_attr_table = False
 
+    if not has_usable_smart_data(device):
+        return None
+
     device.health_score = compute_health_score(device)
     return device
 
@@ -468,8 +488,15 @@ def format_smart_summary(device: SmartDevice) -> str:
     """
     Format a human-readable summary of device health.
 
-    This is the primary output for the MCP tool.
+    This is the primary output for the MCP tool. An empty device is refused
+    rather than rendered as a perfect score.
     """
+    if not has_usable_smart_data(device):
+        return (
+            "❌ No usable SMART data was parsed.\n"
+            "No health score or issue status is being inferred."
+        )
+
     lines = []
     lines.append(f"Device: {device.device_path}")
     lines.append(f"Model:  {device.model}")

@@ -177,7 +177,7 @@ class TestSSHCommandExecution:
             # These should pass security checks
             safe_commands = [
                 "docker ps",
-                "ls -lah /srv",
+                "ls -1 /srv",
                 "uptime",
                 "free -h",
             ]
@@ -200,6 +200,11 @@ class TestSSHManagerMock:
 
     def test_connect_failure(self, config, security):
         """Test handling of connection failure."""
+
+        # Disable known_hosts so the test does not depend on the developer/CI
+        # home directory. Without this, SSHManager raises before asyncssh is
+        # called, and the mocked connection failure is never exercised.
+        config = {**config, "ssh": {**config["ssh"], "known_hosts": "none"}}
 
         async def run_test():
             manager = SSHManager(config, security)
@@ -251,7 +256,7 @@ class TestSSHManagerMock:
             )
             manager.connection = mock_connection
 
-            result = await manager.execute_safe_command("some-command")
+            result = await manager.execute_safe_command("docker ps")
 
             assert "partial output" in result
             assert "error message" in result
@@ -270,7 +275,7 @@ class TestSSHManagerMock:
             mock_connection.run.side_effect = TimeoutError(30)
             manager.connection = mock_connection
 
-            result = await manager.execute_safe_command("slow-command")
+            result = await manager.execute_safe_command("docker ps")
 
             assert "timed out" in result.lower()
 

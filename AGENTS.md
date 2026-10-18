@@ -9,8 +9,8 @@ health without exposing credentials or allowing arbitrary commands.
 This is a **uv workspace monorepo**:
 
 ```text
-apps/remote-server-mcp/          MCP server: Docker/SSH service operations (13 tools)
-apps/disk-health-mcp/            MCP server: SMART/NVMe/ZFS/RAID diagnostics (11 tools)
+apps/remote-server-mcp/          MCP server: Docker/SSH and host-service operations (17 tools)
+apps/disk-health-mcp/            MCP server: SMART/NVMe/ZFS/mdadm/SnapRAID diagnostics (13 tools)
 packages/server-management-lib/  Security policy, executors, config, HTTP clients
 ```
 
@@ -68,12 +68,15 @@ All must pass before committing. Never commit on a broken state.
 
 ### Operation catalog
 
-Remote server commands live in `apps/remote-server-mcp/src/remote_server_mcp/operations.py`.
-They are typed argv templates rendered with `shlex.join`. Do **not** add string-concatenated
-shell commands. Avoid pipes and shell operators; filter output in Python instead.
+Both MCP servers keep their host commands in an `operations.py` catalog:
 
-Disk-health commands are built in `server.py` from validated device names and checked with
-`SecurityValidator.is_command_safe()`.
+- `apps/remote-server-mcp/src/remote_server_mcp/operations.py`
+- `apps/disk-health-mcp/src/disk_health_mcp/operations.py`
+
+They are typed argv templates rendered with `shlex.join`. Do **not** add string-concatenated
+shell commands. Avoid pipes and shell operators; filter output in Python instead. The shared
+`SecurityValidator.is_command_safe()` policy is a strict argv allowlist: unknown executables
+and hand-built shell syntax are rejected. `security.allow_generic_commands` is ignored.
 
 ### Security requirements
 
@@ -116,7 +119,7 @@ Config resolution: `--config` → env var (`REMOTE_SERVER_MCP_CONFIG` /
 
 - Unit tests must not require a real host or network.
 - Integration tests use the `integration` marker and are excluded by default.
-- Coverage gates: lib 90%, remote 60%, disk 55%. Raise them when adding tests, never lower.
+- Coverage gates: lib 90%, remote 60%, disk 65%. Raise them when adding tests, never lower.
 - Security tests should assert the behavior we want, not merely document current behavior.
 
 ## Documentation
@@ -146,4 +149,4 @@ Config resolution: `--config` → env var (`REMOTE_SERVER_MCP_CONFIG` /
 - [docs/tools.md](docs/tools.md)
 - [docs/development.md](docs/development.md)
 - [docs/releasing.md](docs/releasing.md)
-- [docs/modernization-plan.md](docs/modernization-plan.md)
+- [docs/modernization-plan.md](docs/modernization-plan.md) — single source of truth for the backlog and live-deployment findings

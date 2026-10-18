@@ -36,3 +36,9 @@ class TestSanitizeOutput:
 
     def test_zero_limit_disables_truncation(self):
         assert sanitize_output("x" * 50, 0) == "x" * 50
+
+    def test_truncation_is_idempotent_at_the_same_limit(self):
+        once = sanitize_output("x" * 50, 10, label="tool output")
+        twice = sanitize_output(once, 10, label="tool output")
+        assert twice == once
+        assert twice.count("truncated to 10 bytes") == 1

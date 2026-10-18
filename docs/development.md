@@ -39,7 +39,7 @@ working while using the shared workspace environment.
 |---|---|
 | `server-management-lib` | 90% |
 | `remote-server-mcp` | 60% |
-| `disk-health-mcp` | 55% |
+| `disk-health-mcp` | 65% |
 
 Raise a gate when adding tests; do not lower it to make a change pass.
 
@@ -52,11 +52,13 @@ apps/remote-server-mcp/src/remote_server_mcp/
 
 apps/disk-health-mcp/src/disk_health_mcp/
 ├── server.py          tools and formatting
+├── operations.py      typed argv templates
 ├── smart_parser.py    smartctl JSON/text parsing
 └── smartdb.py         generated SMART attribute database
 
 packages/server-management-lib/src/server_management_lib/
-├── security.py        validation and read-only policy
+├── security.py        validation and command/query policy
+├── operations.py      shared Operation template
 ├── base.py            executor primitives
 ├── ssh_manager.py     SSH + SFTP executor
 ├── local_executor.py  local executor
@@ -69,8 +71,8 @@ packages/server-management-lib/src/server_management_lib/
 
 ## Adding a tool
 
-1. Add the operation to `operations.py` (remote) or build it from a validated device name
-   (disk health). Never concatenate shell strings.
+1. Add the operation to the relevant app's `operations.py` (remote server or disk health).
+   Never concatenate shell strings, and keep shell operators out of the template.
 2. Validate every argument before use.
 3. Add `ToolAnnotations` matching the safety level.
 4. Add a command-construction or handler test with the executor mocked.

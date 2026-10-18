@@ -25,6 +25,8 @@ from typing import Any
 
 import yaml
 
+from .security import DEFAULT_HOST_UNITS
+
 logger = logging.getLogger(__name__)
 
 DEFAULT_CONFIG: dict[str, Any] = {
@@ -46,9 +48,20 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "services_path": "/srv",
         # NEVER allow generic command execution
         "allow_generic_commands": False,
+        # Container names that may be managed without a matching service
+        # directory. Containers that belong to a compose project below
+        # services_path do not need to be listed here.
+        "allowed_containers": [],
+        # Host systemd units that get_host_service_status/logs may inspect.
+        "host_units": list(DEFAULT_HOST_UNITS),
     },
     "host": {
         "enabled": False,
+    },
+    "health": {
+        # Absolute mount points reported by remote-server-mcp's
+        # get_server_health. NAS pools are separate mounts, so list each one.
+        "disk_paths": ["/"],
     },
     "influxdb": {
         "enabled": False,
@@ -58,6 +71,15 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "database": None,
         "token": None,
         "query_limit": 1000,
+        # Optional local port forward to a loopback-only InfluxDB. When
+        # enabled, host/port are rewritten to the tunnel endpoint at startup.
+        "ssh_tunnel": {
+            "enabled": False,
+            "remote_host": "127.0.0.1",
+            "remote_port": None,
+            "local_host": "127.0.0.1",
+            "local_port": 0,
+        },
     },
     "prometheus": {
         "enabled": False,
@@ -66,6 +88,13 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "use_https": False,
         "token": None,
         "query_timeout": "30s",
+        "ssh_tunnel": {
+            "enabled": False,
+            "remote_host": "127.0.0.1",
+            "remote_port": None,
+            "local_host": "127.0.0.1",
+            "local_port": 0,
+        },
     },
     "output": {
         # Maximum bytes returned to the model per command/file/query.
