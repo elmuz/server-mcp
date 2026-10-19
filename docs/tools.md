@@ -182,11 +182,17 @@ The target host therefore needs a sudoers rule for exactly this command, for exa
 funkysloth ALL=(root) NOPASSWD: /usr/local/bin/snapraid status
 ```
 
+A host that already grants the executor blanket passwordless sudo needs no extra rule;
+catafalco does (`security_sudoers_passwordless`), so the dedicated entry there only
+documents the requirement. On a host with narrower sudo, the entry above is required and
+its exact-argument match keeps `snapraid status <extra>` from running without a password.
 `sudo --non-interactive` (`-n`) fails instead of prompting on a non-interactive SSH
-session, and sudoers matches the arguments exactly, so `snapraid status <extra>` still
-requires a password. The command policy in `server-management-lib` accepts only this exact
-argv: `sudo` remains a blocked pattern for every other command. Install snapraid outside
-`/usr/local/bin` and both the sudoers rule and `SNAPRAID_STATUS_SUDO_ARGV` must change.
+session.
+
+What the MCP can request is bounded by the command policy in `server-management-lib`: it
+accepts only this exact argv and keeps `sudo` a blocked pattern for every other command,
+regardless of what the sudoers file would allow. Install snapraid outside `/usr/local/bin`
+and both the sudoers rule and `SNAPRAID_STATUS_SUDO_ARGV` must change.
 
 ## Device names
 

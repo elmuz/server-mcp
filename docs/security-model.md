@@ -47,10 +47,15 @@ There is exactly one privileged catalog command: `get_snapraid_status` runs
 `sudo -n /usr/local/bin/snapraid status` because SnapRAID stores its content file and lock
 as `root:root 0600`. `sudo` stays in the dangerous-pattern list for every other command;
 the validator short-circuits only when the whole command string equals that constant,
-which contains no caller-supplied text. The host side enforces the same rule twice: the
-sudoers entry matches the arguments exactly, and `-n` turns any mismatch into a failure
-instead of a password prompt. Changing the snapraid install path therefore requires a
-coordinated change to the sudoers rule and to `SNAPRAID_STATUS_SUDO_ARGV`.
+which contains no caller-supplied text. The model therefore cannot reach `sudo` through
+any tool, even on a host that grants the executor broad passwordless sudo. `-n` makes a
+missing or unmatched host rule fail instead of prompting on a non-interactive session.
+
+The host needs either a dedicated sudoers entry for that one command or an existing
+blanket passwordless sudo for the executor. The catafalco deployment uses the latter
+(`security_sudoers_passwordless` in the `geerlingguy.security` role), where the dedicated
+entry is simply redundant. The actual restriction on what can be executed is the command
+policy, not the sudoers entry.
 
 The local executor additionally rejects shell operators and uses `create_subprocess_exec`
 without a shell.
