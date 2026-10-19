@@ -369,12 +369,32 @@ class TestCommandSafety:
             "mdadm --detail --scan --verbose",
             "iostat -x 1 1",
             "snapraid status",
+            "sudo -n /usr/local/bin/snapraid status",
             "findmnt --real -o TARGET,SOURCE,FSTYPE,SIZE,USED,AVAIL,USE%",
             "findmnt -t fuse.mergerfs -o TARGET,SOURCE,FSTYPE,OPTIONS",
             "df -h -x tmpfs -x devtmpfs -x overlay -x squashfs",
         ]
         for cmd in safe:
             assert self.security.is_command_safe(cmd) is True, f"Should accept: {cmd}"
+
+    def test_sudo_is_limited_to_the_snapraid_status_command(self):
+        """sudo is blocked everywhere except the single read-only catalog argv."""
+        blocked = [
+            "sudo -n /usr/local/bin/snapraid sync",
+            "sudo -n /usr/local/bin/snapraid status --force-empty",
+            "sudo -n /usr/local/bin/snapraid status foo",
+            "sudo -n /usr/local/bin/snapraid",
+            "sudo -n smartctl -a /dev/sda",
+            "sudo -n /usr/sbin/smartctl -a /dev/sda",
+            "sudo -n /usr/bin/apt-get install nginx",
+            "sudo -n -- /usr/local/bin/snapraid status",
+            "sudo /usr/local/bin/snapraid status",
+            "sudo -n '/usr/local/bin/snapraid' status",
+            "echo sudo -n /usr/local/bin/snapraid status",
+            "sudo snapraid status",
+        ]
+        for cmd in blocked:
+            assert self.security.is_command_safe(cmd) is False, f"Should block: {cmd}"
 
     def test_general_safe_commands_accepted(self):
         """remote-server catalog commands must pass the allowlist."""

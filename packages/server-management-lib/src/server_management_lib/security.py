@@ -396,6 +396,23 @@ for _runtime in ("podman", "nerdctl"):
 
 del _smartctl, _nvme, _subcommand, _runtime
 
+# ``sudo`` is treated as a dangerous pattern below, with one exception. SnapRAID
+# keeps its content file and its ``<content>.lock`` file as ``root:root 0600``,
+# so the unprivileged executor cannot read them, and an ACL cannot fix that:
+# SnapRAID rewrites the content file through a 0600 temporary file and renames
+# it into place, which masks inherited default-ACL entries to nothing.
+# ``snapraid status`` is read-only, so the catalog runs exactly this argv with
+# sudo. The host sudoers rule matches the same literal, and sudoers matches
+# arguments exactly, so any extra argument asks for a password and fails under
+# ``sudo -n``.
+SNAPRAID_STATUS_SUDO_ARGV: tuple[str, ...] = (
+    "sudo",
+    "-n",
+    "/usr/local/bin/snapraid",
+    "status",
+)
+SNAPRAID_STATUS_SUDO_COMMAND: str = shlex.join(SNAPRAID_STATUS_SUDO_ARGV)
+
 # Bare shell syntax in an argument can only come from a hand-built command.
 SHELL_METACHARACTERS = frozenset(";&|<>`$")
 
@@ -1009,6 +1026,14 @@ class SecurityValidator:
         if len(command) > 4096:
             logger.warning("Command too long: %d chars", len(command))
             return False
+
+        # The only privileged command in the catalog. The comparison is a full
+        # string equality against a constant built from the argv vector, so no
+        # caller-supplied text can use this branch to reach sudo, and every
+        # dangerous-pattern and argv-shape check below is bypassed only for
+        # this fixed literal.
+        if command == SNAPRAID_STATUS_SUDO_COMMAND:
+            return True
 
         command_lower = command.lower()
 

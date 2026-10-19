@@ -43,6 +43,15 @@ metacharacters. Unknown executables, `docker run`/`docker exec`, shell chaining,
 redirection and command substitution are rejected. There is no permissive fall-through, and
 `security.allow_generic_commands` cannot enable arbitrary execution.
 
+There is exactly one privileged catalog command: `get_snapraid_status` runs
+`sudo -n /usr/local/bin/snapraid status` because SnapRAID stores its content file and lock
+as `root:root 0600`. `sudo` stays in the dangerous-pattern list for every other command;
+the validator short-circuits only when the whole command string equals that constant,
+which contains no caller-supplied text. The host side enforces the same rule twice: the
+sudoers entry matches the arguments exactly, and `-n` turns any mismatch into a failure
+instead of a password prompt. Changing the snapraid install path therefore requires a
+coordinated change to the sudoers rule and to `SNAPRAID_STATUS_SUDO_ARGV`.
+
 The local executor additionally rejects shell operators and uses `create_subprocess_exec`
 without a shell.
 

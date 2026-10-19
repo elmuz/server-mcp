@@ -6,7 +6,7 @@ names and test types are validated first, then substituted literally, so no
 user-controlled value can become shell syntax.
 """
 
-from server_management_lib import Operation
+from server_management_lib import SNAPRAID_STATUS_SUDO_ARGV, Operation
 
 # Absolute paths are required: non-interactive SSH sessions usually do not put
 # /usr/sbin on PATH, so a bare ``smartctl`` fails even when it is installed.
@@ -33,7 +33,12 @@ SMART_TEST = Operation(
     read_only=False,
 )
 
-SNAPRAID_STATUS = Operation(("snapraid", "status"))
+# ``snapraid status`` has to run as root: SnapRAID creates the content file and
+# its ``<content>.lock`` as ``root:root 0600``, which the unprivileged executor
+# cannot read, and ACLs do not survive the 0600 temp file SnapRAID renames over
+# the content file. The host sudoers rule allows exactly this argv; the command
+# policy in server_management_lib accepts the same literal and nothing else.
+SNAPRAID_STATUS = Operation(SNAPRAID_STATUS_SUDO_ARGV)
 
 # mergerFS exposes its pool as a fuse.mergerfs mount. ``--real`` hides the
 # virtual filesystems (proc, sysfs, tmpfs) so the table stays readable.

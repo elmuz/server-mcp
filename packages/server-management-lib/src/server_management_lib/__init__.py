@@ -44,6 +44,7 @@ from .responses import (
     make_structured_tool,
 )
 from .security import (
+    SNAPRAID_STATUS_SUDO_ARGV,
     FileAccess,
     SecurityValidator,
     ServiceFilePath,
@@ -69,6 +70,7 @@ __all__ = [
     "DEFAULT_CONFIG",
     "DEFAULT_MAX_OUTPUT_BYTES",
     "REDACTED_VALUE",
+    "SNAPRAID_STATUS_SUDO_ARGV",
     "ActiveTunnel",
     "AuditLogger",
     "BearerTokenMiddleware",

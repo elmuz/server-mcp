@@ -164,6 +164,30 @@ complete response. A response is truncated at most once with the standard marker
 allowlist disables both tools. The same validation applies before `systemctl status` and
 `journalctl -u` are rendered, so an unknown unit never reaches the executor.
 
+The executor user must be able to read the journal (`systemd-journal` or `adm` group).
+Without that, `journalctl` exits 0 with "No entries" and a permission hint on stderr, so
+`get_host_service_logs` looks empty rather than failing.
+
+## SnapRAID privileges
+
+`get_snapraid_status` runs `sudo -n /usr/local/bin/snapraid status`. SnapRAID creates the
+content file and its `<content>.lock` as `root:root 0600`, so an unprivileged SSH user
+cannot read either one. ACLs are not a fix: SnapRAID writes a `0600` temporary file and
+renames it over the content file, and the `0600` mode masks inherited default-ACL entries
+so they never take effect.
+
+The target host therefore needs a sudoers rule for exactly this command, for example:
+
+```text
+funkysloth ALL=(root) NOPASSWD: /usr/local/bin/snapraid status
+```
+
+`sudo --non-interactive` (`-n`) fails instead of prompting on a non-interactive SSH
+session, and sudoers matches the arguments exactly, so `snapraid status <extra>` still
+requires a password. The command policy in `server-management-lib` accepts only this exact
+argv: `sudo` remains a blocked pattern for every other command. Install snapraid outside
+`/usr/local/bin` and both the sudoers rule and `SNAPRAID_STATUS_SUDO_ARGV` must change.
+
 ## Device names
 
 Block devices must match `sda`, `nvme0n1`, `vda`, `hda`, `mmcblk0p1` or `dm-0`. Partitions

@@ -66,10 +66,13 @@ class TestHostCommands:
 
         assert _commands(patched_server["executor"]) == ["iostat -x 1 1"]
 
-    async def test_snapraid_status_uses_snapraid(self, patched_server):
+    async def test_snapraid_status_runs_through_sudo(self, patched_server):
+        """SnapRAID content and lock files are root:root 0600, so status needs root."""
         await server.get_snapraid_status()
 
-        assert _commands(patched_server["executor"]) == ["snapraid status"]
+        assert _commands(patched_server["executor"]) == [
+            "sudo -n /usr/local/bin/snapraid status"
+        ]
 
     async def test_mount_status_reports_mounts_and_mergerfs(self, patched_server):
         result = await server.get_mount_status()
