@@ -496,15 +496,11 @@ class TestInfluxValidSamples:
             "time": "2026-10-18T21:05:00",
         }
         client = AsyncMock()
-        client.query = AsyncMock(
-            side_effect=[
-                self._success([{"device": "sda"}]),
-                self._success([valid]),
-            ]
-        )
+        client.query = AsyncMock(return_value=self._success([valid]))
 
         with (
             patch("disk_health_mcp.server.config", mock_config),
+            patch("disk_health_mcp.server._metric_clients", {}),
             patch("disk_health_mcp.server._make_influxdb_client", return_value=client),
         ):
             result = await server.get_full_disk_report()
@@ -513,10 +509,12 @@ class TestInfluxValidSamples:
         assert "/dev/sda" in result
         assert "Sample:" in result
 
-        # The first query only lists devices that have a valid sample.
-        device_query = client.query.await_args_list[0].args[0]
+        # One window-function query returns the latest valid row per device;
+        # the overview must not issue one query per disk (P2-11).
+        assert client.query.await_count == 1
+        device_query = client.query.await_args.args[0]
         assert "exit_status = 0" in device_query
-        assert "GROUP BY device" in device_query
+        assert "ROW_NUMBER() OVER (PARTITION BY device" in device_query
 
     async def test_overview_without_valid_samples_falls_back_to_ssh(
         self, mock_config, sample_smart_json
@@ -536,6 +534,7 @@ class TestInfluxValidSamples:
                                 "name": "sda",
                                 "model": "ST18000NT001",
                                 "size": "16.4T",
+                                "type": "disk",
                             }
                         ]
                     }

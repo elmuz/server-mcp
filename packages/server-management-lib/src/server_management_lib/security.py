@@ -32,7 +32,7 @@ logger = logging.getLogger(__name__)
 
 # Valid block device name pattern: sdX, nvmeXnY, vdX, hdX, mmcblkXpY, dm-X
 DEVICE_NAME_PATTERN = re.compile(
-    r"^(sd[a-z]|nvme\d+n\d+|vd[a-z]|hd[a-z]|mmcblk\d+(p\d+)?|dm-\d+)$"
+    r"^(sd[a-z]{1,2}|nvme\d+n\d+|vd[a-z]|hd[a-z]|mmcblk\d+(p\d+)?|dm-\d+)$"
 )
 
 # ============================================================================
@@ -415,6 +415,24 @@ SNAPRAID_STATUS_SUDO_COMMAND: str = shlex.join(SNAPRAID_STATUS_SUDO_ARGV)
 
 # Bare shell syntax in an argument can only come from a hand-built command.
 SHELL_METACHARACTERS = frozenset(";&|<>`$")
+
+# Container names may contain dots (for example ``compose-app.1``) but never
+# start with an option dash.
+CONTAINER_NAME_PATTERN = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}$")
+
+# Docker inspect/stats format fields that can expose the process environment,
+# command line, mounts or host configuration. The catalog only needs .Name,
+# .State, .RestartCount and the stats fields, so these are refused outright.
+SENSITIVE_DOCKER_FORMAT_PARTS = (
+    ".Config",
+    ".Args",
+    ".Mounts",
+    ".HostConfig",
+    ".NetworkSettings",
+)
+
+# SMART self-test types accepted by the catalog and by smartctl itself.
+SMART_TEST_TYPES = frozenset({"short", "long", "conveyance"})
 
 # ============================================================================
 # Command safety - disk-health-mcp injection patterns
@@ -958,6 +976,9 @@ class SecurityValidator:
             return None
 
         for token in statement.flatten():
+            if token.ttype in sql_tokens.Comment:
+                logger.warning("InfluxDB query contains an SQL comment")
+                return None
             if (
                 token.ttype in sql_tokens.Keyword
                 and token.value.upper() in WRITE_KEYWORDS
@@ -1102,6 +1123,11 @@ class SecurityValidator:
             return False
 
         for token in argv:
+            if any(ord(char) < 0x20 or ord(char) == 0x7F for char in token):
+                logger.warning(
+                    "Command argument contains a control character: %r", token
+                )
+                return False
             if any(char in SHELL_METACHARACTERS for char in token):
                 logger.warning(
                     "Command argument contains a shell metacharacter: %r", token
@@ -1111,12 +1137,382 @@ class SecurityValidator:
         if self._is_safe_compose(argv):
             return True
 
+        # A prefix match alone is not enough: ``docker inspect`` and
+        # ``smartctl`` both accept dangerous arguments after a safe prefix.
+        shape = self._argument_shape_safe(argv)
+        if shape is not None:
+            if not shape:
+                logger.warning(
+                    "Command arguments do not match an allowed shape: %s", command
+                )
+            return shape
+
         for prefix in ALLOWED_ARGV_PREFIXES:
             if tuple(argv[: len(prefix)]) == prefix:
                 return True
 
         logger.warning("Command is not in the allowed operation catalog: %s", command)
         return False
+
+    @staticmethod
+    def _positive_integer(value: str, maximum: int) -> bool:
+        return value.isdigit() and 1 <= int(value) <= maximum
+
+    @staticmethod
+    def _safe_docker_format(fmt: str) -> bool:
+        """Reject inspect/stats format strings that expose secrets or config."""
+        return not any(part in fmt for part in SENSITIVE_DOCKER_FORMAT_PARTS)
+
+    @staticmethod
+    def _is_container_name(value: str) -> bool:
+        return bool(CONTAINER_NAME_PATTERN.match(value))
+
+    @staticmethod
+    def _is_device_path(value: str) -> bool:
+        if not value.startswith("/dev/") or ".." in PurePosixPath(value).parts:
+            return False
+        return re.fullmatch(r"/dev/[A-Za-z0-9._-]+", value) is not None
+
+    def _path_below_services(self, path: str) -> bool:
+        """Return True when ``path`` is lexically below services_path."""
+        if not path.startswith("/") or "\x00" in path:
+            return False
+        normalised = str(PurePosixPath(path))
+        base = str(PurePosixPath(self.services_base_path))
+        return normalised == base or normalised.startswith(base.rstrip("/") + "/")
+
+    def _safe_container_argv(self, argv: list[str]) -> bool:
+        """Validate every argument of a container runtime command."""
+        if len(argv) < 2:
+            return False
+        subcommand = argv[1]
+        args = argv[2:]
+
+        if subcommand == "ps":
+            return self._safe_ps_argv(args)
+        if subcommand == "logs":
+            return self._safe_logs_argv(args)
+        if subcommand == "inspect":
+            return self._safe_inspect_argv(args)
+        if subcommand == "stats":
+            return self._safe_stats_argv(args)
+        if subcommand in {"port", "restart", "start", "stop"}:
+            if args and args[0] == "--":
+                args = args[1:]
+            return len(args) == 1 and self._is_container_name(args[0])
+        return False
+
+    def _safe_ps_argv(self, args: list[str]) -> bool:
+        index = 0
+        seen_all = False
+        fmt: str | None = None
+        while index < len(args):
+            token = args[index]
+            if token == "-a" and not seen_all:
+                seen_all = True
+                index += 1
+            elif token == "--format" and fmt is None and index + 1 < len(args):
+                fmt = args[index + 1]
+                index += 2
+            elif token == "--filter" and index + 1 < len(args):
+                if args[index + 1] != "health=unhealthy":
+                    return False
+                index += 2
+            else:
+                return False
+        return fmt is None or self._safe_docker_format(fmt)
+
+    def _safe_logs_argv(self, args: list[str]) -> bool:
+        index = 0
+        tail: str | None = None
+        seen_timestamps = False
+        seen_since = False
+        seen_until = False
+        service: str | None = None
+        while index < len(args):
+            token = args[index]
+            if token == "--tail" and tail is None and index + 1 < len(args):
+                tail = args[index + 1]
+                if not self._positive_integer(tail, 100000):
+                    return False
+                index += 2
+            elif token == "--timestamps" and not seen_timestamps:
+                seen_timestamps = True
+                index += 1
+            elif token == "--since" and not seen_since and index + 1 < len(args):
+                if not self.validate_log_time(args[index + 1], "since"):
+                    return False
+                seen_since = True
+                index += 2
+            elif token == "--until" and not seen_until and index + 1 < len(args):
+                if not self.validate_log_time(args[index + 1], "until"):
+                    return False
+                seen_until = True
+                index += 2
+            elif token == "--":
+                rest = args[index + 1 :]
+                return (
+                    service is None
+                    and len(rest) == 1
+                    and self._is_container_name(rest[0])
+                    and tail is not None
+                )
+            elif token.startswith("-"):
+                return False
+            elif service is None and self._is_container_name(token):
+                service = token
+                index += 1
+            else:
+                return False
+        return tail is not None and service is not None
+
+    def _safe_inspect_argv(self, args: list[str]) -> bool:
+        index = 0
+        fmt: str | None = None
+        service: str | None = None
+        while index < len(args):
+            token = args[index]
+            if token == "--format" and fmt is None and index + 1 < len(args):
+                fmt = args[index + 1]
+                index += 2
+            elif token == "--":
+                rest = args[index + 1 :]
+                return (
+                    service is None
+                    and fmt is not None
+                    and len(rest) == 1
+                    and self._is_container_name(rest[0])
+                    and self._safe_docker_format(fmt)
+                )
+            elif token.startswith("-"):
+                return False
+            elif service is None and self._is_container_name(token):
+                service = token
+                index += 1
+            else:
+                return False
+        return fmt is not None and service is not None and self._safe_docker_format(fmt)
+
+    def _safe_stats_argv(self, args: list[str]) -> bool:
+        index = 0
+        fmt: str | None = None
+        seen_no_stream = False
+        service: str | None = None
+        while index < len(args):
+            token = args[index]
+            if token == "--no-stream" and not seen_no_stream:
+                seen_no_stream = True
+                index += 1
+            elif token == "--format" and fmt is None and index + 1 < len(args):
+                fmt = args[index + 1]
+                index += 2
+            elif token == "--":
+                rest = args[index + 1 :]
+                return (
+                    service is None
+                    and seen_no_stream
+                    and len(rest) == 1
+                    and self._is_container_name(rest[0])
+                    and (fmt is None or self._safe_docker_format(fmt))
+                )
+            elif token.startswith("-"):
+                return False
+            elif service is None and self._is_container_name(token):
+                service = token
+                index += 1
+            else:
+                return False
+        return (
+            seen_no_stream
+            and service is not None
+            and (fmt is None or self._safe_docker_format(fmt))
+        )
+
+    def _safe_smartctl_argv(self, argv: list[str]) -> bool:
+        arguments = argv[1:]
+        if arguments == ["--version"]:
+            return True
+
+        device: str | None = None
+        index = 0
+        while index < len(arguments):
+            token = arguments[index]
+            if token in {"-j", "-a", "-i", "-c"}:
+                index += 1
+            elif token == "-n":
+                if index + 1 >= len(arguments) or arguments[index + 1] != "standby":
+                    return False
+                index += 2
+            elif token == "-t":
+                if (
+                    index + 1 >= len(arguments)
+                    or arguments[index + 1] not in SMART_TEST_TYPES
+                ):
+                    return False
+                index += 2
+            elif token == "-l":
+                if index + 1 >= len(arguments) or arguments[index + 1] not in {
+                    "error",
+                    "selftest",
+                }:
+                    return False
+                index += 2
+            elif token.startswith("/dev/"):
+                if device is not None or not self.validate_device_name(token[5:]):
+                    return False
+                device = token
+                index += 1
+            else:
+                return False
+        return device is not None
+
+    def _argument_shape_safe(self, argv: list[str]) -> bool | None:
+        """Validate the complete argument vector for each command family.
+
+        Returns ``None`` for an executable this method does not know, letting
+        the fixed prefix allowlist decide. Known families are checked against
+        their exact catalog shape, so adding a dangerous argument to an allowed
+        prefix no longer passes the policy.
+        """
+        executable = PurePosixPath(argv[0]).name
+
+        if executable == "echo":
+            return len(argv) >= 2
+        if executable == "uptime":
+            return len(argv) == 1
+        if executable == "free":
+            return argv[1:] == ["-h"]
+        if executable == "df":
+            if argv[1:] == [
+                "-h",
+                "-x",
+                "tmpfs",
+                "-x",
+                "devtmpfs",
+                "-x",
+                "overlay",
+                "-x",
+                "squashfs",
+            ]:
+                return True
+            return (
+                len(argv) == 3
+                and argv[1] == "-h"
+                and self.validate_disk_path(argv[2]) is not None
+            )
+        if executable == "ls":
+            if argv[1:2] != ["-1"]:
+                return False
+            index = 2
+            if len(argv) > index and argv[index] == "-p":
+                index += 1
+            return len(argv) == index + 1 and self._path_below_services(argv[index])
+        if executable == "test":
+            return (
+                len(argv) == 3
+                and argv[1] == "-d"
+                and self._path_below_services(argv[2])
+            )
+        if executable in CONTAINER_RUNTIMES:
+            return self._safe_container_argv(argv)
+        if executable == "systemctl":
+            return (
+                len(argv) == 5
+                and argv[1:4] == ["status", "--no-pager", "--full"]
+                and self.validate_host_unit(argv[4])
+            )
+        if executable == "journalctl":
+            return (
+                len(argv) == 8
+                and argv[1] == "-u"
+                and self.validate_host_unit(argv[2])
+                and argv[3] == "-n"
+                and self._positive_integer(argv[4], 1000)
+                and argv[5:] == ["--no-pager", "--output", "short-iso"]
+            )
+        if executable == "lsblk":
+            if len(argv) < 2 or argv[1] != "-d":
+                return False
+            index = 2
+            seen_json = False
+            seen_columns = False
+            while index < len(argv):
+                token = argv[index]
+                if token == "--json" and not seen_json:
+                    seen_json = True
+                    index += 1
+                elif token == "-o" and not seen_columns and index + 1 < len(argv):
+                    if re.fullmatch(r"[A-Za-z0-9_,%-]+", argv[index + 1]) is None:
+                        return False
+                    seen_columns = True
+                    index += 2
+                else:
+                    return False
+            return True
+        if executable == "iostat":
+            return argv[1:] in (["-x", "1", "1"], ["-d", "1", "1"])
+        if executable == "zpool":
+            if len(argv) < 2:
+                return False
+            subcommand = argv[1]
+            if subcommand == "status":
+                return len(argv) == 2 or (len(argv) == 3 and argv[2] == "-x")
+            if subcommand == "list":
+                return len(argv) == 2 or (
+                    len(argv) == 4
+                    and argv[2] == "-o"
+                    and re.fullmatch(r"[a-z,]+", argv[3]) is not None
+                )
+            if subcommand == "iostat":
+                return len(argv) == 2
+            return False
+        if executable == "zfs":
+            if len(argv) < 2:
+                return False
+            if argv[1] == "list":
+                return len(argv) == 2 or (
+                    len(argv) == 4
+                    and argv[2] == "-o"
+                    and re.fullmatch(r"[a-z,]+", argv[3]) is not None
+                )
+            if argv[1] == "get":
+                return len(argv) == 2 or (
+                    len(argv) == 3
+                    and re.fullmatch(r"[A-Za-z0-9_.:-]+", argv[2]) is not None
+                )
+            return False
+        if executable == "cat":
+            return argv == ["cat", "/proc/mdstat"]
+        if executable == "mdadm":
+            if argv == ["mdadm", "--detail", "--scan", "--verbose"]:
+                return True
+            if len(argv) == 3 and argv[1] in {"--detail", "--examine"}:
+                return self._is_device_path(argv[2])
+            return False
+        if executable == "snapraid":
+            return argv == ["snapraid", "status"]
+        if executable == "findmnt":
+            return tuple(argv[1:]) in (
+                ("--real", "-o", "TARGET,SOURCE,FSTYPE,SIZE,USED,AVAIL,USE%"),
+                ("-t", "fuse.mergerfs", "-o", "TARGET,SOURCE,FSTYPE,OPTIONS"),
+            )
+        if executable == "smartctl":
+            return self._safe_smartctl_argv(argv)
+        if executable == "nvme":
+            return (
+                len(argv) == 3
+                and argv[1]
+                in {
+                    "smart-log",
+                    "smart-log-add",
+                    "id-ctrl",
+                    "id-ns",
+                    "error-log",
+                }
+                and argv[2].startswith("/dev/")
+                and self.validate_device_name(argv[2][5:])
+            )
+        return None
 
     def _is_safe_compose(self, argv: list[str]) -> bool:
         """Validate a ``<runtime> compose --project-directory <dir> <cmd>`` argv.

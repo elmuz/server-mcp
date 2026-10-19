@@ -8,10 +8,12 @@ Handles SSH connections with strict security:
 - Commands are validated before execution.
 """
 
+import asyncio
 import logging
 import os
 import re
 import shlex
+import stat
 import time
 from pathlib import Path
 
@@ -31,6 +33,19 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_KNOWN_HOSTS = "~/.ssh/known_hosts"
 DISABLED_KNOWN_HOSTS = {"", "none", "false", "off"}
+# Bound every SFTP metadata/read operation so a FIFO, stuck server or dropped
+# connection cannot block a tool call forever.
+SFTP_OPERATION_TIMEOUT = 30
+
+
+async def _sftp_operation(awaitable, *, description: str):
+    """Await an SFTP operation with a timeout and a readable error."""
+    try:
+        return await asyncio.wait_for(awaitable, timeout=SFTP_OPERATION_TIMEOUT)
+    except TimeoutError as e:
+        raise RemoteFileError(
+            f"SFTP {description} timed out after {SFTP_OPERATION_TIMEOUT}s"
+        ) from e
 
 
 class SSHConfigurationError(RuntimeError):
@@ -113,6 +128,7 @@ class SSHManager(ExecutorBase):
         self.ssh_config = config.get("ssh", {}) or {}
         self.connection: asyncssh.SSHClientConnection | None = None
         self._connected = False
+        self._connect_lock = asyncio.Lock()
         self._known_hosts_cache: str | bytes | None = None
         self._known_hosts_loaded = False
 
@@ -181,24 +197,35 @@ class SSHManager(ExecutorBase):
         return kwargs
 
     async def connect(self) -> None:
-        """Establish SSH connection to the remote server."""
-        kwargs = self.build_connect_kwargs()
-        host = kwargs["host"]
+        """Establish SSH connection to the remote server.
 
-        try:
-            self.connection = await asyncssh.connect(**kwargs)
-            self._connected = True
-            logger.info(
-                "Connected to %s:%s as %s",
-                host,
-                kwargs.get("port", 22),
-                kwargs.get("username", "(default)"),
-            )
-        except Exception as e:
-            self._connected = False
-            self.connection = None
-            logger.error("Failed to connect to %s: %s", host, e)
-            raise
+        Concurrent tool calls share one connection. Without the lock they can
+        all observe ``_connected == False`` and open overlapping connections,
+        leaking every connection but the last one. The second check inside the
+        lock makes the call idempotent: a caller that waited for an in-flight
+        connect reuses the connection instead of opening another.
+        """
+        async with self._connect_lock:
+            if self._connected and self.connection is not None:
+                return
+
+            kwargs = self.build_connect_kwargs()
+            host = kwargs["host"]
+
+            try:
+                self.connection = await asyncssh.connect(**kwargs)
+                self._connected = True
+                logger.info(
+                    "Connected to %s:%s as %s",
+                    host,
+                    kwargs.get("port", 22),
+                    kwargs.get("username", "(default)"),
+                )
+            except Exception as e:
+                self._connected = False
+                self.connection = None
+                logger.error("Failed to connect to %s: %s", host, e)
+                raise
 
     async def disconnect(self) -> None:
         """Close SSH connection."""
@@ -305,17 +332,36 @@ class SSHManager(ExecutorBase):
         """Read a remote file over SFTP with an optional base-path check."""
         limit = max_bytes or self.max_output_bytes
         async with await self._get_sftp() as sftp:
-            real_path = str(await sftp.realpath(path))
-            if allowed_base is not None and not is_within(real_path, allowed_base):
+            real_path = str(
+                await _sftp_operation(sftp.realpath(path), description="realpath")
+            )
+            real_base = (
+                str(
+                    await _sftp_operation(
+                        sftp.realpath(allowed_base), description="realpath"
+                    )
+                )
+                if allowed_base is not None
+                else None
+            )
+            if real_base is not None and not is_within(real_path, real_base):
                 self.audit.log("file_read_blocked", path=path, resolved=real_path)
                 raise RemotePathError(
                     f"Remote path escapes the allowed directory: {real_path}"
                 )
 
-            attrs = await sftp.stat(real_path)
+            attrs = await _sftp_operation(sftp.stat(real_path), description="stat")
+            if not stat.S_ISREG(attrs.permissions or 0):
+                self.audit.log(
+                    "file_read_blocked",
+                    path=path,
+                    resolved=real_path,
+                    reason="not_regular_file",
+                )
+                raise RemoteFileError(f"Remote path is not a regular file: {real_path}")
             size = attrs.size or 0
             async with sftp.open(real_path, "rb") as handle:
-                data = await handle.read(limit + 1)
+                data = await _sftp_operation(handle.read(limit + 1), description="read")
 
         text = data.decode("utf-8", errors="replace")
         sanitized = sanitize_output(text, limit, label="file contents")
@@ -335,13 +381,26 @@ class SSHManager(ExecutorBase):
     ) -> list[RemoteDirEntry]:
         """List a remote directory over SFTP with an optional base-path check."""
         async with await self._get_sftp() as sftp:
-            real_path = str(await sftp.realpath(path))
-            if allowed_base is not None and not is_within(real_path, allowed_base):
+            real_path = str(
+                await _sftp_operation(sftp.realpath(path), description="realpath")
+            )
+            real_base = (
+                str(
+                    await _sftp_operation(
+                        sftp.realpath(allowed_base), description="realpath"
+                    )
+                )
+                if allowed_base is not None
+                else None
+            )
+            if real_base is not None and not is_within(real_path, real_base):
                 self.audit.log("dir_list_blocked", path=path, resolved=real_path)
                 raise RemotePathError(
                     f"Remote path escapes the allowed directory: {real_path}"
                 )
-            names = await sftp.readdir(real_path)
+            names = await _sftp_operation(
+                sftp.readdir(real_path), description="readdir"
+            )
 
         entries = [
             RemoteDirEntry(

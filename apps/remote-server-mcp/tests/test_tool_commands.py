@@ -270,6 +270,9 @@ class TestDockerCommandConstruction:
 
         assert "Container is not running" in result
         assert "0B / 0B" not in result
+        commands = _commands(patched)
+        assert not [c for c in commands if c.startswith("docker stats")]
+        assert not [c for c in commands if c.startswith("docker port")]
 
     def test_running_container_keeps_stats(self, patched):
         def run(command: str) -> str:
@@ -285,6 +288,9 @@ class TestDockerCommandConstruction:
 
         assert "Memory: 10MiB / 1GiB" in result
         assert "Container is not running" not in result
+        commands = _commands(patched)
+        assert [c for c in commands if c.startswith("docker stats")]
+        assert [c for c in commands if c.startswith("docker port")]
 
 
 class TestContainerHealth:
@@ -292,6 +298,22 @@ class TestContainerHealth:
         assert "Health:" in operations.INSPECT_FORMAT
         assert "FailingStreak:" in operations.INSPECT_FORMAT
         assert "ExitCode:" in operations.INSPECT_FORMAT
+
+    def test_inspect_format_emits_newlines_from_template_actions(self):
+        # `docker inspect` does not expand `\n` in the literal part of a
+        # format string; it stays on one line and `_container_running` never
+        # matches. The newline must come from a template action.
+        assert '{{"\\n"}}' in operations.INSPECT_FORMAT
+        assert operations.INSPECT_FORMAT.count('{{"\\n"}}') == 7
+        assert "\\n" not in operations.INSPECT_FORMAT.replace('{{"\\n"}}', "")
+
+    def test_stats_format_keeps_plain_escapes(self):
+        # `docker stats` expands `\n` before parsing the template. A template
+        # action would become a real newline inside the quoted literal and
+        # fail with "unterminated quoted string", so this one must stay plain.
+        assert "\\n" in operations.STATS_FORMAT
+        assert '{{"\\n"}}' not in operations.STATS_FORMAT
+        assert "\n" not in operations.STATS_FORMAT
 
     def test_get_container_health_returns_recent_probes(self, patched):
         health = {

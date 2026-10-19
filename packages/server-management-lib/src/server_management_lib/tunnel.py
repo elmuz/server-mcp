@@ -15,6 +15,7 @@ The tunnel is deliberately narrow:
   executor.
 """
 
+import asyncio
 import logging
 from dataclasses import dataclass
 from typing import Any
@@ -135,7 +136,14 @@ def _validate_port(value: Any, name: str, *, allow_zero: bool) -> int:
 
 
 class SSHTunnel:
-    """One local port forward over a dedicated SSH connection."""
+    """One local port forward over a dedicated SSH connection.
+
+    A dropped SSH connection closes the forwarding listener. The tunnel keeps a
+    monitor task that detects the close and re-opens both the connection and
+    the listener on the same local port, so clients that already point at the
+    endpoint keep working. Reconnection is retried until :meth:`close`; while
+    it is failing, ``down`` is true and ``last_error`` describes the failure.
+    """
 
     def __init__(
         self,
@@ -151,9 +159,14 @@ class SSHTunnel:
         )
         self._manager: SSHManager | None = None
         self._listener: asyncssh.SSHListener | None = None
+        self._endpoint: TunnelEndpoint | None = None
+        self._monitor_task: asyncio.Task | None = None
+        self._closed = False
+        self.down = False
+        self.last_error: str | None = None
 
-    async def start(self) -> TunnelEndpoint:
-        """Open the SSH connection and the local listener."""
+    async def _open(self, local_port: int) -> TunnelEndpoint:
+        """Open one SSH connection and local forward."""
         manager = SSHManager({"ssh": self.ssh_config}, SecurityValidator({}))
         try:
             await manager.connect()
@@ -162,7 +175,7 @@ class SSHTunnel:
                 raise SSHTunnelError("SSH connection failed")
             listener = await connection.forward_local_port(
                 self.config.local_host,
-                self.config.local_port,
+                local_port,
                 self.config.remote_host,
                 self.config.remote_port,
             )
@@ -175,7 +188,8 @@ class SSHTunnel:
 
         self._manager = manager
         self._listener = listener
-        port = listener.get_port() or self.config.local_port
+        port = listener.get_port() or local_port
+        self._endpoint = TunnelEndpoint(self.config.local_host, port)
         logger.info(
             "SSH tunnel listening on %s:%s for %s:%s",
             self.config.local_host,
@@ -183,10 +197,100 @@ class SSHTunnel:
             self.config.remote_host,
             self.config.remote_port,
         )
-        return TunnelEndpoint(self.config.local_host, port)
+        return self._endpoint
+
+    async def start(self) -> TunnelEndpoint:
+        """Open the SSH connection and the local listener."""
+        self._closed = False
+        endpoint = await self._open(self.config.local_port)
+        self._start_monitor()
+        return endpoint
+
+    def _start_monitor(self) -> None:
+        """Watch the current connection and reconnect when it closes."""
+        manager = self._manager
+        connection = manager.connection if manager is not None else None
+        wait_closed = getattr(connection, "wait_closed", None)
+        if connection is None or wait_closed is None:
+            # Test doubles and older asyncssh releases may not expose
+            # wait_closed; reconnection is best effort in that case.
+            return
+        self._monitor_task = asyncio.create_task(
+            self._monitor_connection(connection, wait_closed)
+        )
+
+    async def _monitor_connection(self, connection, wait_closed) -> None:
+        try:
+            await wait_closed()
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:  # pragma: no cover - defensive
+            logger.debug("SSH tunnel connection close reported an error: %s", e)
+
+        if self._closed:
+            return
+        logger.warning(
+            "SSH tunnel connection dropped; reconnecting to %s:%s",
+            self.config.remote_host,
+            self.config.remote_port,
+        )
+        await self._reconnect()
+
+    async def _reconnect(self) -> None:
+        """Re-open the forward on the previously bound local port."""
+        local_port = self._endpoint.port if self._endpoint else self.config.local_port
+        delay = 1.0
+
+        old_listener = self._listener
+        self._listener = None
+        if old_listener is not None:
+            old_listener.close()
+            try:
+                await old_listener.wait_closed()
+            except Exception as e:  # pragma: no cover - best effort
+                logger.debug("Error while closing the dropped tunnel listener: %s", e)
+
+        old_manager = self._manager
+        self._manager = None
+        if old_manager is not None:
+            try:
+                await old_manager.disconnect()
+            except Exception as e:  # pragma: no cover - best effort
+                logger.debug("Error while discarding the dropped SSH tunnel: %s", e)
+
+        while not self._closed:
+            try:
+                await self._open(local_port)
+            except Exception as e:
+                self.down = True
+                self.last_error = str(e)
+                logger.error("SSH tunnel is down (%s); retrying in %.0fs", e, delay)
+                try:
+                    await asyncio.sleep(delay)
+                except asyncio.CancelledError:
+                    raise
+                delay = min(delay * 2, 30.0)
+                continue
+
+            self.down = False
+            self.last_error = None
+            self._start_monitor()
+            return
 
     async def close(self) -> None:
         """Close the listener and the SSH connection (idempotent)."""
+        self._closed = True
+        monitor = self._monitor_task
+        self._monitor_task = None
+        if monitor is not None:
+            monitor.cancel()
+            try:
+                await monitor
+            except asyncio.CancelledError:
+                pass
+            except Exception as e:  # pragma: no cover - best effort
+                logger.debug("Error while stopping the SSH tunnel monitor: %s", e)
+
         listener = self._listener
         self._listener = None
         if listener is not None:

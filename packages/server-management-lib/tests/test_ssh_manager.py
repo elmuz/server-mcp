@@ -13,6 +13,7 @@ All SSH operations are mocked - no real connections.
 """
 
 import asyncio
+import stat
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import asyncssh
@@ -485,6 +486,50 @@ class TestConnectionLifecycle:
         asyncio.run(run())
 
 
+class TestConcurrentConnect:
+    """Concurrent tool calls must not open overlapping SSH connections."""
+
+    def test_concurrent_connect_opens_one_connection(self, config, security):
+        async def run():
+            manager = SSHManager(config, security)
+            calls = 0
+            connection = AsyncMock()
+
+            async def fake_connect(**kwargs):
+                nonlocal calls
+                calls += 1
+                await asyncio.sleep(0.01)
+                return connection
+
+            with patch(
+                "server_management_lib.ssh_manager.asyncssh.connect",
+                side_effect=fake_connect,
+            ):
+                await asyncio.gather(*(manager.connect() for _ in range(5)))
+
+            assert calls == 1
+            assert manager.connection is connection
+            assert manager._connected is True
+
+        asyncio.run(run())
+
+    def test_connect_after_connect_reuses_the_connection(self, config, security):
+        async def run():
+            manager = SSHManager(config, security)
+            connection = AsyncMock()
+
+            with patch(
+                "server_management_lib.ssh_manager.asyncssh.connect",
+                AsyncMock(return_value=connection),
+            ) as connect:
+                await manager.connect()
+                await manager.connect()
+
+            connect.assert_awaited_once()
+
+        asyncio.run(run())
+
+
 class FakeFile:
     def __init__(self, data: bytes):
         self.data = data
@@ -500,10 +545,11 @@ class FakeFile:
 
 
 class FakeSFTP:
-    def __init__(self, files, realpaths=None, entries=None):
+    def __init__(self, files, realpaths=None, entries=None, permissions=None):
         self.files = files
         self.realpaths = realpaths or {}
         self.entries = entries or []
+        self.permissions = permissions or {}
 
     async def __aenter__(self):
         return self
@@ -517,7 +563,10 @@ class FakeSFTP:
     async def stat(self, path, follow_symlinks=True):
         from types import SimpleNamespace
 
-        return SimpleNamespace(size=len(self.files.get(path, b"")))
+        return SimpleNamespace(
+            size=len(self.files.get(path, b"")),
+            permissions=self.permissions.get(path, stat.S_IFREG | 0o644),
+        )
 
     def open(self, path, mode="rb"):
         return FakeFile(self.files[path])
@@ -562,6 +611,37 @@ class TestRemoteFiles:
                 manager.read_remote_file("/srv/app/link", allowed_base="/srv/app")
             )
 
+    def test_read_file_with_symlinked_base(self, security):
+        # /srv is a symlink to /mnt/storage/srv on the target host. The base
+        # must be resolved remotely before the confinement check.
+        sftp = FakeSFTP(
+            {"/mnt/storage/srv/app/config.yml": b"hello"},
+            realpaths={
+                "/srv/app": "/mnt/storage/srv/app",
+                "/srv/app/config.yml": "/mnt/storage/srv/app/config.yml",
+            },
+        )
+        manager = _manager_with_sftp(security, sftp)
+
+        result = asyncio.run(
+            manager.read_remote_file("/srv/app/config.yml", allowed_base="/srv/app")
+        )
+        assert result == "hello"
+
+    def test_read_file_rejects_non_regular_file(self, security):
+        from server_management_lib import RemoteFileError
+
+        sftp = FakeSFTP(
+            {"/srv/app/pipe": b""},
+            permissions={"/srv/app/pipe": stat.S_IFIFO | 0o644},
+        )
+        manager = _manager_with_sftp(security, sftp)
+
+        with pytest.raises(RemoteFileError, match="not a regular file"):
+            asyncio.run(
+                manager.read_remote_file("/srv/app/pipe", allowed_base="/srv/app")
+            )
+
     def test_read_file_truncated(self, security):
         sftp = FakeSFTP({"/srv/app/log.txt": b"abcdefghij"})
         manager = _manager_with_sftp(security, sftp)
@@ -600,6 +680,20 @@ class TestRemoteFiles:
         )
         assert [item.name for item in entries] == ["a.txt", "b.txt"]
         assert entries[0].size == 1
+
+    def test_list_dir_with_symlinked_base(self, security):
+        sftp = FakeSFTP(
+            {},
+            realpaths={
+                "/srv/app": "/mnt/storage/srv/app",
+            },
+        )
+        manager = _manager_with_sftp(security, sftp)
+
+        entries = asyncio.run(
+            manager.list_remote_dir("/srv/app", allowed_base="/srv/app")
+        )
+        assert entries == []
 
     def test_list_dir_escape_blocked(self, security):
         from server_management_lib import RemotePathError

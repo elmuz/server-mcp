@@ -48,9 +48,18 @@ class AuditLogger:
             **_redact(fields),
         }
         try:
-            self.path.parent.mkdir(parents=True, exist_ok=True)
+            parent = self.path.parent
+            parent_existed = parent.exists()
+            parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+            if not parent_existed:
+                # mkdir honours the umask; make the new audit directory private.
+                parent.chmod(0o700)
+
             line = json.dumps(record, default=str)
             with self._lock, self.path.open("a", encoding="utf-8") as handle:
+                # The file may have been created by an older release with the
+                # default mode; tighten it on every write.
+                self.path.chmod(0o600)
                 handle.write(line + "\n")
         except OSError as e:  # pragma: no cover - environment dependent
             if not self._warned:

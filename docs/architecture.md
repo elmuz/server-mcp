@@ -62,7 +62,7 @@ tool -> executor.read_remote_file(path, allowed_base=service_dir)
 | `executor.py` | `Executor` protocol and `create_executor()` factory |
 | `config.py` | Config resolution, defaults, deep merge, env overrides, `.env` |
 | `output.py` | ANSI/control-character stripping and byte caps |
-| `redaction.py` | Dotenv value masking for readable-but-redacted file reads |
+| `redaction.py` | Dotenv, service-config and host-output secret masking for readable-but-redacted reads |
 | `audit.py` | JSONL audit log with secret redaction |
 | `http_clients.py` | InfluxDB v3 and Prometheus read-only clients |
 | `responses.py` | `ToolResponse`/`ToolOutput` and the structured-output tool wrapper |
@@ -80,13 +80,13 @@ tool -> executor.read_remote_file(path, allowed_base=service_dir)
 - `list_remote_dir(path, allowed_base)`
 - `connect()` / `disconnect()`
 
-The SSH executor keeps one lazily connected session and reconnects after a connection loss.
+The SSH executor keeps one lazily connected session, serializes concurrent `connect()` calls so only one connection can be opened, and reconnects after a connection loss.
 The local executor has no connection lifecycle; the methods are no-ops for interface parity.
 
 Metric endpoints are separate from the executor. `tunnel.py` can open an optional loopback
 port forward over a dedicated SSH connection for an InfluxDB or Prometheus server that only
 listens on the target's loopback interface. The server rewrites the database section's
-`host`/`port` to the tunnel endpoint at startup and closes the tunnels on shutdown.
+`host`/`port` to the tunnel endpoint at startup, re-opens the forward on the same local port if the SSH connection drops, and closes the tunnels on shutdown. HTTP clients keep one shared session per service for the process lifetime.
 
 ## Host infrastructure services
 

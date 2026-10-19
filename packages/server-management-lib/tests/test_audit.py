@@ -51,3 +51,44 @@ class TestAuditLogger:
         logger = AuditLogger(blocker / "audit.jsonl", enabled=True)
 
         logger.log("command", command="echo hi")  # must not raise
+
+
+class TestAuditPermissions:
+    """The audit file and its directory must not be world-readable (P1-16)."""
+
+    def test_created_directory_and_file_are_private(self, tmp_path):
+        import os
+        import stat
+
+        if os.name != "posix":
+            import pytest
+
+            pytest.skip("POSIX file modes are not available")
+
+        path = tmp_path / "private" / "audit.jsonl"
+        logger = AuditLogger(path, enabled=True)
+
+        logger.log("command", command="echo hi")
+
+        directory_mode = stat.S_IMODE(path.parent.stat().st_mode)
+        file_mode = stat.S_IMODE(path.stat().st_mode)
+        assert directory_mode == 0o700
+        assert file_mode == 0o600
+
+    def test_existing_file_mode_is_tightened(self, tmp_path):
+        import os
+        import stat
+
+        if os.name != "posix":
+            import pytest
+
+            pytest.skip("POSIX file modes are not available")
+
+        path = tmp_path / "audit.jsonl"
+        path.write_text("")
+        path.chmod(0o644)
+        logger = AuditLogger(path, enabled=True)
+
+        logger.log("command", command="echo hi")
+
+        assert stat.S_IMODE(path.stat().st_mode) == 0o600

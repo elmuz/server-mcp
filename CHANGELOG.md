@@ -6,29 +6,37 @@ versioning.
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-10-20
+
+This is the first published release. `0.2.0` was never tagged or published when the monorepo
+consolidation landed, so the remediation work that followed it (P0/P1/P2 in
+[docs/modernization-plan.md](docs/modernization-plan.md)) is part of the same release
+instead of a separate version.
+
 ### Added
 
+- Monorepo with a uv workspace: `apps/remote-server-mcp`, `apps/disk-health-mcp` and
+  `packages/server-management-lib`, one lockfile and shared tooling.
+- Local executor (`executor: local`) that runs validated argv vectors without a shell.
+- SFTP-based file reads and listings, confined with remote `realpath` checks.
+- Operation catalog for Docker commands, rendered with `shlex.join`; the shared `Operation`
+  template is now used by both MCP servers, so `disk-health-mcp` also builds every host
+  command from a typed argv-vector catalog.
+- Output sanitization (ANSI/control characters) and a configurable 64 KiB cap.
+- Opt-in JSONL audit log with secret redaction. The log also records InfluxDB and Prometheus
+  queries, `prometheus_targets` calls and policy refusals (`file_blocked_sensitive`,
+  `host_unit_blocked`, `query_blocked`, `rate_limited`) that happen before the executor.
+  Query records contain a length and SHA-256 fingerprint, database, HTTP status and
+  duration, never the query text or its literal values.
+- MCP `ToolAnnotations` for read-only and destructive tools.
+- CI workflows for Python 3.11-3.14, `py.typed` markers and coverage gates.
+- Harness-agnostic documentation and examples for pi, Claude Code, Codex, Cursor and
+  opencode.
 - Every tool now returns MCP `structuredContent` as a `ToolResponse` (`ok`, `tool`,
   `summary`, `text`, `data`) alongside the existing readable text block.
-- Both servers expose MCP resources: `server-mcp://config/schema` (defaults with secrets
-  masked), `server-mcp://tools/catalog` and a `server-mcp://tools/{name}` template.
-- Opt-in Streamable HTTP transport (`--transport streamable-http`, `transport.*`). It binds
-  to loopback by default and requires a bearer token for any non-loopback address.
-- `container_runtime` selects `docker` (default), `podman` or `nerdctl` for the
-  remote-server operation catalog.
-- `remote-server-mcp` exposes `compose_ps`, `compose_pull`, `compose_up` and `compose_down`,
-  scoped to `services_path/<service>` and validated by the command policy.
-- Destructive and state-changing tools accept `confirm`; without `confirm=true` they return
-  a dry-run command preview and execute nothing.
-- Per-process sliding-window rate limiting for state-changing tools (`rate_limit`).
-- `[project.urls]`, authors, keywords and classifiers in the published package metadata.
-- CI runs the markdown checks and Python 3.14, and the repository ships issue/PR templates,
-  `CODEOWNERS` and a code of conduct.
-- `remote-server-mcp` exposes `get_container_health`, returning Docker healthcheck status,
-  failing streak and recent probe output. `get_service_status` now includes `Health`,
-  `FailingStreak` and `ExitCode`.
-- `remote-server-mcp` exposes `list_containers`, backed by `docker ps -a`, so stopped and
-  crashed containers are discoverable.
+- `remote-server-mcp` exposes `list_containers` (`docker ps -a`), so stopped and crashed
+  containers are discoverable, and `get_container_health`, which returns Docker healthcheck
+  status, failing streak and recent probe output.
 - Service tools accept a service directory or a container name. Directories resolve to
   their containers through the `com.docker.compose.project` label; container names are
   accepted when their project maps to a directory under `services_path` or when they are
@@ -47,18 +55,57 @@ versioning.
   always include timestamps for correlation with host events.
 - `disk-health-mcp` reports the age of the InfluxDB sample behind a health report and the
   disk overview. The last valid sample is looked up over a 24-hour window.
-- Shared `Operation` template in `server-management-lib`; both MCP servers use argv-vector
-  operation catalogs.
 - Optional `ssh_tunnel` block for `influxdb` and `prometheus`. For a loopback-only metric
   service, the MCP opens a local port forward over the configured SSH connection at
   startup, uses the local endpoint for queries and closes the tunnel on shutdown. The
   listener is restricted to a loopback address.
-- The audit log now records InfluxDB and Prometheus queries. Records contain a query
-  length and SHA-256 fingerprint, database, HTTP status and duration, never the query text
-  or its literal values.
+- Both servers expose MCP resources: `server-mcp://config/schema` (defaults with secrets
+  masked), `server-mcp://tools/catalog` and a `server-mcp://tools/{name}` template.
+- Opt-in Streamable HTTP transport (`--transport streamable-http`, `transport.*`). It binds
+  to loopback by default and requires a bearer token for any non-loopback address.
+- `container_runtime` selects `docker` (default), `podman` or `nerdctl` for the
+  remote-server operation catalog.
+- `remote-server-mcp` exposes `compose_ps`, `compose_pull`, `compose_up` and `compose_down`,
+  scoped to `services_path/<service>` and validated by the command policy.
+- Destructive and state-changing tools accept `confirm`; without `confirm=true` they return
+  a dry-run command preview and execute nothing.
+- Per-process sliding-window rate limiting for state-changing tools (`rate_limit`).
+- General secret redaction for readable service files (YAML/JSON/INI/command-line shapes,
+  bearer headers, JWTs and URL passwords) and for `systemctl status` / `journalctl` output,
+  in addition to the existing `.env` masking. Keys and structure stay readable; credential
+  stores and key material are still refused outright.
+- `[project.urls]`, authors, keywords and classifiers in the published package metadata.
+- CI runs `pymarkdown` and the markdown link check, and the repository ships issue/PR
+  templates, `CODEOWNERS` and a code of conduct.
 
 ### Changed
 
+- Migrated to MCP SDK 2.x (`mcp.server.mcpserver.MCPServer`).
+- Configuration is resolved from `--config`, environment, XDG paths or the working
+  directory; the server exits with status 2 when no config is found.
+- Host key verification is enabled by default; unparseable known_hosts entries are skipped
+  individually.
+- InfluxDB validation parses SQL instead of blacklisting shell characters; PromQL accepts
+  label matchers, quotes and comparison operators.
+- `services_path` is honored by every tool and the SSH executor.
+- Disk-health reuses one SSH connection instead of reconnecting per call.
+- SMART parsing uses `smart_support`/`smart_status` and no longer reports missing status as
+  `FAILED`.
+- Console entry points now work (`remote-server-mcp` / `disk-health-mcp`).
+- Concurrent SSH tool calls are serialized while connecting, so they share one connection
+  instead of racing and leaking connections. Metric SSH tunnels detect a dropped connection,
+  re-open the forward on the same local port with backoff and report `down`/`last_error`
+  while reconnecting.
+- `InfluxDBClient` and `PrometheusClient` keep one `aiohttp.ClientSession` per client; both
+  servers cache one client per metric service and close the sessions on shutdown.
+  `get_full_disk_report` now issues one window-function query instead of `1 + N` queries.
+- `get_service_status` skips `docker stats` and `docker port` for a stopped container, which
+  removes a 1–2 second delay per stopped container. It also reports `Health`, `FailingStreak`
+  and `ExitCode` instead of only `State: running`.
+- All `disk-health-mcp` tools now publish structured `data` on success, including SMART/NVMe
+  attributes, self-test status, ZFS/RAID/SnapRAID/mount/I/O output and decoded query rows.
+- The PromQL validation error now describes the actual policy (no null/control bytes, at
+  most 5000 characters) instead of claiming quotes and newlines are rejected.
 - `restart_service`, `stop_service`, `compose_pull`, `compose_up` and `compose_down` now
   require `confirm=true`.
 - A skipped known_hosts entry is reported in one aggregated warning per file instead of one
@@ -66,12 +113,20 @@ versioning.
 - `get_service_status`, `get_container_health`, `get_service_logs`, `search_service_logs`,
   `start_service`, `restart_service` and `stop_service` now resolve compose projects to
   all of their containers and label the output per container.
-- `disk-health-mcp` builds every host command from a typed operation catalog instead of
-  concatenating command strings. The ZFS and RAID checks run separate argv operations
-  rather than shell chains.
 - `SecurityValidator.is_command_safe()` is now a strict argv allowlist. Unknown executables,
   shell operators and hand-built command strings are rejected; the permissive fall-through
   is gone. `security.allow_generic_commands` is accepted but has no effect.
+- The same policy validates the complete argument shape for sensitive command families
+  (containers, `systemctl`, `journalctl`, `smartctl`, `nvme`, `ls`, `test`, `df`, `lsblk`,
+  `zpool`, `zfs`, `mdadm`, `cat`, `snapraid`, `findmnt`) and rejects control characters in
+  every token. A safe prefix alone no longer passes, and `docker inspect --format` strings
+  that reference `.Config`, `.Args`, `.Mounts`, `.HostConfig` or `.NetworkSettings` are
+  rejected.
+- InfluxDB validation now rejects SQL comments and treats a `LIMIT` inside a string literal,
+  identifier or nested subquery as absent. An outermost numeric `LIMIT` is clamped to
+  `query_limit`, and disk-health query tools send the validated query text to the client.
+- `start_service` and `disk-health-mcp`'s `run_smart_test` are rate-limited. Bearer auth
+  accepts the scheme case-insensitively while comparing the token in constant time.
 - `search_service_logs` now matches the literal pattern. Shell punctuation (`!`, `#`, `~`,
   quotes, backslashes) is no longer stripped; only length and control characters are
   validated. The old `sanitize_search_pattern()` is replaced by
@@ -89,21 +144,59 @@ versioning.
 - `run_smart_test` pre-flights `/usr/sbin/smartctl --version` before the write operation and
   reports a clear "no test was started" error when smartctl is unavailable. The test command
   uses `-n standby`, so a sleeping disk is skipped (exit status 2) instead of being spun up.
+- The `disk-health-mcp` coverage gate is 65% (raised from 55%).
 
 ### Fixed
 
+- The InfluxDB and Prometheus clients detect HTML response bodies (reverse-proxy error
+  pages, gateway down, login portals) before labelling a failure as a query error. The
+  diagnostic names the URL and HTTP status, caps the page to a short excerpt, and a
+  `200 text/html` or malformed JSON body is reported instead of escaping as an unhandled
+  exception. The InfluxDB file-scan hint now follows the actual `WHERE ... time`
+  predicate, and `disk-health` publishes the resolved database name in structured output.
+- `get_service_status` renders the inspect fields on separate lines again. `docker inspect`
+  does not expand `\n` in the literal part of a `--format` string (unlike `docker ps` and
+  `docker stats`), so the previous format produced one line with literal `\n` sequences.
+  `_container_running` could therefore never read `State.Running`, which also disabled the
+  "skip `docker stats`/`docker port` for a stopped container" fast path. The newlines are
+  now emitted by a template action (`{{"\n"}}`), keeping the argv free of control
+  characters for the command policy.
+- Removed the runtime SMART database self-rewrite that dropped `SEAGATE_COMPOSITE`.
+- Fixed `docker stats` argument ordering.
+- Validate NVMe devices before any database query.
+- Removed the dead asyncssh ML-KEM patch and bounded `asyncssh<3`.
+- Dropped the unused `pydantic` dependency.
 - `disk-health-mcp` no longer fabricates a `100/100` healthy report when InfluxDB and the
   `smartctl` fallback both fail; command failures and unusable text output are rejected.
 - NVMe devices are normalized from kernel names (`nvme0n1`) to Telegraf tags (`nvme0`) for
   InfluxDB lookups.
 - Host-tool fallbacks use absolute `/usr/sbin/smartctl` and `/usr/sbin/nvme` paths, so
   non-interactive SSH sessions no longer fail with `command not found`.
+- Disk-health tools ignore Telegraf standby rows (`exit_status != 0`) that have no
+  `health_ok` or temperature. A sleeping disk now produces an explicit "no recent valid
+  sample" error instead of `Unknown` / `0°C` / `0 hours`. The InfluxDB lookback is 24 hours
+  instead of 10 minutes, covering a 5-minute poll plus sleep cycles.
+- `get_full_disk_report` filters `lsblk` to whole disks (`type: disk`) and validates each
+  name, so `loop`, `rom`, `zram` and partition entries never reach `smartctl`. The device
+  pattern now accepts `sdaa`–`sdzz` for hosts with more than 26 disks.
+- Unhealthy containers are visible: `docker inspect` reports health fields and
+  `get_container_health` returns the failing probe output.
+- Compose projects no longer require a container with the same name as the `/srv`
+  directory (`immich` now resolves to `immich-server`, `immich-postgres`, ...).
+- `get_service_status` reports "Container is not running; resource usage is unavailable"
+  for stopped containers instead of Docker's zeroed `0B / 0B` statistics.
+- `EXECUTOR` and `CONTAINER_RUNTIME` environment variables now set the top-level config
+  values instead of creating malformed nested sections. Environment overrides also apply
+  when no config file is found, rather than being silently skipped.
+- SSH file reads and directory listings resolve both the requested path and the allowed
+  base with the remote `realpath`, so a symlinked `/srv` works and the confinement check
+  compares canonical paths.
+- File reads reject FIFOs, device nodes and other non-regular files. SFTP operations are
+  time-bounded and local file reads run in a worker thread, so a special file cannot hang
+  the MCP server or block the event loop.
 - `get_service_file` no longer rejects `.env` files. Dotenv contents are returned with
   their values masked (`KEY=***`), while private keys, credential stores and secret-named
   paths are still refused with an explicit sensitive-file error.
-- The `query_prometheus_disk` documentation no longer implies that Prometheus or
-  `node_exporter` is required for disk health; the Telegraf/InfluxDB path is documented as
-  the primary SMART source.
 - Sensitive-file matching is per path component and extension instead of a substring of
   the whole path, so `monkey.txt` and `tokenizer.json` are readable. The invalid-path error
   no longer claims a valid path is outside the service directory.
@@ -113,56 +206,11 @@ versioning.
 - Direct SMART access keeps the global `sudo` block and now returns clear permission errors;
   documentation recommends block-device access for the executor user and InfluxDB as the
   preferred source.
-- Raised the `disk-health-mcp` coverage gate from 55% to 65%.
-- Unhealthy containers are visible: `docker inspect` reports health fields and the new
-  `get_container_health` tool returns the failing probe output.
-- Compose projects no longer require a container with the same name as the `/srv`
-  directory (`immich` now resolves to `immich-server`, `immich-postgres`, ...).
-- `get_service_status` reports "Container is not running; resource usage is unavailable"
-  for stopped containers instead of Docker's zeroed `0B / 0B` statistics.
-- Disk-health tools ignore Telegraf standby rows (`exit_status != 0`) that have no
-  `health_ok` or temperature. A sleeping disk now produces an explicit "no recent valid
-  sample" error instead of `Unknown` / `0°C` / `0 hours`. The InfluxDB lookback is 24 hours
-  instead of 10 minutes, covering a 5-minute poll plus sleep cycles.
-
-## [0.2.0] - 2026-10-17
-
-### Added
-
-- Monorepo with a uv workspace: `apps/remote-server-mcp`, `apps/disk-health-mcp` and
-  `packages/server-management-lib`, one lockfile and shared tooling.
-- Local executor (`executor: local`) that runs validated argv vectors without a shell.
-- SFTP-based file reads and listings, confined with remote `realpath` checks.
-- Operation catalog for Docker commands, rendered with `shlex.join`.
-- Output sanitization (ANSI/control characters) and a configurable 64 KiB cap.
-- Opt-in JSONL audit log with secret redaction.
-- MCP `ToolAnnotations` for read-only and destructive tools.
-- CI workflows for Python 3.11-3.13, `py.typed` markers and coverage gates.
-- Harness-agnostic documentation and examples for pi, Claude Code, Codex, Cursor and
-  opencode.
-
-### Changed
-
-- Migrated to MCP SDK 2.x (`mcp.server.mcpserver.MCPServer`).
-- Configuration is resolved from `--config`, environment, XDG paths or the working
-  directory; the server exits with status 2 when no config is found.
-- Host key verification is enabled by default; unparseable known_hosts entries are skipped
-  individually.
-- InfluxDB validation parses SQL instead of blacklisting shell characters; PromQL accepts
-  label matchers, quotes and comparison operators.
-- `services_path` is honored by every tool and the SSH executor.
-- Disk-health reuses one SSH connection instead of reconnecting per call.
-- SMART parsing uses `smart_support`/`smart_status` and no longer reports missing status as
-  `FAILED`.
-- Console entry points now work (`remote-server-mcp` / `disk-health-mcp`).
-
-### Fixed
-
-- Removed the runtime SMART database self-rewrite that dropped `SEAGATE_COMPOSITE`.
-- Fixed `docker stats` argument ordering.
-- Validate NVMe devices before any database query.
-- Removed the dead asyncssh ML-KEM patch and bounded `asyncssh<3`.
-- Dropped the unused `pydantic` dependency.
+- The audit directory and file are created with `0700`/`0600` permissions, and an existing
+  world-readable `audit.jsonl` is tightened on the next write.
+- The `query_prometheus_disk` documentation no longer implies that Prometheus or
+  `node_exporter` is required for disk health; the Telegraf/InfluxDB path is documented as
+  the primary SMART source.
 
 ### Removed
 

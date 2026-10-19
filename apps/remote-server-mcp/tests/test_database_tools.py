@@ -93,12 +93,12 @@ class TestInfluxDBQueryValidation:
             == "SELECT * FROM cpu"
         )
 
-    def test_comments_are_accepted(self):
+    def test_comments_are_rejected(self):
         for query in (
             "SELECT * FROM cpu -- operator note",
             "SELECT * FROM cpu /* operator note */",
         ):
-            assert self.security.validate_influxdb_query(query) is not None
+            assert self.security.validate_influxdb_query(query) is None
 
     def test_quotes_and_identifiers_accepted(self):
         for query in (
@@ -443,6 +443,8 @@ class TestDisabledServiceBehavior:
             with patch.object(mcp_server, "config", config):
                 result = await mcp_server.query_prometheus("up\x00")
             assert "❌" in result
+            assert "null bytes or control characters" in result
+            assert "quotes or newlines" not in result
 
         asyncio.run(run_test())
 
@@ -654,3 +656,63 @@ class TestLivePrometheusQueries:
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v", "--tb=short"])
+
+
+class TestProxyErrorPages:
+    """A proxy/gateway HTML page is surfaced as a failed structured tool."""
+
+    def test_query_influxdb_html_page_is_not_ok(self):
+        from unittest.mock import AsyncMock
+
+        client = AsyncMock()
+        client.query = AsyncMock(
+            return_value=(
+                "❌ Received an HTML page from "
+                "https://influxdb.catafal.co:443/api/v3/query_sql (HTTP 502), "
+                "not a InfluxDB response.\n"
+                "This is usually a reverse proxy / gateway error, not a query "
+                "error."
+            )
+        )
+        config = {"influxdb": {"enabled": True, "database": "system-monitor"}}
+        tool = mcp_server.mcp._tool_manager.get_tool("query_influxdb")
+
+        async def run_test():
+            with (
+                patch.object(mcp_server, "config", config),
+                patch.object(mcp_server, "_get_influxdb_client", return_value=client),
+            ):
+                return await tool.fn(query="SELECT * FROM cpu")
+
+        response = asyncio.run(run_test())
+
+        assert response.ok is False
+        assert "Received an HTML page" in response.text
+        assert "reverse proxy" in response.text
+        assert response.data["database"] == "system-monitor"
+
+    def test_query_prometheus_html_page_is_not_ok(self):
+        from unittest.mock import AsyncMock
+
+        client = AsyncMock()
+        client.query = AsyncMock(
+            return_value=(
+                "❌ Received an HTML page from "
+                "https://prometheus.catafal.co:443/api/v1/query (HTTP 503), "
+                "not a Prometheus response."
+            )
+        )
+        config = {"prometheus": {"enabled": True}}
+        tool = mcp_server.mcp._tool_manager.get_tool("query_prometheus")
+
+        async def run_test():
+            with (
+                patch.object(mcp_server, "config", config),
+                patch.object(mcp_server, "_get_prometheus_client", return_value=client),
+            ):
+                return await tool.fn(query="up")
+
+        response = asyncio.run(run_test())
+
+        assert response.ok is False
+        assert "Received an HTML page" in response.text

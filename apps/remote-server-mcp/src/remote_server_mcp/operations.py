@@ -16,25 +16,38 @@ from dataclasses import dataclass
 
 from server_management_lib import Operation
 
+# ``docker ps``/``docker stats`` expand ``\\n`` and ``\\t`` inside their format
+# strings, but ``docker inspect`` does not: it passes the text to the Go
+# template verbatim, so a literal ``\\n`` ends up in the output and every
+# field stays on one line. Emitting the newline from inside a template action
+# (``{{"\\n"}}``) keeps the argv free of control characters (the command
+# policy rejects those) and still produces real line breaks.
+NEWLINE = '{{"\\n"}}'
+
 INSPECT_FORMAT = (
-    "Name: {{.Name}}\n"
-    "State: {{.State.Status}}\n"
-    "Running: {{.State.Running}}\n"
-    "Health: {{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}\n"
-    "FailingStreak: "
-    "{{if .State.Health}}{{.State.Health.FailingStreak}}{{else}}0{{end}}\n"
-    "RestartCount: {{.RestartCount}}\n"
-    "ExitCode: {{.State.ExitCode}}\n"
-    "StartedAt: {{.State.StartedAt}}"
+    f"Name: {{{{.Name}}}}{NEWLINE}"
+    f"State: {{{{.State.Status}}}}{NEWLINE}"
+    f"Running: {{{{.State.Running}}}}{NEWLINE}"
+    f"Health: {{{{if .State.Health}}}}{{{{.State.Health.Status}}}}{{{{else}}}}none"
+    f"{{{{end}}}}{NEWLINE}"
+    f"FailingStreak: {{{{if .State.Health}}}}{{{{.State.Health.FailingStreak}}}}"
+    f"{{{{else}}}}0{{{{end}}}}{NEWLINE}"
+    f"RestartCount: {{{{.RestartCount}}}}{NEWLINE}"
+    f"ExitCode: {{{{.State.ExitCode}}}}{NEWLINE}"
+    f"StartedAt: {{{{.State.StartedAt}}}}"
 )
 
-STATS_FORMAT = "CPU: {{.CPUPerc}}\nMemory: {{.MemUsage}}\nNet I/O: {{.NetIO}}"
+# ``docker stats`` *does* expand ``\\n`` before it parses the template, so it
+# must keep the plain escape. Using the ``NEWLINE`` action here would turn the
+# string literal into a real newline and fail with "unterminated quoted
+# string".
+STATS_FORMAT = "CPU: {{.CPUPerc}}\\nMemory: {{.MemUsage}}\\nNet I/O: {{.NetIO}}"
 HEALTH_FORMAT = "{{json .State.Health}}"
 
 # One line per container, including stopped and crashed ones. The compose
 # project label is how a service directory resolves to its containers.
 CONTAINER_LIST_FORMAT = (
-    '{{.Names}}\t{{.Label "com.docker.compose.project"}}\t{{.Status}}'
+    '{{.Names}}\\t{{.Label "com.docker.compose.project"}}\\t{{.Status}}'
 )
 
 
@@ -88,7 +101,7 @@ def build_container_catalog(runtime: str = "docker") -> ContainerCatalog:
     """
     return ContainerCatalog(
         runtime=runtime,
-        ps=Operation((runtime, "ps", "--format", "{{.Names}}\t{{.Status}}")),
+        ps=Operation((runtime, "ps", "--format", "{{.Names}}\\t{{.Status}}")),
         ps_all=Operation((runtime, "ps", "-a", "--format", CONTAINER_LIST_FORMAT)),
         ps_unhealthy=Operation(
             (
@@ -98,7 +111,7 @@ def build_container_catalog(runtime: str = "docker") -> ContainerCatalog:
                 "--filter",
                 "health=unhealthy",
                 "--format",
-                "{{.Names}}\t{{.Status}}",
+                "{{.Names}}\\t{{.Status}}",
             )
         ),
         inspect=Operation(

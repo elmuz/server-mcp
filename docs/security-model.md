@@ -37,11 +37,18 @@ Values are validated first (service name regex, device pattern, bounded integers
 substituted literally.
 
 Every rendered command passes `SecurityValidator.is_command_safe()`. Its policy is an
-explicit argv allowlist: the command must be canonical `shlex.join` output, the executable
-and leading arguments must match a catalog operation, and arguments may not contain shell
-metacharacters. Unknown executables, `docker run`/`docker exec`, shell chaining,
-redirection and command substitution are rejected. There is no permissive fall-through, and
-`security.allow_generic_commands` cannot enable arbitrary execution.
+explicit argv allowlist: the command must be canonical `shlex.join` output and the
+**complete argument vector** must match the shape of a catalog operation. For sensitive
+families the policy checks the arguments themselves, not just a prefix: `systemctl status`
+must be `--no-pager --full <allowed_unit>`, `journalctl` must be
+`-u <allowed_unit> -n <int> --no-pager --output short-iso`, `smartctl` accepts only
+read-only flags plus `/dev/<valid_device>`, `ls`/`test` stay below `services_path`, and
+Docker `inspect`/`stats` formats cannot reference `.Config`, `.Args`, `.Mounts` or
+host/network configuration. Every token is also rejected if it contains a control
+character (`\x00`–`\x1f`, `\x7f`) or a shell metacharacter. Unknown executables,
+`docker run`/`docker exec`, shell chaining, redirection and command substitution are
+rejected. There is no permissive fall-through, and `security.allow_generic_commands`
+cannot enable arbitrary execution.
 
 There is exactly one privileged catalog command: `get_snapraid_status` runs
 `sudo -n /usr/local/bin/snapraid status` because SnapRAID stores its content file and lock
@@ -64,7 +71,7 @@ without a shell.
 
 Service names must match `^[a-zA-Z0-9][a-zA-Z0-9_-]*$`, start with an alphanumeric character
 and be at most 100 characters. Device names must match a block-device pattern (`sda`,
-`nvme0n1`, `vda`, `mmcblk0p1`, `dm-0`, ...). File paths are relative, length-limited,
+`sdaa`–`sdzz`, `nvme0n1`, `vda`, `mmcblk0p1`, `dm-0`, ...). File paths are relative, length-limited,
 reject null bytes, URL-encoded traversal, Unicode dot variants and shell metacharacters,
 and must resolve inside the service directory. Sensitive names are handled by the policy
 in section 4.
@@ -93,6 +100,14 @@ are the primary way to debug a compose stack whose `compose.yml` only contains `
 Their values are masked (`KEY=***`) before the contents reach the model; keys, comments
 and blank lines are preserved.
 
+Redaction does not stop at dotenv files. Other readable service files pass through a
+general key/value redactor before they are returned: YAML, JSON, INI and command-line
+shapes whose key names a password, secret, token, API/private key or authorization value
+are masked while the key and file structure stay readable. `Authorization: Bearer ...`
+headers, JWT-shaped values and credentials embedded in URLs are masked as well.
+`systemctl status` and `journalctl -u` output is passed through the same redactor, because
+`--full` command lines and journal tails can contain tokens.
+
 ### 5. Path confinement on the target
 
 The requested path is built lexically on the MCP host with `PurePosixPath`; it is never
@@ -101,6 +116,11 @@ break the target path. For SSH, file access then uses SFTP: the requested path a
 allowed base are resolved with the remote `realpath`, and the resolved file must be inside
 the resolved service directory. That target-side check closes symlink escapes. The local
 executor does the equivalent with `Path.resolve()` on the target.
+
+Both executors require the resolved target to be a regular file before reading it. FIFOs,
+device nodes and other special files are refused instead of opened, and SFTP operations are
+time-bounded and local file I/O runs in a worker thread, so a special file cannot hang a
+tool call or the event loop.
 
 ### 6. Verified SSH transport
 
@@ -113,15 +133,20 @@ stays enabled for every other host. Disabling verification requires an explicit
 The optional `ssh_tunnel` block for InfluxDB and Prometheus uses the same verified SSH
 settings. The local listener must be a loopback address (never `0.0.0.0`), and the remote
 host/port are operator configuration, not model input. Tunnels are opened at server
-startup and closed on shutdown.
+startup, re-opened on the same loopback port after an SSH disconnect, and closed on
+shutdown. The model never chooses the tunnel endpoints.
 
 ### 7. Read-only data access
 
 InfluxDB SQL is parsed with `sqlparse`: exactly one statement, must be `SELECT`, write
-keywords (`INTO`, `DROP`, `INSERT`, `UPDATE`, ...) rejected. A `LIMIT` is appended when
-missing. PromQL is sent to Prometheus's read-only instant-query endpoint; quotes, label
-matchers and comparison operators are allowed because the query is never executed by a
-shell.
+keywords (`INTO`, `DROP`, `INSERT`, `UPDATE`, ...) rejected and SQL comments (`--`,
+`/* ... */`) rejected. The outermost query must have a numeric `LIMIT`; an existing value
+above `influxdb.query_limit` is clamped, and a `LIMIT` is appended when the outermost query
+has none. `LIMIT` text inside a string literal, an identifier or a nested subquery does not
+count. The validator returns the sanitized query and the tools send exactly that value to
+the HTTP client, not the original input. PromQL is sent to Prometheus's read-only
+instant-query endpoint; quotes, label matchers and comparison operators are allowed because
+the query is never executed by a shell.
 
 Use read-only tokens for both services. The MCP is not a substitute for database-side
 authorization.
@@ -139,12 +164,17 @@ surface for terminal-escape and prompt-injection tricks.
 ### 9. Audit logging
 
 `audit.enabled` writes JSONL records for commands, blocked commands, timeouts, file reads,
-directory listings and HTTP queries. Command and file records include timestamps, duration,
-exit status and truncation state. InfluxDB and Prometheus query records contain a query
-length, a SHA-256 fingerprint, the database (InfluxDB), HTTP status or error class, and
-duration; the query text is never stored because it can contain literal values. Password,
-token and secret fields are redacted. The log is best effort: a write failure never blocks
-an operation.
+directory listings, HTTP queries and Prometheus target requests. Command and file records
+include timestamps, duration, exit status and truncation state. InfluxDB and Prometheus
+query records contain a query length, a SHA-256 fingerprint, the database (InfluxDB), HTTP
+status or error class, and duration; the query text is never stored because it can contain
+literal values. Password, token and secret fields are redacted. Policy refusals that happen
+before the executor also produce records: `file_blocked_sensitive`, `host_unit_blocked`,
+`query_blocked` and `rate_limited`.
+
+The audit directory is created with mode `0700` and the JSONL file is `0600`; an existing
+file is tightened to `0600` on the next write. The log is best effort: a write failure never
+blocks an operation.
 
 ### 10. MCP tool annotations and structured results
 
@@ -157,18 +187,21 @@ as structured content, so a client can act on `ok` or `data` without parsing the
 
 `restart_service`, `stop_service`, `compose_pull`, `compose_up` and `compose_down` require
 `confirm=true`. Without it they return the rendered command as a dry-run preview and execute
-nothing. Confirmed calls pass through a per-process sliding-window rate limit
-(`rate_limit`, default 10 calls per minute), which prevents a retry loop from repeatedly
-restarting a service. Compose actions only accept a service directory below `services_path`;
-the directory is validated by the command policy, and only `ps`, `pull`, `up -d` and `down`
-with their fixed arguments are allowed.
+nothing. State-changing calls pass through a per-process sliding-window rate limit
+(`rate_limit`, default 10 calls per minute): `start_service`, `restart_service`,
+`stop_service`, the compose actions and `disk-health-mcp`'s `run_smart_test`. This prevents
+a retry loop from repeatedly restarting a service or starting self-tests. Compose actions
+only accept a service directory below `services_path`; the directory is validated by the
+command policy, and only `ps`, `pull`, `up -d` and `down` with their fixed arguments are
+allowed.
 
 ### 12. Network transport
 
 The default transport is stdio. Streamable HTTP is opt-in and refuses a non-loopback bind
 address without a bearer token. With a token configured, every HTTP request must present
-`Authorization: Bearer <token>` before the MCP handler sees it. The model cannot choose the
-transport or the token.
+`Authorization: Bearer <token>` before the MCP handler sees it. The auth scheme is matched
+case-insensitively (RFC 9110), while the token itself is compared in constant time. The
+model cannot choose the transport or the token.
 
 ## Known limitations
 

@@ -40,6 +40,7 @@ from server_management_lib import (
     open_metric_tunnels,
     parse_duration,
     redact_env_content,
+    redact_secrets,
     resolve_config_path,
     run_streamable_http,
     sanitize_output,
@@ -117,6 +118,11 @@ def _cap_composite(text: str) -> str:
     return sanitize_output(text, _max_output_bytes(), label="tool output")
 
 
+def _audit(event: str, **fields: object) -> None:
+    """Record a policy decision that happens before the executor is called."""
+    create_audit_logger(config).log(event, **fields)
+
+
 def _rate_limited(action: str) -> str | None:
     """Return a rate-limit error when the sliding window is exhausted."""
     if rate_limiter is None:
@@ -124,6 +130,7 @@ def _rate_limited(action: str) -> str | None:
     retry_after = rate_limiter.check()
     if retry_after is None:
         return None
+    _audit("rate_limited", action=action, retry_after=round(retry_after, 1))
     return (
         f"❌ Rate limit exceeded for {action}. No change was made.\n"
         f"Try again in {retry_after:.0f}s (see rate_limit in config.yaml)."
@@ -137,6 +144,46 @@ def _confirmation_required(action: str, target: str, command: str) -> str:
         f"Command: {command}\n"
         "Call the tool again with confirm=true after verifying the target."
     )
+
+
+_metric_clients: dict[tuple[str, int], InfluxDBClient | PrometheusClient] = {}
+
+
+def _cached_client(name, cfg, factory):
+    """Return one long-lived client per config object and service.
+
+    A client owns a shared ``aiohttp.ClientSession`` (opened lazily), so
+    reusing the client avoids a new session on every tool call. The key
+    includes the config object identity so a test/config swap gets a fresh
+    client; :func:`apply_config` clears the cache explicitly.
+    """
+    key = (name, id(cfg))
+    client = _metric_clients.get(key)
+    if client is None:
+        client = factory()
+        _metric_clients[key] = client
+    return client
+
+
+def _get_influxdb_client() -> InfluxDBClient:
+    cfg = config.get("influxdb", {}) or {}
+    return _cached_client("influxdb", cfg, _make_influxdb_client)  # type: ignore[return-value]
+
+
+def _get_prometheus_client() -> PrometheusClient:
+    cfg = config.get("prometheus", {}) or {}
+    return _cached_client("prometheus", cfg, _make_prometheus_client)  # type: ignore[return-value]
+
+
+async def close_metric_clients() -> None:
+    """Close every cached HTTP client session on shutdown."""
+    clients = list(_metric_clients.values())
+    _metric_clients.clear()
+    for client in clients:
+        try:
+            await client.close()
+        except Exception as e:  # pragma: no cover - best effort
+            logger.debug("Error while closing %s: %s", type(client).__name__, e)
 
 
 def _make_influxdb_client() -> InfluxDBClient:
@@ -244,13 +291,18 @@ def _render_logs_command(
     return operation.render(**params)
 
 
-def _resource_usage(inspect_output: str, stats_output: str) -> str:
-    """Replace zeroed ``docker stats`` data for a stopped container."""
+def _container_running(inspect_output: str) -> bool | None:
+    """Return the ``State.Running`` value from inspect output, if present."""
     for line in inspect_output.splitlines():
         if line.startswith("Running:"):
-            if line.split(":", 1)[1].strip().lower() == "false":
-                return "Container is not running; resource usage is unavailable."
-            break
+            return line.split(":", 1)[1].strip().lower() == "true"
+    return None
+
+
+def _resource_usage(inspect_output: str, stats_output: str) -> str:
+    """Replace zeroed ``docker stats`` data for a stopped container."""
+    if _container_running(inspect_output) is False:
+        return "Container is not running; resource usage is unavailable."
     return stats_output
 
 
@@ -308,6 +360,7 @@ def apply_config(config_path: Path | None = None) -> Path:
     """(Re)load configuration and rebuild the dependent objects in place."""
     global security, executor, catalog, rate_limiter
 
+    _metric_clients.clear()
     resolved = resolve_config_path(
         config_path, env_var=CONFIG_ENV_VAR, app_name=APP_NAME
     )
@@ -435,11 +488,12 @@ async def get_host_service_status(unit: str) -> str:
         systemctl status output for the unit
     """
     if not security.validate_host_unit(unit):
+        _audit("host_unit_blocked", unit=unit, tool="get_host_service_status")
         return _host_unit_error(unit)
 
     try:
         output = await executor.execute_safe_command(SYSTEMCTL_STATUS.render(unit=unit))
-        return _cap_composite(f"=== Host Service: {unit} ===\n{output}")
+        return _cap_composite(f"=== Host Service: {unit} ===\n{redact_secrets(output)}")
     except Exception as e:
         return f"❌ Error getting host service status: {e}"
 
@@ -460,6 +514,7 @@ async def get_host_service_logs(unit: str, lines: int = 100) -> str:
         Recent journal entries with ISO timestamps
     """
     if not security.validate_host_unit(unit):
+        _audit("host_unit_blocked", unit=unit, tool="get_host_service_logs")
         return _host_unit_error(unit)
 
     lines = max(1, min(lines, 1000))
@@ -467,7 +522,9 @@ async def get_host_service_logs(unit: str, lines: int = 100) -> str:
         output = await executor.execute_safe_command(
             JOURNALCTL_UNIT.render(unit=unit, lines=lines)
         )
-        return _cap_composite(f"=== Journal: {unit} (last {lines} lines) ===\n{output}")
+        return _cap_composite(
+            f"=== Journal: {unit} (last {lines} lines) ===\n{redact_secrets(output)}"
+        )
     except Exception as e:
         return f"❌ Error getting host service logs: {e}"
 
@@ -553,18 +610,29 @@ async def get_service_status(service: str) -> str | ToolOutput:
             )
             status = f"=== Docker Status ===\n{inspect_output}"
 
-            stats_output = await executor.execute_safe_command(
-                catalog.stats.render(service=container)
-            )
-            status += (
-                "\n\n=== Resource Usage ===\n"
-                f"{_resource_usage(inspect_output, stats_output)}"
-            )
+            # ``docker stats`` waits 1-2 seconds per container and ``docker
+            # port`` is also meaningless for a stopped container. Inspect is
+            # the source of truth, so skip both calls when it is not running.
+            if _container_running(inspect_output) is False:
+                status += (
+                    "\n\n=== Resource Usage ===\n"
+                    "Container is not running; resource usage is unavailable."
+                    "\n\n=== Ports ===\n"
+                    "Container is not running; ports are unavailable."
+                )
+            else:
+                stats_output = await executor.execute_safe_command(
+                    catalog.stats.render(service=container)
+                )
+                status += (
+                    "\n\n=== Resource Usage ===\n"
+                    f"{_resource_usage(inspect_output, stats_output)}"
+                )
 
-            ports_output = await executor.execute_safe_command(
-                catalog.ports.render(service=container)
-            )
-            status += f"\n\n=== Ports ===\n{ports_output}"
+                ports_output = await executor.execute_safe_command(
+                    catalog.ports.render(service=container)
+                )
+                status += f"\n\n=== Ports ===\n{ports_output}"
 
             blocks.append(_container_block(resolution, container, status))
         text = _cap_composite("\n\n".join(blocks))
@@ -708,6 +776,10 @@ async def start_service(service: str) -> str | ToolOutput:
         resolution = await _resolve_service(service)
     except ResolutionError as e:
         return str(e)
+
+    limited = _rate_limited("start_service")
+    if limited is not None:
+        return limited
 
     try:
         # Use '--' to prevent Docker option injection (defense in depth)
@@ -890,6 +962,12 @@ async def get_service_file(service: str, file_path: str) -> str | ToolOutput:
     check = security.check_service_file_path(service, file_path)
     if check.path is None:
         if check.access is FileAccess.BLOCKED_SENSITIVE:
+            _audit(
+                "file_blocked_sensitive",
+                service=service,
+                path=file_path,
+                reason=check.reason,
+            )
             return (
                 f"❌ Blocked by the sensitive-file policy: {file_path}\n"
                 f"{check.reason}. Private keys, credential stores and secret "
@@ -914,14 +992,18 @@ async def get_service_file(service: str, file_path: str) -> str | ToolOutput:
     except Exception as e:
         return f"❌ Error reading file: {e}"
 
-    redacted = check.access is FileAccess.REDACT
-    if redacted:
+    if check.access is FileAccess.REDACT:
+        redacted = True
         text = _cap_composite(
             f"{redact_env_content(content)}\n\n"
             "(Environment values are masked by the sensitive-file policy.)"
         )
     else:
-        text = _cap_composite(content)
+        redacted_content = redact_secrets(content)
+        redacted = redacted_content != content
+        text = _cap_composite(redacted_content)
+        if redacted:
+            text += "\n\n(Sensitive values are masked by the security policy.)"
     return ToolOutput(
         text,
         data={
@@ -951,6 +1033,13 @@ async def list_service_files(service: str, subdirectory: str = "") -> str | Tool
         check = security.check_service_file_path(service, subdirectory)
         if check.path is None:
             if check.access is FileAccess.BLOCKED_SENSITIVE:
+                _audit(
+                    "file_blocked_sensitive",
+                    service=service,
+                    path=subdirectory,
+                    reason=check.reason,
+                    tool="list_service_files",
+                )
                 return (
                     f"❌ Blocked by the sensitive-file policy: {subdirectory}\n"
                     f"{check.reason}"
@@ -1114,11 +1203,12 @@ async def query_influxdb(query: str, database: str | None = None) -> str | ToolO
     # Validate the query
     validated_query = security.validate_influxdb_query(query)
     if validated_query is None:
+        _audit("query_blocked", kind="influxdb", query_length=len(query))
         return (
             "❌ Invalid query. Queries must:\n"
-            "- Start with SELECT (read-only only)\n"
-            "- Not contain SQL injection characters (;, --, /*, etc.)\n"
-            "- Not contain shell injection characters"
+            "- Be a single SELECT (read-only only)\n"
+            "- Not contain SQL comments (-- or /* */)\n"
+            "- Not contain control characters"
         )
 
     db = database or influxdb_config.get("database")
@@ -1128,7 +1218,7 @@ async def query_influxdb(query: str, database: str | None = None) -> str | ToolO
             "'influxdb.database' in config.yaml."
         )
 
-    client = _make_influxdb_client()
+    client = _get_influxdb_client()
     result = await client.query(validated_query, database=db)
     return ToolOutput(
         result,
@@ -1159,13 +1249,15 @@ async def query_prometheus(query: str, time: str | None = None) -> str | ToolOut
 
     validated_query = security.validate_prometheus_query(query)
     if validated_query is None:
+        _audit("query_blocked", kind="prometheus", query_length=len(query))
         return (
             "❌ Invalid query. Queries must:\n"
-            "- Not contain shell injection characters (;, `, $, |, etc.)\n"
-            "- Not contain quotes or newlines"
+            "- Not contain null bytes or control characters other than newline/tab\n"
+            "- Be at most 5000 characters\n"
+            "- Be a single PromQL expression"
         )
 
-    client = _make_prometheus_client()
+    client = _get_prometheus_client()
     result = await client.query(validated_query, time)
     return ToolOutput(result, data=_query_data(result))
 
@@ -1187,7 +1279,7 @@ async def get_prometheus_targets() -> str | ToolOutput:
             "Set 'prometheus.enabled: true' in config.yaml and configure host/port."
         )
 
-    client = _make_prometheus_client()
+    client = _get_prometheus_client()
     result = await client.get_targets()
     return ToolOutput(result, data=_query_data(result))
 
@@ -1376,6 +1468,7 @@ async def main(
         logger.error("Invalid Streamable HTTP configuration: %s", e)
         raise SystemExit(2) from e
     finally:
+        await close_metric_clients()
         await close_metric_tunnels(tunnels)
 
 

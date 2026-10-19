@@ -447,7 +447,7 @@ class TestCommandSafetyBypass:
         """
         # Commands should not include $ expansions that could be controlled
         # remotely via environment variables
-        cmd = "docker ps --format '{{.Names}}\t{{.Status}}'"
+        cmd = "docker ps --format '{{.Names}}\\t{{.Status}}'"
         # {{ }} is docker format, not shell $()
         assert self.security.is_command_safe(cmd) is True
 

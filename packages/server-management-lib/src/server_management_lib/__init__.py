@@ -36,7 +36,7 @@ from .rate_limit import (
     RateLimiter,
     create_rate_limiter,
 )
-from .redaction import REDACTED_VALUE, redact_env_content
+from .redaction import REDACTED_VALUE, redact_env_content, redact_secrets
 from .responses import (
     ToolOutput,
     ToolResponse,
@@ -113,6 +113,7 @@ __all__ = [
     "parse_duration",
     "redact_config_values",
     "redact_env_content",
+    "redact_secrets",
     "resolve_config_path",
     "run_streamable_http",
     "sanitize_output",

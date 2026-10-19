@@ -1,6 +1,7 @@
 """Tests for the local executor (no shell, same confinement as SFTP)."""
 
 import asyncio
+import os
 
 import pytest
 
@@ -175,6 +176,21 @@ class TestLocalFiles:
             asyncio.run(
                 _executor(tmp_path).list_remote_dir(
                     str(tmp_path), allowed_base=str(service)
+                )
+            )
+
+    def test_read_fifo_is_rejected(self, tmp_path):
+        from server_management_lib import RemoteFileError
+
+        service = tmp_path / "services" / "app"
+        service.mkdir(parents=True)
+        fifo = service / "pipe"
+        os.mkfifo(fifo)
+
+        with pytest.raises(RemoteFileError, match="Not a regular file"):
+            asyncio.run(
+                _executor(tmp_path).read_remote_file(
+                    str(fifo), allowed_base=str(service)
                 )
             )
 

@@ -51,7 +51,7 @@ class BearerTokenMiddleware:
         self.app = app
         self.token = token
         self.header = header.lower().encode("latin-1")
-        self._expected = f"Bearer {token}".encode()
+        self._token = token.encode("utf-8")
 
     async def __call__(self, scope: dict, receive: Any, send: Any) -> None:
         if scope.get("type") != "http":
@@ -64,7 +64,18 @@ class BearerTokenMiddleware:
                 provided = value
                 break
 
-        if not hmac.compare_digest(provided, self._expected):
+        # RFC 9110 auth schemes are case-insensitive: ``bearer`` and ``Bearer``
+        # are equivalent. The credential itself is compared in constant time.
+        scheme = b""
+        credential = b""
+        if provided:
+            parts = provided.split(None, 1)
+            if len(parts) == 2:
+                scheme, credential = parts
+
+        if scheme.lower() != b"bearer" or not hmac.compare_digest(
+            credential, self._token
+        ):
             logger.warning("Rejected unauthenticated Streamable HTTP request")
             body = b'{"error":"unauthorized"}'
             await send(

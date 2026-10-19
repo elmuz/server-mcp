@@ -21,7 +21,7 @@ and the tool catalog are available as MCP resources; see [architecture.md](archi
 | `get_container_health` | `service`, `entries` (1–20) | read-only | Healthcheck status and recent probe output for every resolved container |
 | `get_host_service_status` | `unit` | read-only | `systemctl status` for a unit in `security.host_units` |
 | `get_host_service_logs` | `unit`, `lines` (1–1000) | read-only | `journalctl -u` for a unit in `security.host_units` |
-| `get_service_file` | `service`, `file_path` | read-only | Reads a file inside the service directory over SFTP; `.env` values are masked and key/credential files are refused |
+| `get_service_file` | `service`, `file_path` | read-only | Reads a file inside the service directory over SFTP; `.env` values and recognized secrets in compose/config files are masked, and key/credential files are refused |
 | `list_service_files` | `service`, `subdirectory` | read-only | Lists files inside the service directory |
 | `get_server_health` | — | read-only | Uptime, memory, disk usage for every `health.disk_paths` mount, running containers and unhealthy containers |
 | `query_influxdb` | `query`, `database` | read-only | Single `SELECT` against InfluxDB v3 |
@@ -59,6 +59,7 @@ get_host_service_status("telegraf")   # systemd unit, not a container
 get_host_service_logs("telegraf", lines=200)
 get_service_file("grafana", "provisioning/datasources/influxdb.yml")
 get_service_file("cypht", ".env")       # values masked as KEY=***
+get_service_file("cypht", "compose.yml") # inline passwords/tokens masked
 query_prometheus('up{job="node"} > 0')  # optional; any Prometheus target
 query_influxdb("SELECT * FROM smart_device WHERE time > now() - INTERVAL '1 hour' LIMIT 100")
 ```
@@ -143,10 +144,12 @@ involved, so a pattern that looks like shell syntax is just text.
 it would run and executes nothing. Call the tool again with `confirm=true` after checking
 the target. `start_service` and `compose_ps` do not need confirmation.
 
-Confirmed state-changing calls pass through a sliding-window limiter (`rate_limit` in the
-config: `enabled`, `max_calls`, `window_seconds`; default 10 calls per 60 seconds). When the
-window is exhausted the tool returns a rate-limit error and no command runs. The limiter is
-per server process, so it bounds runaway retries rather than providing multi-user quotas.
+State-changing calls pass through a sliding-window limiter (`rate_limit` in the config:
+`enabled`, `max_calls`, `window_seconds`; default 10 calls per 60 seconds). That includes
+`start_service`, `restart_service`, `stop_service`, `compose_pull`, `compose_up` and
+`compose_down`, plus `disk-health-mcp`'s `run_smart_test`. When the window is exhausted the
+tool returns a rate-limit error and no command runs. The limiter is per server process, so
+it bounds runaway retries rather than providing multi-user quotas.
 
 The container CLI for all Docker/Compose tools is selected by `container_runtime`
 (`docker`, `podman` or `nerdctl`). The command allowlist is identical for all three.
@@ -161,8 +164,10 @@ complete response. A response is truncated at most once with the standard marker
 `get_host_service_status` and `get_host_service_logs` accept only units listed in
 `security.host_units` (default: `telegraf`, `smartd`, `docker`, `snapraid`, `mergerfs`,
 `smbd`). Pass the base unit name (`telegraf`), not `telegraf.service` or a path. An empty
-allowlist disables both tools. The same validation applies before `systemctl status` and
-`journalctl -u` are rendered, so an unknown unit never reaches the executor.
+allowlist disables both tools. The command policy additionally checks the complete argument
+shape (`systemctl status --no-pager --full <unit>` and
+`journalctl -u <unit> -n <int> --no-pager --output short-iso`), so extra flags or targets
+are rejected before execution.
 
 The executor user must be able to read the journal (`systemd-journal` or `adm` group).
 Without that, `journalctl` exits 0 with "No entries" and a permission hint on stderr, so
@@ -196,8 +201,11 @@ and both the sudoers rule and `SNAPRAID_STATUS_SUDO_ARGV` must change.
 
 ## Device names
 
-Block devices must match `sda`, `nvme0n1`, `vda`, `hda`, `mmcblk0p1` or `dm-0`. Partitions
-are accepted where the pattern allows them; pass the whole disk for SMART operations.
+Block devices must match `sda`, `sdaa`–`sdzz`, `nvme0n1`, `vda`, `hda`, `mmcblk0p1` or
+`dm-0`. The two-letter SATA/SAS form supports hosts with more than 26 disks. Partitions are
+accepted where the pattern allows them (`mmcblk0p1`), but SMART tools expect a whole-disk
+name. `get_full_disk_report` filters `lsblk` to `type: disk` and validates every name, so
+`loop0`, `sr0`, `zram0` and partition rows never reach `smartctl`.
 
 Telegraf stores NVMe devices without the namespace suffix (`nvme0`, not `nvme0n1`). The
 disk-health tools normalize `nvmeXnY` to `nvmeX` for InfluxDB lookups; pass the kernel name
@@ -263,3 +271,8 @@ directory or add its name to `security.allowed_containers`.
 - `get_service_file` masks the values of `.env` files (`KEY=***`) and refuses private keys,
   credential stores and secret-named paths with a specific sensitive-file error. Matching
   is per path component and extension, so `monkey.txt` and `tokenizer.json` are readable.
+  Other readable config files (YAML/JSON/INI/command-line shapes) are passed through a
+  secret redactor: password/secret/token/API-key/authorization values, bearer headers,
+  JWTs and URL passwords are replaced with `***` while keys and structure stay readable.
+  `get_host_service_status` and `get_host_service_logs` apply the same redaction because
+  `systemctl status --full` and journal tails can contain command-line tokens.

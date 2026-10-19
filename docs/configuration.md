@@ -105,12 +105,14 @@ audit:
 | `ssh` (default) | Connects to `ssh.host`; files are read over SFTP; host keys are verified |
 | `local` | Runs commands on the host where the MCP server runs, as that user; no shell |
 
-Both executors use the same validated operation catalog. The local executor rejects shell
-operators (`|`, `&&`, `;`, redirects) instead of interpreting them.
+`executor` is a top-level key, not a nested section; `EXECUTOR` sets the same top-level
+value. Both executors use the same validated operation catalog. The local executor rejects
+shell operators (`|`, `&&`, `;`, redirects) instead of interpreting them.
 
 ## Container runtime
 
-`container_runtime` selects the CLI used by the remote-server operation catalog:
+`container_runtime` is a top-level key; `CONTAINER_RUNTIME` sets the same top-level value.
+It selects the CLI used by the remote-server operation catalog:
 `docker` (default), `podman` or `nerdctl`. The tools use the same subcommands
 (`ps`, `logs`, `inspect`, `stats`, `port`, `start`, `stop`, `restart`, `compose`) and the
 shared argv allowlist, so switching runtimes does not widen the security policy. An
@@ -135,7 +137,8 @@ genuinely cannot launch a process.
 ## Rate limiting
 
 `rate_limit` bounds state-changing tool calls per server process with a sliding window:
-`restart_service`, `stop_service`, `compose_pull`, `compose_up` and `compose_down`.
+`start_service`, `restart_service`, `stop_service`, `compose_pull`, `compose_up` and
+`compose_down` in `remote-server-mcp`, and `run_smart_test` in `disk-health-mcp`.
 Destructive and compose tools also require `confirm=true`; without it they return a dry-run
 preview. Set `enabled: false` for unattended automation or raise `max_calls`.
 
@@ -253,7 +256,9 @@ When `ssh_tunnel.enabled` is true, `influxdb.host`/`influxdb.port` are replaced 
 by the local tunnel endpoint, so leave `use_https` false unless the service itself serves
 TLS. The same block is available under `prometheus` (default remote port `9090`). The
 tunnel uses the `ssh` section even when `executor: local`; if it cannot be opened, the
-server exits with status 2 instead of starting with an unreachable endpoint.
+server exits with status 2 instead of starting with an unreachable endpoint. If the SSH
+connection drops later, the tunnel re-opens the forward on the same local port and retries
+with backoff; queries fail with a connection error while it is down instead of hanging.
 
 A tunnel forwards to an address that is reachable from the target host, normally
 `127.0.0.1`. It cannot create a Prometheus that was retired; on `catafalco` Prometheus is
@@ -261,8 +266,12 @@ disabled and there is no `node_exporter`.
 
 ## Databases
 
-InfluxDB queries must be a single `SELECT`. A `LIMIT` is appended when the query has none.
-Prometheus uses the read-only instant-query API. Use read-only tokens for both.
+InfluxDB queries must be a single `SELECT`; SQL comments are rejected. The outermost query
+must have a numeric `LIMIT`: an existing value above `query_limit` is clamped, and a
+`LIMIT` is appended when none is present. A `LIMIT` inside a string literal, identifier or
+nested subquery does not count. The validated query text (not the original input) is what
+the client sends. Prometheus uses the read-only instant-query API. Use read-only tokens for
+both.
 
 Prometheus is optional and is not a prerequisite for disk health. Telegraf's smart plugin
 writing to InfluxDB (`smart_device`, `smart_attribute`) is the recommended SMART source.
@@ -279,8 +288,11 @@ an empty result for those queries, not an MCP error.
 - `audit.enabled` writes one JSON object per line. Records include timestamps, commands,
   paths, exit codes, durations and truncation flags. InfluxDB and Prometheus query records
   contain a query length and SHA-256 fingerprint, database/status and duration, never the
-  query text. Password/token/secret fields are redacted. Audit logging is best effort and
-  never blocks an operation.
+  query text. `prometheus_targets` requests are recorded too. Policy refusals produce
+  `file_blocked_sensitive`, `host_unit_blocked`, `query_blocked` and `rate_limited`
+  records. Password/token/secret fields are redacted. The audit directory is created with
+  mode `0700` and `audit.jsonl` with `0600` (an existing file is tightened on the next
+  write). Audit logging is best effort and never blocks an operation.
 
 ## Environment variables
 

@@ -21,6 +21,7 @@ import json
 import logging
 import os
 import re
+from dataclasses import asdict
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -38,6 +39,7 @@ from server_management_lib import (
     config_schema,
     create_audit_logger,
     create_executor,
+    create_rate_limiter,
     load_config,
     make_structured_tool,
     open_metric_tunnels,
@@ -114,6 +116,24 @@ def _parse_influx_time(value: object) -> datetime | None:
     return parsed.astimezone(UTC)
 
 
+def _parse_key_value_output(text: str) -> dict[str, str | int]:
+    """Parse ``Key : value`` lines from human-readable tool output."""
+    parsed: dict[str, str | int] = {}
+    for line in text.splitlines():
+        if ":" not in line:
+            continue
+        key, value = line.split(":", 1)
+        name = key.strip()
+        raw = value.strip()
+        if not name:
+            continue
+        try:
+            parsed[name] = int(raw)
+        except ValueError:
+            parsed[name] = raw
+    return parsed
+
+
 def _format_sample_age(row: dict) -> str | None:
     """Describe how old an InfluxDB sample is, with its UTC timestamp."""
     timestamp = _parse_influx_time(row.get("time"))
@@ -139,6 +159,7 @@ logger = logging.getLogger(__name__)
 config = load_config(env_var=CONFIG_ENV_VAR, app_name=APP_NAME, log_missing=False)
 security = SecurityValidator(config)
 executor = create_executor(config, security)
+rate_limiter = create_rate_limiter(config)
 
 mcp = MCPServer("disk-health-mcp")
 
@@ -179,10 +200,30 @@ def _cap_composite(text: str) -> str:
     return sanitize_output(text, _max_output_bytes(), label="tool output")
 
 
+def _audit(event: str, **fields: object) -> None:
+    """Record a policy decision that happens before the executor is called."""
+    create_audit_logger(config).log(event, **fields)
+
+
+def _rate_limited(action: str) -> str | None:
+    """Return a rate-limit error when the sliding window is exhausted."""
+    if rate_limiter is None:
+        return None
+    retry_after = rate_limiter.check()
+    if retry_after is None:
+        return None
+    _audit("rate_limited", action=action, retry_after=round(retry_after, 1))
+    return (
+        f"❌ Rate limit exceeded for {action}. No change was made.\n"
+        f"Try again in {retry_after:.0f}s (see rate_limit in config.yaml)."
+    )
+
+
 def apply_config(config_path: Path | None = None) -> Path:
     """(Re)load configuration and rebuild the dependent objects in place."""
-    global security, executor
+    global security, executor, rate_limiter
 
+    _metric_clients.clear()
     resolved = resolve_config_path(
         config_path, env_var=CONFIG_ENV_VAR, app_name=APP_NAME
     )
@@ -201,6 +242,7 @@ def apply_config(config_path: Path | None = None) -> Path:
     config.update(new_config)
     security = SecurityValidator(config)
     executor = create_executor(config, security)
+    rate_limiter = create_rate_limiter(config)
     return resolved
 
 
@@ -232,6 +274,27 @@ def _command_failed(output: str) -> bool:
         return int(match.group(1)) != 0
 
     return "command not found" in output.lower()
+
+
+def _disk_devices(blockdevices: object) -> list[dict]:
+    """Filter lsblk rows to whole disks with a valid device name.
+
+    ``lsblk`` also reports loop devices, optical drives, zram and partitions.
+    Passing those names to smartctl is both noisy and unsafe, so only rows with
+    ``type == "disk"`` whose name passes :meth:`SecurityValidator.validate_device_name`
+    are used for health checks.
+    """
+    if not isinstance(blockdevices, list):
+        return []
+    devices: list[dict] = []
+    for device in blockdevices:
+        if not isinstance(device, dict) or device.get("type") != "disk":
+            continue
+        name = device.get("name")
+        if not isinstance(name, str) or not security.validate_device_name(name):
+            continue
+        devices.append(device)
+    return devices
 
 
 def _influxdb_device_name(device: str) -> str:
@@ -346,7 +409,7 @@ async def _get_influxdb_latest_device(device: str) -> dict | None:
         return None
 
     influx_device = _influxdb_device_name(device)
-    client = _make_influxdb_client()
+    client = _get_influxdb_client()
     query = (
         f"SELECT * FROM smart_device WHERE device = '{influx_device}' "
         f"AND exit_status = 0 AND time > now() - INTERVAL '{SMART_LOOKBACK}' "
@@ -373,7 +436,7 @@ async def _get_influxdb_latest_attributes(device: str) -> list[dict] | None:
         return None
 
     influx_device = _influxdb_device_name(device)
-    client = _make_influxdb_client()
+    client = _get_influxdb_client()
     query = (
         f"SELECT name, raw_value, device FROM smart_attribute "
         f"WHERE device = '{influx_device}' AND exit_status = 0 "
@@ -588,7 +651,7 @@ async def get_disk_health(device: str) -> str | ToolOutput:
 
 
 @structured_tool(READ_ONLY)
-async def get_smart_attributes(device: str) -> str:
+async def get_smart_attributes(device: str) -> str | ToolOutput:
     """Get raw SMART attributes for a specific disk.
 
     Data source priority:
@@ -674,7 +737,15 @@ async def get_smart_attributes(device: str) -> str:
                 note = "(spare blocks)"
 
             lines.append(f"{name:<30} {raw_val:>15} {note:<35} {icon} {severity:<8}")
-        return _cap_composite("\n".join(lines))
+        return ToolOutput(
+            _cap_composite("\n".join(lines)),
+            data={
+                "device": device,
+                "source": "influxdb",
+                "attributes": influx_attrs,
+                "device_summary": influx_device or {},
+            },
+        )
 
     # Priority 2: Fall back to smartctl via SSH
     if not config.get("host", {}).get("enabled", False):
@@ -719,13 +790,21 @@ async def get_smart_attributes(device: str) -> str:
                 f"{attr.thresh:>7} {attr.raw_value:>15} "
                 f"{attr.attr_type:<10} {severity_icon} {attr.severity:<8}"
             )
-        return _cap_composite("\n".join(lines))
+        return ToolOutput(
+            _cap_composite("\n".join(lines)),
+            data={
+                "device": device,
+                "source": "smartctl",
+                "model": smart_device.model,
+                "attributes": [asdict(attr) for attr in smart_device.attributes],
+            },
+        )
     except (json.JSONDecodeError, KeyError, TypeError):
         return _enrich_error_output(_no_smart_data_message(device, result), device)
 
 
 @structured_tool(READ_ONLY)
-async def get_nvme_health(device: str) -> str:
+async def get_nvme_health(device: str) -> str | ToolOutput:
     """Get NVMe SMART health log for an NVMe device.
 
     Data source priority:
@@ -744,7 +823,10 @@ async def get_nvme_health(device: str) -> str:
     # Priority 1: Try InfluxDB first. The lookup normalizes nvme0n1 -> nvme0.
     influx_data = await _get_influxdb_latest_device(device)
     if influx_data:
-        return _cap_composite(_format_influxdb_device_health(influx_data, device))
+        return ToolOutput(
+            _cap_composite(_format_influxdb_device_health(influx_data, device)),
+            data={"device": device, "source": "influxdb", "sample": influx_data},
+        )
 
     # Priority 2: Fall back to nvme-cli
     if not config.get("host", {}).get("enabled", False):
@@ -761,11 +843,19 @@ async def get_nvme_health(device: str) -> str:
     result = await _run_command(cmd)
     if _command_failed(result):
         return _enrich_error_output(result, device)
-    return _cap_composite(result)
+    return ToolOutput(
+        _cap_composite(result),
+        data={
+            "device": device,
+            "source": "nvme-cli",
+            "fields": _parse_key_value_output(result),
+            "raw": result,
+        },
+    )
 
 
 @structured_tool(WRITE_ACTION)
-async def run_smart_test(device: str, test_type: str = "short") -> str:
+async def run_smart_test(device: str, test_type: str = "short") -> str | ToolOutput:
     """Run a SMART self-test on a disk.
 
     Self-tests are safe - they don't modify data on the drive.
@@ -795,16 +885,28 @@ async def run_smart_test(device: str, test_type: str = "short") -> str:
     if not security.validate_smart_test_type(test_type):
         return f"❌ Invalid test type: {test_type}. Use: short, long, conveyance"
 
+    limited = _rate_limited("run_smart_test")
+    if limited is not None:
+        return limited
+
     # Pre-flight only asks smartctl for its version, so it never opens the
     # device and never spins up a sleeping disk. A missing or non-executable
     # smartctl must be reported before the write operation is attempted.
     preflight = await _run_command(SMART_VERSION.render())
     if _command_failed(preflight):
-        return _enrich_error_output(
-            "❌ SMART self-tests unavailable: "
-            f"{SMARTCTL_PATH} is missing or not executable by the executor "
-            "user. No test was started.\n\n" + preflight,
-            device,
+        return ToolOutput(
+            _enrich_error_output(
+                "❌ SMART self-tests unavailable: "
+                f"{SMARTCTL_PATH} is missing or not executable by the executor "
+                "user. No test was started.\n\n" + preflight,
+                device,
+            ),
+            ok=False,
+            data={
+                "device": device,
+                "test_type": test_type.lower(),
+                "started": False,
+            },
         )
 
     cmd = SMART_TEST.render(device=device, test_type=test_type.lower())
@@ -814,19 +916,41 @@ async def run_smart_test(device: str, test_type: str = "short") -> str:
     result = await _run_command(cmd)
     exit_match = EXIT_CODE_PATTERN.search(result)
     if exit_match and int(exit_match.group(1)) == 2:
-        return (
+        return ToolOutput(
             f"⚠️ No self-test started: /dev/{device} is in standby mode.\n"
             "The test command uses smartctl's `-n standby`, so it will not spin "
             "the disk up. Wake the disk explicitly (for example by reading from "
-            "it) and call run_smart_test again."
+            "it) and call run_smart_test again.",
+            data={
+                "device": device,
+                "test_type": test_type.lower(),
+                "started": False,
+                "reason": "standby",
+            },
         )
     if _command_failed(result):
-        return _enrich_error_output(result, device)
-    return _cap_composite(result)
+        return ToolOutput(
+            _enrich_error_output(result, device),
+            ok=False,
+            data={
+                "device": device,
+                "test_type": test_type.lower(),
+                "started": False,
+            },
+        )
+    return ToolOutput(
+        _cap_composite(result),
+        data={
+            "device": device,
+            "test_type": test_type.lower(),
+            "started": True,
+            "output": result,
+        },
+    )
 
 
 @structured_tool(READ_ONLY)
-async def get_zfs_status() -> str:
+async def get_zfs_status() -> str | ToolOutput:
     """Get ZFS pool status, health, and capacity.
 
     Returns pool names, sizes, allocation, dedup ratio, and health status.
@@ -850,13 +974,22 @@ async def get_zfs_status() -> str:
             return "❌ Command not in safe whitelist"
 
     results = []
+    outputs: dict[str, str] = {}
     for title, cmd in parts:
-        results.append(f"=== {title} ===\n{await _run_command(cmd)}")
-    return _cap_composite("\n\n".join(results))
+        output = await _run_command(cmd)
+        outputs[title] = output
+        results.append(f"=== {title} ===\n{output}")
+    return ToolOutput(
+        _cap_composite("\n\n".join(results)),
+        data={
+            "pool_status": outputs.get("ZFS Pool Status", ""),
+            "pool_list": outputs.get("ZFS Pool List", ""),
+        },
+    )
 
 
 @structured_tool(READ_ONLY)
-async def get_raid_status() -> str:
+async def get_raid_status() -> str | ToolOutput:
     """Get mdadm software RAID status.
 
     Reports RAID level, array health, device state, and sync progress.
@@ -880,13 +1013,22 @@ async def get_raid_status() -> str:
             return "❌ Command not in safe whitelist"
 
     results = []
+    outputs: dict[str, str] = {}
     for title, cmd in parts:
-        results.append(f"=== {title} ===\n{await _run_command(cmd)}")
-    return _cap_composite("\n\n".join(results))
+        output = await _run_command(cmd)
+        outputs[title] = output
+        results.append(f"=== {title} ===\n{output}")
+    return ToolOutput(
+        _cap_composite("\n\n".join(results)),
+        data={
+            "mdstat": outputs.get("MDSTAT", ""),
+            "mdadm_detail": outputs.get("MDADM Detail", ""),
+        },
+    )
 
 
 @structured_tool(READ_ONLY)
-async def get_snapraid_status() -> str:
+async def get_snapraid_status() -> str | ToolOutput:
     """Get SnapRAID parity and sync status.
 
     SnapRAID is a snapshot/parity tool for collections of disks. Unlike ZFS or
@@ -905,11 +1047,15 @@ async def get_snapraid_status() -> str:
     cmd = SNAPRAID_STATUS.render()
     if not security.is_command_safe(cmd):
         return "❌ Command not in safe whitelist"
-    return _cap_composite(await _run_command(cmd))
+    output = await _run_command(cmd)
+    return ToolOutput(
+        _cap_composite(output),
+        data={"status": output, "fields": _parse_key_value_output(output)},
+    )
 
 
 @structured_tool(READ_ONLY)
-async def get_mount_status() -> str:
+async def get_mount_status() -> str | ToolOutput:
     """Get mounted filesystems and mergerFS pool state.
 
     mergerFS pools several disks behind one mount point and does not appear in
@@ -935,13 +1081,23 @@ async def get_mount_status() -> str:
             return "❌ Command not in safe whitelist"
 
     results = []
+    outputs: dict[str, str] = {}
     for title, cmd in parts:
-        results.append(f"=== {title} ===\n{await _run_command(cmd)}")
-    return _cap_composite("\n\n".join(results))
+        output = await _run_command(cmd)
+        outputs[title] = output
+        results.append(f"=== {title} ===\n{output}")
+    return ToolOutput(
+        _cap_composite("\n\n".join(results)),
+        data={
+            "mounts": outputs.get("Mounted Filesystems", ""),
+            "mergerfs": outputs.get("mergerFS Pools", ""),
+            "usage": outputs.get("Filesystem Usage", ""),
+        },
+    )
 
 
 @structured_tool(READ_ONLY)
-async def get_io_stats() -> str:
+async def get_io_stats() -> str | ToolOutput:
     """Get disk I/O statistics.
 
     Reports per-device I/O utilization, latency, throughput,
@@ -959,12 +1115,63 @@ async def get_io_stats() -> str:
     cmd = IOSTAT.render()
     if not security.is_command_safe(cmd):
         return "❌ Command not in safe whitelist"
-    return _cap_composite(await _run_command(cmd))
+    output = await _run_command(cmd)
+    return ToolOutput(_cap_composite(output), data={"iostat": output})
 
 
 # ============================================================================
 # HTTP-based tools (InfluxDB, Prometheus)
 # ============================================================================
+
+
+_metric_clients: dict[tuple[str, int], InfluxDBClient | PrometheusClient] = {}
+
+
+def _cached_client(name, cfg, factory):
+    """Return one long-lived client per config object and service."""
+    key = (name, id(cfg))
+    client = _metric_clients.get(key)
+    if client is None:
+        client = factory()
+        _metric_clients[key] = client
+    return client
+
+
+def _get_influxdb_client() -> InfluxDBClient:
+    cfg = config.get("influxdb", {})
+    return _cached_client("influxdb", cfg, _make_influxdb_client)  # type: ignore[return-value]
+
+
+def _get_prometheus_client() -> PrometheusClient:
+    cfg = config.get("prometheus", {})
+    return _cached_client("prometheus", cfg, _make_prometheus_client)  # type: ignore[return-value]
+
+
+QUERY_SUCCESS_PREFIX = "✅ Query successful"
+
+
+def _query_data(result: str) -> dict:
+    """Extract the JSON payload from a successful query response."""
+    if not result.startswith(QUERY_SUCCESS_PREFIX):
+        return {}
+    try:
+        payload = json.loads(result.split("\n\n", 1)[1])
+    except (json.JSONDecodeError, IndexError):
+        return {}
+    if isinstance(payload, list):
+        return {"rows": payload, "row_count": len(payload)}
+    return {"result": payload}
+
+
+async def close_metric_clients() -> None:
+    """Close every cached HTTP client session on shutdown."""
+    clients = list(_metric_clients.values())
+    _metric_clients.clear()
+    for client in clients:
+        try:
+            await client.close()
+        except Exception as e:  # pragma: no cover - best effort
+            logger.debug("Error while closing %s: %s", type(client).__name__, e)
 
 
 def _make_influxdb_client() -> InfluxDBClient:
@@ -997,7 +1204,7 @@ def _make_prometheus_client() -> PrometheusClient:
 
 
 @structured_tool(READ_ONLY)
-async def query_prometheus_disk(query: str) -> str:
+async def query_prometheus_disk(query: str) -> str | ToolOutput:
     """Query Prometheus for disk-related metrics.
 
     Prometheus is optional. The smartmon_* metric family exists only when
@@ -1026,14 +1233,23 @@ async def query_prometheus_disk(query: str) -> str:
 
     validated = security.validate_prometheus_query(query)
     if validated is None:
-        return "❌ Invalid PromQL query: contains forbidden characters"
+        _audit("query_blocked", kind="prometheus", query_length=len(query))
+        return (
+            "❌ Invalid query. Queries must:\n"
+            "- Not contain null bytes or control characters other than newline/tab\n"
+            "- Be at most 5000 characters\n"
+            "- Be a single PromQL expression"
+        )
 
-    client = _make_prometheus_client()
-    return await client.query(query)
+    client = _get_prometheus_client()
+    result = await client.query(validated)
+    return ToolOutput(result, data=_query_data(result))
 
 
 @structured_tool(READ_ONLY)
-async def query_influxdb_disk(query: str, database: str | None = None) -> str:
+async def query_influxdb_disk(
+    query: str, database: str | None = None
+) -> str | ToolOutput:
     """Query InfluxDB for historical disk metrics.
 
     Useful for trend analysis: has SMART data been degrading over time?
@@ -1054,15 +1270,27 @@ async def query_influxdb_disk(query: str, database: str | None = None) -> str:
 
     validated = security.validate_influxdb_query(query)
     if validated is None:
+        _audit("query_blocked", kind="influxdb", query_length=len(query))
         return (
             "❌ Invalid query. Queries must:\n"
             "- Start with SELECT (read-only only)\n"
-            "- Not contain SQL injection characters (;, --, /*, etc.)\n"
+            "- Not contain SQL comments (-- or /* */)\n"
             "- Not contain shell injection characters"
         )
 
-    client = _make_influxdb_client()
-    return await client.query(query, database)
+    db = database or influx_config.get("database")
+    if not db:
+        return (
+            "❌ No database specified. Provide 'database' parameter or set "
+            "'influxdb.database' in config.yaml."
+        )
+
+    client = _get_influxdb_client()
+    result = await client.query(validated, database=db)
+    return ToolOutput(
+        result,
+        data={"database": db, **_query_data(result)},
+    )
 
 
 # ============================================================================
@@ -1070,25 +1298,34 @@ async def query_influxdb_disk(query: str, database: str | None = None) -> str:
 # ============================================================================
 
 
-async def _influxdb_devices_with_recent_data() -> list[str]:
-    """Return devices with at least one valid sample in the lookback window."""
-    client = _make_influxdb_client()
+async def _influxdb_latest_device_rows() -> list[dict]:
+    """Return the latest valid smart_device row per device in one query.
+
+    The previous overview issued ``1 + N`` sequential queries (one per
+    device). A window function ranks the rows per device so the whole report
+    costs one round trip regardless of how many disks are installed.
+    """
+    client = _get_influxdb_client()
     query = (
-        "SELECT device FROM smart_device "
-        f"WHERE exit_status = 0 AND time > now() - INTERVAL '{SMART_LOOKBACK}' "
-        "GROUP BY device ORDER BY device"
+        "SELECT * FROM ("
+        "SELECT *, ROW_NUMBER() OVER (PARTITION BY device ORDER BY time DESC) "
+        "AS sample_rank FROM smart_device "
+        f"WHERE exit_status = 0 AND time > now() - INTERVAL '{SMART_LOOKBACK}'"
+        ") AS latest WHERE sample_rank = 1 ORDER BY device"
     )
     try:
         result = await client.query(query)
     except (json.JSONDecodeError, IndexError, KeyError):
         return []
 
-    devices: list[str] = []
+    rows: list[dict] = []
+    seen: set[str] = set()
     for row in _parse_influx_rows(result):
         device = row.get("device")
-        if isinstance(device, str) and device and device not in devices:
-            devices.append(device)
-    return devices
+        if isinstance(device, str) and device and device not in seen:
+            seen.add(device)
+            rows.append(row)
+    return rows
 
 
 @structured_tool(READ_ONLY)
@@ -1120,8 +1357,8 @@ async def get_full_disk_report(device: str | None = None) -> str | ToolOutput:
     overview_devices: list[str] = []
 
     if await _is_influxdb_available():
-        devices = await _influxdb_devices_with_recent_data()
-        if not devices:
+        rows = await _influxdb_latest_device_rows()
+        if not rows:
             note = (
                 "⚠️  No valid SMART sample in InfluxDB "
                 f"(last {SMART_LOOKBACK}; standby rows are ignored), "
@@ -1129,16 +1366,14 @@ async def get_full_disk_report(device: str | None = None) -> str | ToolOutput:
             )
             return _cap_composite(f"{note}\n\n{await _get_full_report_via_ssh()}")
 
-        overview_devices = devices
+        overview_devices = [row["device"] for row in rows]
         lines.append("Source: InfluxDB (Telegraf smart plugin)\n")
         lines.append(
-            f"Found {len(devices)} devices with a valid sample in the last "
+            f"Found {len(rows)} devices with a valid sample in the last "
             f"{SMART_LOOKBACK}:\n"
         )
-        for dev_name in devices:
-            row = await _get_influxdb_latest_device(dev_name)
-            if not row:
-                continue
+        for row in rows:
+            dev_name = row["device"]
 
             model = row.get("model", "unknown")
             health_ok = row.get("health_ok")
@@ -1204,8 +1439,8 @@ async def _get_full_report_via_ssh() -> str:
 
     try:
         data = json.loads(disk_list)
-        blockdevs = data.get("blockdevices", [])
-        lines.append(f"Found {len(blockdevs)} block devices:\n")
+        blockdevs = _disk_devices(data.get("blockdevices", []))
+        lines.append(f"Found {len(blockdevs)} whole disks:\n")
         for dev in blockdevs:
             name = dev.get("name", "")
             model = dev.get("model", "")
@@ -1218,7 +1453,7 @@ async def _get_full_report_via_ssh() -> str:
 
     try:
         data = json.loads(disk_list)
-        blockdevs = data.get("blockdevices", [])
+        blockdevs = _disk_devices(data.get("blockdevices", []))
         for dev in blockdevs:
             name = dev.get("name", "")
             lines.append(f"\n--- /dev/{name} ---")
@@ -1384,6 +1619,7 @@ async def main(
         logger.error("Invalid Streamable HTTP configuration: %s", e)
         raise SystemExit(2) from e
     finally:
+        await close_metric_clients()
         await close_metric_tunnels(tunnels)
 
 

@@ -90,3 +90,253 @@ class TestResources:
     def test_unknown_tool_template_fails(self):
         with pytest.raises(Exception, match="Error creating resource from template"):
             asyncio.run(server.mcp.read_resource("server-mcp://tools/nope"))
+
+
+def _commands(executor) -> list[str]:
+    return [call.args[0] for call in executor.execute_safe_command.await_args_list]
+
+
+class TestOperationalHardening:
+    """P1-12/P1-14/P1-15/P1-16 regressions."""
+
+    def test_run_smart_test_is_rate_limited(self, patched_server, monkeypatch):
+        from server_management_lib import RateLimiter
+
+        monkeypatch.setattr(server, "rate_limiter", RateLimiter(1, 60))
+        executor = patched_server["executor"]
+
+        async def fake_command(command: str) -> str:
+            if command.endswith("--version"):
+                return "smartctl 7.4"
+            return "SMART self-test started"
+
+        executor.execute_safe_command.side_effect = fake_command
+
+        first = asyncio.run(server.run_smart_test("sda"))
+        second = asyncio.run(server.run_smart_test("sda"))
+
+        assert "started" in first
+        assert "Rate limit exceeded" in second
+        commands = _commands(executor)
+        assert len([c for c in commands if c.endswith("--version")]) == 1
+        assert len([c for c in commands if " -t " in c]) == 1
+
+    def test_influx_query_uses_the_validated_text(self, patched_server, monkeypatch):
+        from unittest.mock import AsyncMock
+
+        client = AsyncMock()
+        client.query = AsyncMock(return_value="✅ Query successful\n\n[]")
+        monkeypatch.setattr(server, "_make_influxdb_client", lambda: client)
+        monkeypatch.setattr(
+            server.security,
+            "validate_influxdb_query",
+            lambda query: "SELECT validated",
+        )
+
+        asyncio.run(server.query_influxdb_disk("SELECT original"))
+
+        assert client.query.await_args.args[0] == "SELECT validated"
+
+    def test_prometheus_query_uses_the_validated_text(
+        self, patched_server, monkeypatch
+    ):
+        from unittest.mock import AsyncMock
+
+        patched_server["config"]["prometheus"]["enabled"] = True
+        client = AsyncMock()
+        client.query = AsyncMock(return_value="✅ Query successful\n\n[]")
+        monkeypatch.setattr(server, "_make_prometheus_client", lambda: client)
+        monkeypatch.setattr(
+            server.security,
+            "validate_prometheus_query",
+            lambda query: "up == 1",
+        )
+
+        asyncio.run(server.query_prometheus_disk("up"))
+
+        assert client.query.await_args.args[0] == "up == 1"
+
+    def test_blocked_query_is_audited(self, patched_server, monkeypatch, tmp_path):
+        log_path = tmp_path / "audit.jsonl"
+        patched_server["config"]["audit"] = {
+            "enabled": True,
+            "path": str(log_path),
+        }
+        monkeypatch.setattr(
+            server.security,
+            "validate_influxdb_query",
+            lambda query: None,
+        )
+
+        result = asyncio.run(server.query_influxdb_disk("SELECT * FROM cpu -- note"))
+
+        assert "Invalid query" in result
+        record = json.loads(log_path.read_text().splitlines()[-1])
+        assert record["event"] == "query_blocked"
+        assert record["kind"] == "influxdb"
+
+    def test_disk_devices_filter_lsblk_rows(self):
+        devices = server._disk_devices(
+            [
+                {"name": "loop0", "type": "loop"},
+                {"name": "sr0", "type": "rom"},
+                {"name": "sdaa", "type": "disk"},
+                {"name": "zram0", "type": "disk"},
+                {"name": "sdb", "type": "part"},
+                {"name": "../etc", "type": "disk"},
+            ]
+        )
+
+        assert [device["name"] for device in devices] == ["sdaa"]
+
+    def test_full_report_never_calls_smartctl_for_non_disks(
+        self, patched_server, monkeypatch
+    ):
+        from unittest.mock import AsyncMock
+
+        from server_management_lib.security import SecurityValidator
+
+        monkeypatch.setattr(server, "security", SecurityValidator({}))
+        patched_server["config"]["influxdb"]["enabled"] = False
+        executor = AsyncMock()
+        lsblk = json.dumps(
+            {
+                "blockdevices": [
+                    {"name": "loop0", "type": "loop"},
+                    {"name": "sr0", "type": "rom"},
+                    {"name": "sdaa", "type": "disk", "model": "wide", "size": "16T"},
+                    {"name": "zram0", "type": "disk"},
+                ]
+            }
+        )
+        executor.execute_safe_command.side_effect = [lsblk, "{}"]
+        monkeypatch.setattr(server, "executor", executor)
+
+        result = asyncio.run(server.get_full_disk_report())
+
+        assert "/dev/sdaa" in result
+        assert "loop0" not in result
+        assert "zram0" not in result
+        smart_commands = [
+            c
+            for c in _commands(executor)
+            if "/usr/sbin/smartctl" in c and " --version" not in c
+        ]
+        assert smart_commands == ["/usr/sbin/smartctl -j -a /dev/sdaa"]
+
+
+class TestEveryToolHasStructuredData:
+    """P2-13: every disk-health tool publishes machine-readable data."""
+
+    @pytest.mark.parametrize(
+        ("tool_name", "arguments", "expected_keys"),
+        [
+            ("get_smart_attributes", {"device": "sda"}, {"attributes", "source"}),
+            ("get_nvme_health", {"device": "nvme0n1"}, {"raw", "source"}),
+            (
+                "run_smart_test",
+                {"device": "sda", "test_type": "short"},
+                {"device", "test_type", "started"},
+            ),
+            ("get_zfs_status", {}, {"pool_status", "pool_list"}),
+            ("get_raid_status", {}, {"mdstat", "mdadm_detail"}),
+            ("get_snapraid_status", {}, {"status", "fields"}),
+            ("get_mount_status", {}, {"mounts", "mergerfs", "usage"}),
+            ("get_io_stats", {}, {"iostat"}),
+        ],
+    )
+    def test_host_tools_publish_data(
+        self, patched_server, monkeypatch, tool_name, arguments, expected_keys
+    ):
+        patched_server["config"]["influxdb"]["enabled"] = False
+        monkeypatch.setattr(server, "_metric_clients", {})
+        tool = server.mcp._tool_manager.get_tool(tool_name)
+
+        response = asyncio.run(tool.fn(**arguments))
+
+        assert isinstance(response, ToolResponse)
+        assert response.data
+        assert expected_keys <= set(response.data)
+
+    def test_query_prometheus_disk_publishes_result(self, patched_server, monkeypatch):
+        from unittest.mock import AsyncMock
+
+        patched_server["config"]["prometheus"]["enabled"] = True
+        client = AsyncMock()
+        client.query = AsyncMock(
+            return_value='✅ Query successful\n\n{"resultType": "vector"}'
+        )
+        monkeypatch.setattr(server, "_metric_clients", {})
+        monkeypatch.setattr(server, "_make_prometheus_client", lambda: client)
+        tool = server.mcp._tool_manager.get_tool("query_prometheus_disk")
+
+        response = asyncio.run(tool.fn(query="up"))
+
+        assert response.ok is True
+        assert response.data["result"] == {"resultType": "vector"}
+
+    def test_query_influxdb_disk_publishes_rows(self, patched_server, monkeypatch):
+        from unittest.mock import AsyncMock
+
+        client = AsyncMock()
+        client.query = AsyncMock(
+            return_value='✅ Query successful\n\n[{"device": "sda"}]'
+        )
+        monkeypatch.setattr(server, "_metric_clients", {})
+        monkeypatch.setattr(server, "_make_influxdb_client", lambda: client)
+        tool = server.mcp._tool_manager.get_tool("query_influxdb_disk")
+
+        response = asyncio.run(tool.fn(query="SELECT * FROM smart_device"))
+
+        assert response.ok is True
+        assert response.data["row_count"] == 1
+        assert response.data["rows"] == [{"device": "sda"}]
+
+    def test_full_report_uses_one_influx_query(self, patched_server, monkeypatch):
+        from unittest.mock import AsyncMock
+
+        client = AsyncMock()
+        client.query = AsyncMock(
+            return_value=(
+                "✅ Query successful\n\n"
+                '[{"device": "sda", "health_ok": true, "model": "disk"}]'
+            )
+        )
+        monkeypatch.setattr(server, "_metric_clients", {})
+        monkeypatch.setattr(server, "_make_influxdb_client", lambda: client)
+        tool = server.mcp._tool_manager.get_tool("get_full_disk_report")
+
+        response = asyncio.run(tool.fn())
+
+        assert response.ok is True
+        assert client.query.await_count == 1
+        assert response.data["devices"] == ["sda"]
+
+
+class TestProxyErrorPages:
+    """A proxy/gateway HTML page is surfaced as a failed disk-health tool."""
+
+    def test_query_influxdb_disk_html_page_is_not_ok(self, patched_server, monkeypatch):
+        from unittest.mock import AsyncMock
+
+        client = AsyncMock()
+        client.query = AsyncMock(
+            return_value=(
+                "❌ Received an HTML page from "
+                "https://influxdb.catafal.co:443/api/v3/query_sql (HTTP 502), "
+                "not a InfluxDB response.\n"
+                "This is usually a reverse proxy / gateway error, not a query "
+                "error."
+            )
+        )
+        monkeypatch.setattr(server, "_metric_clients", {})
+        monkeypatch.setattr(server, "_make_influxdb_client", lambda: client)
+        tool = server.mcp._tool_manager.get_tool("query_influxdb_disk")
+
+        response = asyncio.run(tool.fn(query="SELECT * FROM smart_device"))
+
+        assert response.ok is False
+        assert "Received an HTML page" in response.text
+        assert "reverse proxy" in response.text
+        # The resolved default database is published, not null.
+        assert response.data["database"] == "telegraf"

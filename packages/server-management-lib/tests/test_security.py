@@ -668,13 +668,14 @@ class TestInfluxDBQueryValidation:
         for query in queries:
             assert self.security.validate_influxdb_query(query) is not None
 
-    def test_comments_are_accepted(self):
+    def test_comments_are_rejected(self):
+        """SQL comments are rejected so a trailing comment cannot hide a LIMIT."""
         queries = [
             "SELECT * FROM cpu -- operator note",
             "SELECT * FROM cpu /* operator note */",
         ]
         for query in queries:
-            assert self.security.validate_influxdb_query(query) is not None
+            assert self.security.validate_influxdb_query(query) is None
 
     def test_multiple_statements_blocked(self):
         injections = [
@@ -968,3 +969,63 @@ class TestComposeCommandPolicy:
             security.is_command_safe("docker compose --project-directory /srv/app ps")
             is False
         )
+
+
+class TestCommandArgumentShape:
+    """The complete argv shape is validated, not only a 1-2 token prefix."""
+
+    def setup_method(self):
+        self.security = SecurityValidator({"security": {"services_path": "/srv"}})
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "docker inspect --format '{{json .Config.Env}}' app",
+            "docker inspect --format '{{.Config}}' -- app",
+            "ls -1 /etc/ssl/private",
+            "test -d /etc",
+            "/usr/sbin/smartctl -s off /dev/sda",
+            "/usr/sbin/smartctl -a /dev/sda /dev/sdb",
+            "systemctl status --no-pager --full sshd",
+            "systemctl status --no-pager --full --lines=100 telegraf",
+            "journalctl -u telegraf -n 100 --no-pager",
+            "journalctl -u sshd -n 100 --no-pager --output short-iso",
+            "docker logs --tail 0 -- app",
+            "docker logs --tail 10 --until forever -- app",
+            "docker restart -- app other",
+            "cat /proc/mdstat /etc/hostname",
+        ],
+    )
+    def test_non_catalog_argument_shapes_are_rejected(self, command):
+        assert self.security.is_command_safe(command) is False, command
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "docker inspect --format '{{json .State.Health}}' -- app",
+            "docker inspect --format '{{.Name}}' app",
+            "docker stats --no-stream -- app",
+            "docker logs --tail 10 --timestamps --since 30m -- app",
+            "docker logs --tail 10 --since 30m -- app",
+            "docker restart -- app",
+            "ls -1 /srv/",
+            "ls -1 -p /srv/app/",
+            "test -d /srv/app",
+            "systemctl status --no-pager --full telegraf",
+            "journalctl -u telegraf -n 200 --no-pager --output short-iso",
+            "/usr/sbin/smartctl -a /dev/sdaa",
+        ],
+    )
+    def test_catalog_argument_shapes_are_accepted(self, command):
+        assert self.security.is_command_safe(command) is True, command
+
+    def test_control_characters_in_a_token_are_rejected(self):
+        assert self.security.is_command_safe("docker ps --format 'a\tb'") is False
+        assert self.security.is_command_safe("docker ps --format 'a\nb'") is False
+        assert self.security.is_command_safe("docker ps --format 'a\x7fb'") is False
+
+    def test_wide_sata_device_names_are_valid(self):
+        for device in ("sda", "sdz", "sdaa", "sdzz"):
+            assert self.security.validate_device_name(device) is True
+        for device in ("sdaaa", "loop0", "sr0", "zram0"):
+            assert self.security.validate_device_name(device) is False

@@ -123,10 +123,11 @@ DEFAULT_CONFIG: dict[str, Any] = {
     },
 }
 
-# Environment variable -> (section, key, converter)
-ENV_OVERRIDES: dict[str, tuple[str, str, type]] = {
-    "EXECUTOR": ("executor", "executor", str),
-    "CONTAINER_RUNTIME": ("container_runtime", "container_runtime", str),
+# Environment variable -> (section, key, converter). ``section`` is ``None``
+# for top-level scalar settings such as ``executor`` and ``container_runtime``.
+ENV_OVERRIDES: dict[str, tuple[str | None, str, type]] = {
+    "EXECUTOR": (None, "executor", str),
+    "CONTAINER_RUNTIME": (None, "container_runtime", str),
     "SSH_HOST": ("ssh", "host", str),
     "SSH_PORT": ("ssh", "port", int),
     "SSH_USERNAME": ("ssh", "username", str),
@@ -228,11 +229,15 @@ def _apply_env_overrides(
         if value is None or value == "":
             continue
         try:
+            converted = _convert(value, converter)
+            if section is None:
+                config[key] = converted
+                continue
             section_config = config.get(section)
             if not isinstance(section_config, dict):
                 section_config = {}
                 config[section] = section_config
-            section_config[key] = _convert(value, converter)
+            section_config[key] = converted
         except (TypeError, ValueError):
             logger.warning("Ignoring invalid value for %s", env_name)
 
@@ -280,6 +285,12 @@ def load_config(
     resolved = resolve_config_path(config_path, env_var=env_var, app_name=app_name)
 
     searched = _describe_search_paths(config_path, env_var, app_name)
+    environment = os.environ if env is None else env
+
+    def defaults_with_overrides() -> dict:
+        config = _deep_merge(DEFAULT_CONFIG, {})
+        _apply_env_overrides(config, environment)
+        return config
 
     if resolved is None or not resolved.exists():
         if required:
@@ -293,7 +304,7 @@ def load_config(
                 "No configuration file found (searched: %s); using defaults",
                 searched,
             )
-        return _deep_merge(DEFAULT_CONFIG, {})
+        return defaults_with_overrides()
 
     if use_dotenv and env is None:
         _load_dotenv(resolved)
@@ -306,7 +317,7 @@ def load_config(
             raise ConfigError(f"Error loading config from {resolved}: {e}") from e
         logger.error("Error loading config from %s: %s", resolved, e)
         logger.warning("Using default configuration")
-        return _deep_merge(DEFAULT_CONFIG, {})
+        return defaults_with_overrides()
 
     if loaded is None:
         loaded = {}
@@ -315,10 +326,10 @@ def load_config(
         if required:
             raise ConfigError(message)
         logger.error(message)
-        return _deep_merge(DEFAULT_CONFIG, {})
+        return defaults_with_overrides()
 
     config = _deep_merge(DEFAULT_CONFIG, loaded)
-    _apply_env_overrides(config, os.environ if env is None else env)
+    _apply_env_overrides(config, environment)
     logger.info("Loaded configuration from %s", resolved)
     return config
 
@@ -352,7 +363,7 @@ def config_schema() -> dict[str, Any]:
     return {
         "defaults": redact_config_values(DEFAULT_CONFIG),
         "environment_overrides": {
-            name: {"section": section, "key": key}
+            name: {"section": key if section is None else section, "key": key}
             for name, (section, key, _converter) in sorted(ENV_OVERRIDES.items())
         },
     }

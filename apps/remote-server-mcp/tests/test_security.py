@@ -484,13 +484,13 @@ class TestInfluxDBQueryValidation:
         )
         assert result is None
 
-    def test_comments_are_allowed(self):
-        """SQL comments are harmless for a single read-only statement."""
+    def test_comments_are_rejected(self):
+        """SQL comments are rejected so they cannot hide a LIMIT clause."""
         for query in (
             "SELECT * FROM cpu -- comment",
             "SELECT * FROM cpu /* comment */",
         ):
-            assert self.security.validate_influxdb_query(query) is not None
+            assert self.security.validate_influxdb_query(query) is None
 
     def test_shell_characters_are_not_interpreted(self):
         """The query is sent over HTTP; shell metacharacters are not executed."""

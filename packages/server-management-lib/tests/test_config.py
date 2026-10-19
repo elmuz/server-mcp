@@ -195,6 +195,38 @@ class TestConfigMerging:
         assert result["influxdb"]["use_https"] is True
         assert result["prometheus"]["token"] == "secret"
 
+    def test_top_level_env_overrides_remain_scalars(self):
+        result = load_config(
+            Path("/nonexistent/path/config.yaml"),
+            use_dotenv=False,
+            env={"EXECUTOR": "local", "CONTAINER_RUNTIME": "podman"},
+            log_missing=False,
+        )
+
+        # Missing config files must still honour environment overrides, and the
+        # values must stay top-level strings instead of becoming nested dicts.
+        assert result["executor"] == "local"
+        assert result["container_runtime"] == "podman"
+
+    def test_top_level_env_overrides_reach_executor_and_security(self, tmp_path):
+        from server_management_lib import (
+            LocalExecutor,
+            SecurityValidator,
+            create_executor,
+        )
+
+        config = load_config(
+            tmp_path / "missing.yaml",
+            use_dotenv=False,
+            env={"EXECUTOR": "local", "CONTAINER_RUNTIME": "podman"},
+            log_missing=False,
+        )
+        config["security"]["services_path"] = str(tmp_path)
+
+        security = SecurityValidator(config)
+        assert security.container_runtime == "podman"
+        assert isinstance(create_executor(config, security), LocalExecutor)
+
     def test_invalid_env_value_is_ignored(self, tmp_path):
         config_file = tmp_path / "config.yaml"
         config_file.write_text("ssh:\n  port: 22\n")

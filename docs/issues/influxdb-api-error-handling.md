@@ -1,6 +1,7 @@
 # Issue: InfluxDB tool errors are masked by reverse-proxy HTML
 
-**Status:** Open — deferred to the MCP maintainer
+**Status:** Partially resolved. A–C and E are implemented. D (query over
+SSH/loopback instead of public ingress) remains open as a design item.
 **Reported:** 2026-10-20
 **Affects:** `disk-health-mcp` (`query_influxdb_disk`, and every InfluxDB-first
 disk tool), `remote-server-mcp` (`query_influxdb`, `query_prometheus`),
@@ -104,6 +105,18 @@ of failure will recur.
 
 ## Proposed changes
 
+> Implemented: both HTTP clients now detect HTML/proxy pages before labelling a
+> failure as an InfluxDB/Prometheus error, cap the page to a short excerpt, and
+> catch JSON decode failures on `200` responses. The file-scan hint follows the
+> real `WHERE ... time` predicate. `disk-health` now publishes the resolved
+> database in structured output. See `tests/test_http_clients.py`,
+> `apps/disk-health-mcp/tests/test_modernization.py` and
+> `apps/remote-server-mcp/tests/test_database_tools.py`.
+>
+> Still open: **D**, the optional `influxdb.transport: ssh` / loopback data
+> path. It was intentionally not implemented together with A–C because it
+> needs a decision on the executor API.
+
 ### A. Detect non-JSON error bodies (required)
 
 In `InfluxDBClient.query()`:
@@ -179,9 +192,9 @@ argument, while `remote-server` reports the resolved default
 
 ```python
 # apps/disk-health-mcp/.../server.py
-data={"database": database, **_query_data(result)}
+data = {"database": database, **_query_data(result)}
 # apps/remote-server-mcp/.../server.py
-data={"database": db, **_query_data(result)}
+data = {"database": db, **_query_data(result)}
 ```
 
 Resolve `database or influx_config.get("database")` before constructing the

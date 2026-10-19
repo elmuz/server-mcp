@@ -321,3 +321,106 @@ class TestTransportSelection:
             )
 
         assert excinfo.value.code == 2
+
+
+class TestOperationalHardening:
+    """P1-15/P1-16/P1-17 regressions."""
+
+    def _audit_records(self, path: Path) -> list[dict]:
+        if not path.exists():
+            return []
+        return [json.loads(line) for line in path.read_text().splitlines()]
+
+    def test_start_service_is_rate_limited(self, patched, monkeypatch):
+        monkeypatch.setattr(server, "rate_limiter", RateLimiter(1, 60))
+
+        first = asyncio.run(server.start_service("app"))
+        second = asyncio.run(server.start_service("app"))
+
+        assert "started" in first
+        assert "Rate limit exceeded" in second
+        assert len([c for c in _commands(patched) if c.startswith("docker start")]) == 1
+
+    def test_sensitive_file_refusal_is_audited(self, patched, tmp_path):
+        log_path = tmp_path / "audit.jsonl"
+        server.config["audit"] = {"enabled": True, "path": str(log_path)}
+
+        result = asyncio.run(server.get_service_file("app", ".ssh/id_rsa"))
+
+        assert "Blocked by the sensitive-file policy" in result
+        records = self._audit_records(log_path)
+        assert records[-1]["event"] == "file_blocked_sensitive"
+        assert records[-1]["path"] == ".ssh/id_rsa"
+
+    def test_host_unit_refusal_is_audited(self, patched, tmp_path):
+        log_path = tmp_path / "audit.jsonl"
+        server.config["audit"] = {"enabled": True, "path": str(log_path)}
+
+        result = asyncio.run(server.get_host_service_status("sshd"))
+
+        assert "Host unit not allowed" in result
+        records = self._audit_records(log_path)
+        assert records[-1]["event"] == "host_unit_blocked"
+        assert records[-1]["unit"] == "sshd"
+
+    def test_blocked_query_is_audited(self, patched, tmp_path):
+        log_path = tmp_path / "audit.jsonl"
+        server.config["audit"] = {"enabled": True, "path": str(log_path)}
+        server.config["influxdb"] = {"enabled": True, "database": "testdb"}
+
+        result = asyncio.run(
+            server.query_influxdb("SELECT * FROM cpu -- operator note")
+        )
+
+        assert "Invalid query" in result
+        records = self._audit_records(log_path)
+        assert records[-1]["event"] == "query_blocked"
+        assert records[-1]["kind"] == "influxdb"
+
+    def test_rate_limit_refusal_is_audited(self, patched, monkeypatch, tmp_path):
+        log_path = tmp_path / "audit.jsonl"
+        server.config["audit"] = {"enabled": True, "path": str(log_path)}
+        monkeypatch.setattr(server, "rate_limiter", RateLimiter(1, 60))
+
+        asyncio.run(server.start_service("app"))
+        asyncio.run(server.start_service("app"))
+
+        records = self._audit_records(log_path)
+        assert records[-1]["event"] == "rate_limited"
+        assert records[-1]["action"] == "start_service"
+
+    def test_service_file_secrets_are_redacted(self, patched):
+        patched.read_remote_file.return_value = (
+            "services:\n"
+            "  db:\n"
+            "    environment:\n"
+            "      POSTGRES_PASSWORD: hunter2\n"
+            "      NORMAL: visible\n"
+        )
+
+        result = asyncio.run(server.get_service_file("app", "compose.yml"))
+
+        assert "POSTGRES_PASSWORD: ***" in result
+        assert "NORMAL: visible" in result
+        assert "hunter2" not in result
+        assert "Sensitive values are masked" in result
+
+    def test_host_status_output_is_redacted(self, patched):
+        patched.execute_safe_command.return_value = (
+            "Command: /usr/bin/app --token tok_123\n"
+        )
+
+        result = asyncio.run(server.get_host_service_status("telegraf"))
+
+        assert "--token ***" in result
+        assert "tok_123" not in result
+
+    def test_host_logs_are_redacted(self, patched):
+        patched.execute_safe_command.return_value = (
+            "app[1]: Authorization: Bearer abc.def.ghi\n"
+        )
+
+        result = asyncio.run(server.get_host_service_logs("telegraf", lines=10))
+
+        assert "Bearer ***" in result
+        assert "abc.def.ghi" not in result

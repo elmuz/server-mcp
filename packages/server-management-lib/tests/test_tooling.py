@@ -343,3 +343,33 @@ class TestRunStreamableHttp:
 
         assert isinstance(served[0], BearerTokenMiddleware)
         assert served[0].app is seen["app"]
+
+
+class TestBearerCaseInsensitive:
+    def test_lowercase_bearer_scheme_is_accepted(self):
+        calls = []
+
+        async def app(scope, receive, send):
+            calls.append(scope["path"])
+            await send({"type": "http.response.start", "status": 200})
+            await send({"type": "http.response.body", "body": b"ok"})
+
+        sent = []
+
+        async def send(message):
+            sent.append(message)
+
+        middleware = BearerTokenMiddleware(app, token="secret")
+        scope = {
+            "type": "http",
+            "path": "/mcp",
+            "headers": [(b"authorization", b"bearer secret")],
+        }
+
+        async def receive():
+            return {}
+
+        asyncio.run(middleware(scope, receive, send))
+
+        assert calls == ["/mcp"]
+        assert sent[0]["status"] == 200

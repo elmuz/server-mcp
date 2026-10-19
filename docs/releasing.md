@@ -84,6 +84,7 @@ Publish the library first; the apps depend on `server-management-lib>=0.2,<0.3`.
 
 ```bash
 # Build all workspace packages
+rm -rf dist    # never reuse artifacts from an earlier build of this same version
 uv build --all-packages
 
 # Publish in dependency order (glob the exact files so only one package is sent)
@@ -110,16 +111,28 @@ uv run --project /path/to/server-mcp --package remote-server-mcp remote-server-m
 
 ## Versioning
 
-- The three packages share the suite version (`0.2.0`).
-- Tag releases as `v0.2.0`, `v0.2.1`, ...
-- Keep [CHANGELOG.md](../CHANGELOG.md) up to date.
-- Breaking config or tool changes require a minor bump while the suite is pre-1.0.
+- The three packages share the suite version (`0.2.0`). The workspace root
+  `pyproject.toml` carries the same version for `uv` output and should not drift.
+- **`0.2.0` is the first published release.** It was never tagged when the monorepo
+  consolidation landed (`50de082`, commit message `… (v0.2.0)`), so the P0/P1/P2
+  remediation that followed was folded into `0.2.0` instead of bumping to `0.3.0`.
+  Bumping would have implied that a `0.2.0` artifact already exists, which it does not, and
+  the folding lets the defects fixed after `50de082` (fabricated disk health, missing
+  container health, permissive command policy) stay out of the first PyPI upload.
+- Because the fixes were folded in, the version string did **not** change with them. Clean
+  `dist/` before building; a stale pre-fix wheel would otherwise be published as `0.2.0`.
+- Tag releases as `v0.2.0`, `v0.2.1`, ... The next change after this release gets a new
+  version: `v0.2.1` for fixes, `v0.3.0` for features or breaking config/tool changes while
+  the suite is pre-1.0.
+- Keep [CHANGELOG.md](../CHANGELOG.md) up to date. `## [0.2.0]` is dated with the release
+  date and stays a released section; new work goes under `## [Unreleased]`.
 
 ## Checklist
 
 - [ ] Tests and hooks pass
 - [ ] `CHANGELOG.md` updated
-- [ ] Version bumped in all three `pyproject.toml` files and `__version__`
+- [ ] Version consistent in the four `pyproject.toml` files (three packages plus the
+      workspace root), the three `__version__` values and the newest `CHANGELOG.md` section
 - [ ] `uv lock` regenerated
 - [ ] Tag created and pushed
 - [ ] Library published before the apps

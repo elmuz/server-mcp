@@ -128,7 +128,7 @@ elsewhere. Disk diagnostics work the same way with `disk-health-mcp` and
 | `get_service_logs`, `search_service_logs` | read-only |
 | `get_service_status`, `get_container_health` | read-only |
 | `get_host_service_status`, `get_host_service_logs` | read-only, systemd units from an allowlist |
-| `get_service_file`, `list_service_files` | read-only, confined to the service directory; `.env` values are masked and key/credential files are refused |
+| `get_service_file`, `list_service_files` | read-only, confined to the service directory; `.env` values and secrets in compose/config files are masked, and key/credential files are refused |
 | `get_server_health` | read-only |
 | `query_influxdb`, `query_prometheus`, `get_prometheus_targets` | read-only |
 | `compose_ps` | read-only, scoped to `services_path/<service>` |
@@ -145,7 +145,8 @@ tools always include Docker timestamps, accept optional `since`/`until` windows 
 
 State-changing tools require an explicit `confirm=true` argument: without it they return
 the rendered command as a dry-run preview and execute nothing. A sliding-window rate limit
-(`rate_limit`, default 10 actions per minute) bounds repeated destructive calls per server
+(`rate_limit`, default 10 actions per minute) bounds repeated state-changing calls (including
+`start_service` and `disk-health-mcp`'s `run_smart_test`) per server
 process.
 
 Host infrastructure services are not Docker containers. `get_host_service_status` and
@@ -217,7 +218,8 @@ influxdb:
 Telegraf's smart plugin writing to InfluxDB is the primary disk-health source. Prometheus
 is optional: the `smartmon_*` examples require `node_exporter`, and disk health does not
 depend on it. A loopback-only metric service can be reached through an HTTPS reverse proxy
-(`use_https: true`) or through an `ssh_tunnel` block that the MCP opens itself; see
+(`use_https: true`) or through an `ssh_tunnel` block that the MCP opens itself and
+re-opens if the SSH connection drops; see
 [the endpoint guide](docs/configuration.md#database-endpoints).
 
 Config resolution order: `--config`, then `$REMOTE_SERVER_MCP_CONFIG` /

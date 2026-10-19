@@ -40,6 +40,15 @@ SHELL_OPERATORS = {
 }
 
 
+def _read_regular_file(path: Path, limit: int) -> tuple[bytes, int]:
+    """Read a regular file without following special files (FIFOs, devices)."""
+    info = path.stat()
+    if not stat.S_ISREG(info.st_mode):
+        raise RemoteFileError(f"Not a regular file: {path}")
+    with path.open("rb") as handle:
+        return handle.read(limit + 1), info.st_size
+
+
 class LocalExecutor(ExecutorBase):
     """Execute validated commands and file operations on the local host."""
 
@@ -132,8 +141,9 @@ class LocalExecutor(ExecutorBase):
             raise RemotePathError(f"Path escapes the allowed directory: {real_path}")
 
         try:
-            with real_path.open("rb") as handle:
-                data = handle.read(limit + 1)
+            # File I/O must not block the event loop; a FIFO would otherwise
+            # hang the whole MCP server.
+            data, size = await asyncio.to_thread(_read_regular_file, real_path, limit)
         except OSError as e:
             raise RemoteFileError(f"Cannot read {real_path}: {e}") from e
 
@@ -142,7 +152,7 @@ class LocalExecutor(ExecutorBase):
         self.audit.log(
             "file_read",
             path=str(real_path),
-            size=real_path.stat().st_size,
+            size=size,
             executor="local",
             truncated=len(data) > limit or sanitized != text,
         )

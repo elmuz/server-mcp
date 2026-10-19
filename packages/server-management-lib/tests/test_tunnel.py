@@ -202,6 +202,100 @@ class TestSSHTunnel:
         asyncio.run(run())
 
 
+class WatchedConnection(FakeConnection):
+    def __init__(self, drop_event=None, listener=None):
+        super().__init__(listener=listener)
+        self.drop_event = drop_event
+
+    async def wait_closed(self):
+        if self.drop_event is None:
+            # The replacement connection stays alive until close() cancels the
+            # monitor task.
+            await asyncio.Event().wait()
+        else:
+            await self.drop_event.wait()
+
+
+class ReconnectManager(FakeManager):
+    def __init__(self, config, security):
+        first = not FakeManager.instances
+        super().__init__(config, security)
+        self.connection = WatchedConnection(drop_event=RE_DROP if first else None)
+
+
+RE_DROP: asyncio.Event | None = None
+
+
+class TestTunnelReconnect:
+    """A dropped SSH connection re-opens the forward on the same port."""
+
+    def test_dropped_connection_reopens_forward(self):
+        tunnel = SSHTunnel({}, {"remote_port": 8181}, default_remote_port=8181)
+
+        async def run():
+            global RE_DROP
+            RE_DROP = asyncio.Event()
+            FakeManager.instances.clear()
+            with patch("server_management_lib.tunnel.SSHManager", ReconnectManager):
+                try:
+                    endpoint = await tunnel.start()
+                    assert len(FakeManager.instances) == 1
+
+                    RE_DROP.set()
+                    for _ in range(100):
+                        if len(FakeManager.instances) >= 2:
+                            break
+                        await asyncio.sleep(0.01)
+
+                    assert len(FakeManager.instances) == 2
+                    replacement = FakeManager.instances[1]
+                    replacement.connect.assert_awaited_once()
+                    replacement.connection.forward_local_port.assert_awaited_once_with(
+                        "127.0.0.1",
+                        endpoint.port,
+                        "127.0.0.1",
+                        8181,
+                    )
+                    assert tunnel.down is False
+                    assert tunnel.last_error is None
+                finally:
+                    await tunnel.close()
+
+        asyncio.run(run())
+
+    def test_reconnect_failure_is_reported_and_retried(self):
+        tunnel = SSHTunnel({}, {"remote_port": 8181}, default_remote_port=8181)
+
+        class FailingReconnectManager(ReconnectManager):
+            def __init__(self, config, security):
+                super().__init__(config, security)
+                if len(FakeManager.instances) > 1:
+                    self.connect = AsyncMock(side_effect=OSError("refused"))
+
+        async def run():
+            global RE_DROP
+            RE_DROP = asyncio.Event()
+            FakeManager.instances.clear()
+            with patch(
+                "server_management_lib.tunnel.SSHManager",
+                FailingReconnectManager,
+            ):
+                try:
+                    await tunnel.start()
+                    RE_DROP.set()
+                    for _ in range(100):
+                        if tunnel.down:
+                            break
+                        await asyncio.sleep(0.01)
+
+                    assert tunnel.down is True
+                    assert "refused" in (tunnel.last_error or "")
+                finally:
+                    await tunnel.close()
+
+        asyncio.run(run())
+
+
 class FakeTunnel:
     def __init__(self, section, should_fail=False):
         self.section = section
