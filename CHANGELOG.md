@@ -6,6 +6,38 @@ versioning.
 
 ## [Unreleased]
 
+### Fixed
+
+- `get_smart_attributes` works again for NVMe disks. Its InfluxDB query filtered on
+  `exit_status = 0`, but Telegraf writes that field only on the SATA `smartctl` rows, never
+  on the NVMe ones, so every NVMe attribute was discarded and the tool fell through to an
+  unprivileged `smartctl` that cannot open the device. Standby rows carry no attribute rows
+  at all, so no filter is needed.
+
+### Changed
+
+- Disk reports show the role label next to the live kernel device —
+  `🟢 Data1 (/dev/sda) - ST18000NT001` — instead of only one of the two. A legacy tag that
+  still holds a kernel name is not presented as a label, and a sample whose serial does not
+  match the requested device is named by the requested device alone.
+- `disk-health-mcp` selects SMART samples by serial number instead of the `device` tag.
+  `get_disk_health`, `get_smart_attributes` and `get_nvme_health` resolve the live disk with
+  `lsblk` and query `serial_no = '<serial>'`; the `device` tag is only a fallback when the
+  live serial cannot be resolved. The overview in `get_full_disk_report` partitions by
+  `serial_no`, so one physical disk stays one line even if its label changes, and its
+  structured payload reports `devices` (kernel names a per-disk tool accepts, empty when the
+  disk has no live match), `labels` (the static role label, empty for a legacy tag) and
+  `serials`, aligned by index. Failed polls are still grouped by the `device` label because
+  standby rows carry no serial. This keeps a report attached to the
+  same disk across a reboot that re-enumerates controllers; the deployment side publishes a
+  static label (`Data1`, `Parity1`, ...) in the tag instead of a kernel name.
+- The requested kernel name stays the reference for the identity check: when it no longer
+  resolves, the report names the disk the sample actually belongs to and marks the identity
+  unverified instead of verified. Failed polls are matched on the label the newest sample
+  reported, plus the exact serial when a poller records one, never on a kernel name that
+  another disk may have used. Serials and tags are allowlisted before they are quoted into a
+  query, and the failed-poll summary counts statuses instead of repeating each one.
+
 ## [0.2.1] - 2026-10-21
 
 ### Fixed

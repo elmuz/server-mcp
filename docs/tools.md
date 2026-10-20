@@ -69,10 +69,10 @@ query_influxdb("SELECT * FROM smart_device WHERE time > now() - INTERVAL '1 hour
 | Tool | Arguments | Access | What it does |
 |---|---|---|---|
 | `list_disks` | — | read-only | `lsblk` JSON: names, models, serials, sizes |
-| `get_disk_health` | `device` | read-only | Full health report from the latest valid InfluxDB sample (successful rows in the last 24 hours) with freshness, serial/live-device identity and failed-poll evidence, or `smartctl` |
+| `get_disk_health` | `device` | read-only | Full health report from the latest valid InfluxDB sample (successful rows in the last 24 hours), selected by the live serial, with freshness, serial/live-device identity and failed-poll evidence, or `smartctl` |
 | `get_smart_attributes` | `device` | read-only | SMART attribute table with severity notes, ignoring standby rows |
 | `get_nvme_health` | `device` | read-only | NVMe SMART log (latest valid InfluxDB sample first, then `nvme-cli`) with the same freshness and identity checks |
-| `get_full_disk_report` | `device` (optional) | read-only | Overview of all disks with sample age, freshness, identity and failed polls, or a detailed report |
+| `get_full_disk_report` | `device` (optional) | read-only | Overview of all disks (one line per serial) with sample age, freshness, identity and failed polls, or a detailed report |
 | `get_zfs_status` | — | read-only | ZFS pool status, capacity and scrub state |
 | `get_raid_status` | — | read-only | `/proc/mdstat` and `mdadm --detail` |
 | `get_snapraid_status` | — | read-only | `snapraid status`: parity age, sync state and disk errors |
@@ -228,6 +228,14 @@ an `UNKNOWN`/mismatch status. If the live device or serial cannot be resolved, t
 is marked unverified rather than healthy. This applies to `get_disk_health`,
 `get_nvme_health` and the no-device overview in `get_full_disk_report`; passing a device to
 `get_full_disk_report` uses `get_disk_health`.
+
+The overview payload reports three parallel lists, indexed by disk: `devices` holds the
+kernel name a per-disk tool accepts (empty when the disk could not be matched to a live
+device), `labels` holds the static role label Telegraf publishes (`Data1`, `Parity1`, ...)
+and is empty for a tag that still holds a legacy kernel name, and `serials` holds the disk
+serial. Reports show both, as in `Data1 (/dev/sda)`. A value from `devices` can always be
+passed back to `get_disk_health`; a legacy tag is never reported as a label because it may
+name a different disk after a reboot.
 
 ## Service and container names
 

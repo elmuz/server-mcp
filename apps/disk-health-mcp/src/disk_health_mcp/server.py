@@ -94,6 +94,19 @@ SMART_STALE_AFTER_SECONDS = 2 * SMART_POLL_INTERVAL_SECONDS
 SMART_FAILURE_LIMIT = 100
 INFLUX_SUCCESS_PREFIX = "✅ Query successful"
 
+# Serials and device tags are interpolated into single-quoted SQL literals and the
+# InfluxDB client does not re-validate internally built queries, so a value is
+# accepted only when it has the shape of a serial or a device tag. Everything else
+# is dropped and the caller falls back to another selector.
+SQL_LITERAL_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 ._:#/+_-]{0,63}$")
+
+# A tag that still looks like a kernel name is legacy data (written before the
+# tag became a static label), not a label: do not present it as one.
+KERNEL_NAME_PATTERN = re.compile(
+    r"^(?:sd[a-z]+|hd[a-z]+|vd[a-z]+|xvd[a-z]+|nvme\d+(?:n\d+)?"
+    r"|mmcblk\d+(?:p\d+)?|md\d+|dm-\d+)$"
+)
+
 
 class _InfluxSample(dict):
     """A smart_device row plus recent non-success polls for the same device.
@@ -211,7 +224,7 @@ def _format_failed_polls(failed_polls: list[dict] | None, *, prefix: str = "  ")
 
     latest = max(failures, key=sort_key)
     latest_status = _exit_status(latest.get("exit_status"))
-    statuses = sorted(
+    seen_statuses = sorted(
         status
         for row in failures
         if (status := _exit_status(row.get("exit_status"))) is not None
@@ -221,7 +234,15 @@ def _format_failed_polls(failed_polls: list[dict] | None, *, prefix: str = "  ")
     count_text = f"at least {count}" if count >= SMART_FAILURE_LIMIT else str(count)
     suffix = " (standby/skipped)" if latest_status == 2 else ""
     status_text = "unknown" if latest_status is None else str(latest_status)
-    statuses_text = ", ".join(str(status) for status in statuses) or "unknown"
+    # Counted summary, not one token per row: the failure list can be long and
+    # the output is returned to the model.
+    counts: dict[int, int] = {}
+    for status in seen_statuses:
+        counts[status] = counts.get(status, 0) + 1
+    statuses_text = (
+        ", ".join(f"{status} x{amount}" for status, amount in sorted(counts.items()))
+        or "unknown"
+    )
     return (
         f"{prefix}⚠️ Recent failed polls: {count_text} non-success SMART poll(s) "
         f"in the last {SMART_LOOKBACK}; latest {latest_age} "
@@ -239,8 +260,15 @@ def _assess_influxdb_sample(
     failed_polls: list[dict] | None = None,
     live_device: object = _UNSET,
     require_live_identity: bool = False,
+    retargeted: bool = False,
 ) -> dict:
-    """Assess freshness, identity and poll failures for one InfluxDB sample."""
+    """Assess freshness, identity and poll failures for one InfluxDB sample.
+
+    ``retargeted`` marks the case where the requested device name does not
+    resolve on the host and the live device was found from the sample serial
+    instead. The report then describes a disk the caller did not name, so it is
+    never a verified match for the request.
+    """
     requested = device or str(row.get("device") or "unknown")
     sample_serial = _identity_value(row.get("serial_no"))
     sample_model = _identity_value(row.get("model")) or "unknown"
@@ -259,6 +287,8 @@ def _assess_influxdb_sample(
         identity_state = "unchecked"
     elif live is None:
         identity_state = "unresolved"
+    elif retargeted:
+        identity_state = "retargeted"
     elif not sample_serial or not live_serial:
         identity_state = "unverified"
     elif _same_serial(sample_serial, live_serial):
@@ -288,13 +318,17 @@ def _assess_influxdb_sample(
             if health_ok is True
             else "STALE — last sample UNKNOWN, not current"
         )
-    elif identity_state == "unverified" or (
+    elif identity_state in {"unverified", "retargeted"} or (
         identity_state == "unresolved" and require_live_identity
     ):
         status = "identity_unverified"
         severity = "warning"
         emoji = "🟡"
-        health_text = "UNVERIFIED — serial cannot be matched to the requested device"
+        health_text = (
+            "UNVERIFIED — requested device not found, sample belongs to another disk"
+            if identity_state == "retargeted"
+            else "UNVERIFIED — serial cannot be matched to the requested device"
+        )
     elif health_ok is True:
         status = "ok"
         severity = "ok"
@@ -472,14 +506,117 @@ def _disk_devices(blockdevices: object) -> list[dict]:
     return devices
 
 
+def _describe_disk(
+    label: object,
+    live_name: object,
+    requested: str = "",
+    *,
+    pair: bool = True,
+) -> str:
+    """Return a display name that carries both the role label and the live device.
+
+    ``Data1 (/dev/sda)`` is what an operator needs: the label says which role
+    the disk has, the kernel name says where it is right now. A legacy tag that
+    still holds a kernel name is not a label, so it is not shown as one.
+
+    ``pair=False`` suppresses the label/device pairing. Callers use it when the
+    two are *not* known to describe the same disk (a sample whose serial does
+    not match the requested device), because ``Data2 (/dev/sda)`` would assert
+    an identity the report itself denies.
+    """
+    label_text = _identity_value(label)
+    live_text = _identity_value(live_name)
+    is_label = bool(label_text) and not KERNEL_NAME_PATTERN.match(label_text)
+    if pair and is_label and live_text:
+        return f"{label_text} (/dev/{live_text})"
+    if live_text:
+        return f"/dev/{live_text}"
+    if requested:
+        return f"/dev/{requested}"
+    if label_text:
+        return label_text
+    return "unknown disk"
+
+
 def _influxdb_device_name(device: str) -> str:
-    """Map a kernel NVMe namespace name to the Telegraf tag value.
+    """Map a kernel NVMe namespace name to the legacy Telegraf tag value.
 
     Telegraf's smart plugin stores ``nvme0``/``nvme1`` (namespace-less) while
     Linux exposes ``nvme0n1``/``nvme1n1``. Other device names are unchanged.
+    Kept for the fallback path: the ``device`` tag is no longer an identity.
     """
     match = NVME_NAMESPACE_PATTERN.match(device)
     return match.group(1) if match else device
+
+
+def _sql_literal(value: object) -> str:
+    """Return ``value`` only when it may be quoted into an InfluxDB SQL literal.
+
+    Serials and device tags come from the host (``lsblk``, Telegraf) and end up
+    inside a query string, and the InfluxDB client does not run
+    :meth:`SecurityValidator.validate_influxdb_query` on internally built
+    queries. An allowlist is therefore the only line of defence: a value that
+    does not look like a serial or a device tag is dropped (``""``) instead of
+    being escaped by hand, and the caller falls back to another selector.
+    """
+    text = _identity_value(value)
+    if not text:
+        return ""
+    if not SQL_LITERAL_PATTERN.match(text):
+        logger.warning("Refusing unsafe InfluxDB identity value: %r", text)
+        return ""
+    return text
+
+
+def _identity_selector(device: str, serial: str = "") -> str:
+    """Build the SQL predicate that selects one physical disk.
+
+    The serial is the only reboot-safe identity: kernel names are assigned by
+    probe order and the ``device`` tag is now a static label (Data1, Parity1,
+    ...). The ``device`` arm stays as a fallback for a host whose live serial
+    cannot be resolved (SSH unavailable), or whose serial is not a value we are
+    willing to put inside a query.
+    """
+    wanted = _sql_literal(serial)
+    if wanted:
+        return f"serial_no = '{wanted}'"
+    return f"device = '{_sql_literal(_influxdb_device_name(device))}'"
+
+
+def _failed_poll_selector(label: str, serial: str = "") -> str | None:
+    """Build the predicate for the failed polls of one disk.
+
+    Failed polls (``exit_status != 0``) can carry no serial: Telegraf writes no
+    health fields, and no serial, for a standby row. They are then matched
+    through ``device`` tags, and the only tag known to belong to this disk is
+    the ``label`` its newest valid sample reported.
+
+    A kernel name is *not* a safe handle: the same name is reused after a
+    reboot and can still be a tag of another disk, so including it would attach
+    that disk's failures to this one. Rows that do carry a serial are matched on
+    it exactly, which also covers pollers that report the serial on failure
+    rows.
+    """
+    tag = _sql_literal(_influxdb_device_name(label)) if label else ""
+    wanted_serial = _sql_literal(serial)
+    if wanted_serial and tag:
+        return (
+            f"(serial_no = '{wanted_serial}' OR "
+            f"(device = '{tag}' AND (serial_no IS NULL OR serial_no = '')))"
+        )
+    if wanted_serial:
+        return f"serial_no = '{wanted_serial}'"
+    if tag:
+        return f"device = '{tag}'"
+    return None
+
+
+def _live_serial(device: str, live_devices: dict[str, dict] | None) -> str:
+    """Resolve a kernel device name to its live serial ('' when unavailable)."""
+    live = _resolve_live_device(device, live_devices)
+    if not live:
+        return ""
+    return _identity_value(live.get("serial"))
 
 
 def _no_smart_data_message(
@@ -611,14 +748,22 @@ def _resolve_live_device(
     serial: str = "",
     allow_serial_match: bool = True,
 ) -> dict | None:
-    """Find the live row for a kernel name or InfluxDB device tag.
+    """Find the live row for a kernel name, label or InfluxDB device tag.
 
-    Exact kernel names win. NVMe tags without a namespace (``nvme0``) are then
-    matched to their live namespace device (``nvme0n1``). If those lookups fail,
-    a serial match identifies the disk even when the tag is stale after a reboot.
+    The serial wins when the caller has one: a name or label can be ambiguous
+    across time (``sdd`` was a kernel name before the tag became a label, and
+    it now names a different disk), while the serial always identifies exactly
+    one physical disk. Without a usable serial, an exact name, then an NVMe
+    namespace match (``nvme0`` -> ``nvme0n1``) is used.
     """
     if not live_devices:
         return None
+
+    wanted = _identity_value(serial)
+    if allow_serial_match and wanted:
+        for dev in live_devices.values():
+            if _same_serial(wanted, _identity_value(dev.get("serial"))):
+                return dev
 
     exact = live_devices.get(device)
     if exact is not None:
@@ -634,25 +779,24 @@ def _resolve_live_device(
         for name, dev in live_devices.items():
             if name.startswith(prefix):
                 return dev
-
-    wanted = _identity_value(serial)
-    if allow_serial_match and wanted:
-        for dev in live_devices.values():
-            if _same_serial(wanted, _identity_value(dev.get("serial"))):
-                return dev
     return None
 
 
-async def _get_influxdb_recent_failed_polls(device: str) -> list[dict]:
-    """Return recent non-success smart_device rows for one device (newest first)."""
-    if not await _is_influxdb_available():
+async def _get_influxdb_recent_failed_polls(label: str, serial: str = "") -> list[dict]:
+    """Return recent non-success smart_device rows for one disk (newest first).
+
+    ``label`` is the tag of the newest valid sample and ``serial`` is the disk
+    identity when the caller resolved it. See :func:`_failed_poll_selector` for
+    why a requested kernel name is not used as a handle.
+    """
+    selector = _failed_poll_selector(label, serial)
+    if selector is None or not await _is_influxdb_available():
         return []
 
-    influx_device = _influxdb_device_name(device)
     client = _get_influxdb_client()
     query = (
         f"SELECT device, exit_status, time FROM smart_device "
-        f"WHERE device = '{influx_device}' AND exit_status != 0 "
+        f"WHERE {selector} AND exit_status != 0 "
         f"AND time > now() - INTERVAL '{SMART_LOOKBACK}' "
         f"ORDER BY time DESC LIMIT {SMART_FAILURE_LIMIT}"
     )
@@ -675,13 +819,18 @@ async def _is_influxdb_available() -> bool:
     return True
 
 
-async def _get_influxdb_latest_device(device: str) -> dict | None:
-    """Get the latest *valid* smart_device row for a device from InfluxDB.
+async def _get_influxdb_latest_device(device: str, serial: str = "") -> dict | None:
+    """Get the latest *valid* smart_device row for a disk from InfluxDB.
 
     Telegraf keeps writing rows while a disk sleeps, but those rows carry
     ``exit_status=2`` and no health, temperature or wear fields. Only successful
     samples (``exit_status = 0``) are health data, so they are the only rows
     considered. The lookback covers a full sleep cycle plus the poll interval.
+
+    The disk is selected by ``serial`` whenever the caller could resolve the
+    live serial; the ``device`` label is only a fallback. This is what keeps a
+    report attached to the same physical disk after a reboot re-enumerates the
+    controller or the tag is re-written by a deployment.
 
     The returned row carries recent non-success polls in its ``failed_polls``
     attribute. When InfluxDB is available but has no valid sample, an empty
@@ -691,11 +840,10 @@ async def _get_influxdb_latest_device(device: str) -> dict | None:
     if not await _is_influxdb_available():
         return None
 
-    failed_polls = await _get_influxdb_recent_failed_polls(device)
-    influx_device = _influxdb_device_name(device)
+    selector = _identity_selector(device, serial)
     client = _get_influxdb_client()
     query = (
-        f"SELECT * FROM smart_device WHERE device = '{influx_device}' "
+        f"SELECT * FROM smart_device WHERE {selector} "
         f"AND exit_status = 0 AND time > now() - INTERVAL '{SMART_LOOKBACK}' "
         f"ORDER BY time DESC LIMIT 1"
     )
@@ -704,25 +852,40 @@ async def _get_influxdb_latest_device(device: str) -> dict | None:
         rows = _parse_influx_rows(result)
     except (json.JSONDecodeError, IndexError, KeyError):
         return None
-    return _InfluxSample(rows[0] if rows else None, failed_polls)
+    row = rows[0] if rows else None
+    label = _identity_value(row.get("device")) if row else ""
+    # With a sample, the label it reported is the only safe tag handle: kernel
+    # names are reused across disks. Without a sample there is nothing to
+    # disambiguate, so the requested name is used so the caller can still
+    # explain *why* no valid sample exists (standby checklist rows).
+    failed_polls = await _get_influxdb_recent_failed_polls(label or device, serial)
+    return _InfluxSample(row, failed_polls)
 
 
-async def _get_influxdb_latest_attributes(device: str) -> list[dict] | None:
-    """Get the latest smart_attribute rows for a device from InfluxDB.
+async def _get_influxdb_latest_attributes(
+    device: str, serial: str = ""
+) -> list[dict] | None:
+    """Get the latest smart_attribute rows for a disk from InfluxDB.
 
     Only rows from successful samples are returned; standby rows carry no
-    attributes and must not be rendered as wear data.
+    attributes and must not be rendered as wear data. Identity comes from the
+    serial, exactly like :func:`_get_influxdb_latest_device`.
 
     Returns a list of attribute dicts, or None if unavailable.
     """
     if not await _is_influxdb_available():
         return None
 
-    influx_device = _influxdb_device_name(device)
+    selector = _identity_selector(device, serial)
     client = _get_influxdb_client()
+    # No ``exit_status`` filter here: Telegraf writes that field on SATA
+    # smartctl output only, never on the NVMe rows, so filtering on it silently
+    # dropped every NVMe attribute and sent the tool to the unprivileged
+    # smartctl fallback. Standby rows need no filter either - a sleeping disk
+    # produces a smart_device row but no smart_attribute rows at all.
     query = (
-        f"SELECT name, raw_value, device FROM smart_attribute "
-        f"WHERE device = '{influx_device}' AND exit_status = 0 "
+        f"SELECT name, raw_value, device, serial_no FROM smart_attribute "
+        f"WHERE {selector} "
         f"AND time > now() - INTERVAL '{SMART_LOOKBACK}' "
         f"ORDER BY time DESC LIMIT 100"
     )
@@ -749,6 +912,7 @@ def _render_influxdb_health(
     failed_polls: list[dict] | object | None = _UNSET,
     live_device: object = _UNSET,
     require_live_identity: bool = False,
+    retargeted: bool = False,
 ) -> tuple[str, dict, bool]:
     """Render an InfluxDB sample with freshness, identity and poll-failure checks."""
     if failed_polls is _UNSET:
@@ -762,6 +926,7 @@ def _render_influxdb_health(
         failed_polls=failed_polls,
         live_device=live_device,
         require_live_identity=require_live_identity,
+        retargeted=retargeted,
     )
     requested = assessment["device"]
     model = assessment["sample_model"]
@@ -773,8 +938,16 @@ def _render_influxdb_health(
     stale_after_minutes = SMART_STALE_AFTER_SECONDS // 60
     poll_minutes = SMART_POLL_INTERVAL_SECONDS // 60
 
+    # Only a verified or retargeted sample is known to belong to the live
+    # device that was resolved; on a mismatch the label belongs to another disk.
+    title = _describe_disk(
+        assessment["sample_device"],
+        assessment["live_device_name"],
+        requested,
+        pair=assessment["identity_state"] in {"verified", "retargeted"},
+    )
     lines = [
-        f"{assessment['emoji']} Device Health Report: /dev/{requested}",
+        f"{assessment['emoji']} Device Health Report: {title}",
         f"{'=' * 50}",
         "  Source: InfluxDB (Telegraf smart plugin)",
     ]
@@ -810,6 +983,13 @@ def _render_influxdb_health(
                 f"to live serial {live_serial or 'unknown'} "
                 f"({live_model or 'unknown'}), but the sample serial is "
                 f"{serial or 'unknown'} ({model})."
+            )
+        elif state == "retargeted":
+            lines.append(
+                f"  Identity: ⚠️ UNVERIFIED for /dev/{requested} — that name does "
+                f"not resolve on the host; the sample serial "
+                f"{serial or 'unknown'} belongs to live /dev/{live_name}. "
+                "The report describes that disk, not the requested name."
             )
         elif state == "unverified":
             lines.append(
@@ -965,21 +1145,36 @@ async def _influxdb_health_tool_output(
     device: str,
     *,
     require_live_identity: bool = True,
+    live_devices: dict[str, dict] | None = None,
 ) -> ToolOutput:
-    """Resolve the live identity and render one InfluxDB-backed health report."""
-    live_devices = await _get_live_devices()
-    live_device = _resolve_live_device(
-        device,
-        live_devices,
-        serial=_identity_value(row.get("serial_no")),
-        allow_serial_match=not require_live_identity,
-    )
+    """Resolve the live identity and render one InfluxDB-backed health report.
+
+    The requested name stays the reference for the identity check: the live
+    device is resolved from ``device`` and the sample serial is compared with
+    *that* disk. Only when the requested name no longer resolves is the sample
+    serial used to find the disk it belongs to, and the report says so instead
+    of calling the request verified.
+
+    ``live_devices`` lets a caller that already ran ``lsblk`` reuse the result
+    instead of paying for a second round trip.
+    """
+    if live_devices is None:
+        live_devices = await _get_live_devices()
+    live_device = _resolve_live_device(device, live_devices)
+    retargeted = live_device is None
+    if retargeted:
+        live_device = _resolve_live_device(
+            device,
+            live_devices,
+            serial=_identity_value(row.get("serial_no")),
+        )
     text, data, ok = _render_influxdb_health(
         row,
         device,
         failed_polls=getattr(row, "failed_polls", None),
         live_device=live_device,
         require_live_identity=require_live_identity,
+        retargeted=retargeted,
     )
     return ToolOutput(_cap_composite(text), ok=ok, data=data)
 
@@ -1001,11 +1196,18 @@ async def get_disk_health(device: str) -> str | ToolOutput:
     if not security.validate_device_name(device):
         return f"❌ Invalid device name: {device}\nUse format: sda, nvme0n1, vda, etc."
 
-    # Priority 1: Try InfluxDB (no root needed)
-    influx_data = await _get_influxdb_latest_device(device)
+    # Priority 1: Try InfluxDB (no root needed). Resolve the live serial first
+    # so the sample is selected by identity, not by a tag that a previous
+    # deployment may have pointed at another physical disk. The ``lsblk``
+    # result is reused below instead of running it twice.
+    live_devices = await _get_live_devices()
+    serial = _live_serial(device, live_devices)
+    influx_data = await _get_influxdb_latest_device(device, serial=serial)
     failed_polls = getattr(influx_data, "failed_polls", None)
     if influx_data:
-        return await _influxdb_health_tool_output(influx_data, device)
+        return await _influxdb_health_tool_output(
+            influx_data, device, live_devices=live_devices
+        )
 
     # Priority 2: Fall back to smartctl via SSH
     if not config.get("host", {}).get("enabled", False):
@@ -1091,11 +1293,14 @@ async def get_smart_attributes(device: str) -> str | ToolOutput:
     if not security.validate_device_name(device):
         return f"❌ Invalid device name: {device}"
 
-    # Priority 1: Try InfluxDB (no root needed)
-    influx_attrs = await _get_influxdb_latest_attributes(device)
+    # Priority 1: Try InfluxDB (no root needed). Select the rows by serial so
+    # a re-enumerated (or re-tagged) disk keeps reporting its own attributes.
+    live_devices = await _get_live_devices()
+    serial = _live_serial(device, live_devices)
+    influx_attrs = await _get_influxdb_latest_attributes(device, serial=serial)
     if influx_attrs:
         # Fetch device summary for SSD wear cross-reference
-        influx_device = await _get_influxdb_latest_device(device)
+        influx_device = await _get_influxdb_latest_device(device, serial=serial)
 
         lines = [
             f"SMART Attributes for {device} (via InfluxDB)",
@@ -1244,11 +1449,15 @@ async def get_nvme_health(device: str) -> str | ToolOutput:
     if not security.validate_device_name(device):
         return f"❌ Invalid device name: {device}"
 
-    # Priority 1: Try InfluxDB first. The lookup normalizes nvme0n1 -> nvme0.
-    influx_data = await _get_influxdb_latest_device(device)
+    # Priority 1: try InfluxDB first, selecting the disk by its live serial.
+    live_devices = await _get_live_devices()
+    serial = _live_serial(device, live_devices)
+    influx_data = await _get_influxdb_latest_device(device, serial=serial)
     failed_polls = getattr(influx_data, "failed_polls", None)
     if influx_data:
-        return await _influxdb_health_tool_output(influx_data, device)
+        return await _influxdb_health_tool_output(
+            influx_data, device, live_devices=live_devices
+        )
 
     # Priority 2: Fall back to nvme-cli
     if not config.get("host", {}).get("enabled", False):
@@ -1546,12 +1755,18 @@ async def get_io_stats() -> str | ToolOutput:
 # ============================================================================
 
 
-_metric_clients: dict[tuple[str, int], InfluxDBClient | PrometheusClient] = {}
+_metric_clients: dict[tuple[object, ...], InfluxDBClient | PrometheusClient] = {}
 
 
 def _cached_client(name, cfg, factory):
-    """Return one long-lived client per config object and service."""
-    key = (name, id(cfg))
+    """Return one long-lived client per service endpoint.
+
+    The key is the endpoint, not the ``id()`` of the config dict: an address can
+    be reused once a dict is freed, which would hand back a client built for a
+    different endpoint. ``apply_config()`` clears the cache, so a changed token
+    or database is picked up on reload.
+    """
+    key = (name, cfg.get("host"), cfg.get("port"), cfg.get("scheme"))
     client = _metric_clients.get(key)
     if client is None:
         client = factory()
@@ -1747,21 +1962,27 @@ async def _influxdb_recent_failures_by_device() -> dict[str, list[dict]]:
 
 
 async def _influxdb_latest_device_rows() -> list[dict]:
-    """Return the latest valid smart_device row per device in one query.
+    """Return the latest valid smart_device row per *physical disk*.
 
     The previous overview issued ``1 + N`` sequential queries (one per
-    device). A window function ranks the rows per device so the whole report
-    costs one round trip regardless of how many disks are installed. Recent
-    non-success polls are attached per row so staleness has an explanation.
+    device). A window function ranks the rows per disk so the whole report
+    costs one round trip regardless of how many disks are installed.
+
+    Ranking is partitioned by ``serial_no``, not by the ``device`` tag: the
+    tag is only a label, and grouping on it would split one disk into two
+    series whenever the label changes. Recent non-success polls are attached
+    per row (by label, because failed polls carry no serial) so staleness has
+    an explanation.
     """
     failures_by_device = await _influxdb_recent_failures_by_device()
     client = _get_influxdb_client()
     query = (
         "SELECT * FROM ("
-        "SELECT *, ROW_NUMBER() OVER (PARTITION BY device ORDER BY time DESC) "
+        "SELECT *, ROW_NUMBER() OVER (PARTITION BY serial_no ORDER BY time DESC) "
         "AS sample_rank FROM smart_device "
-        f"WHERE exit_status = 0 AND time > now() - INTERVAL '{SMART_LOOKBACK}'"
-        ") AS latest WHERE sample_rank = 1 ORDER BY device"
+        f"WHERE exit_status = 0 AND time > now() - INTERVAL '{SMART_LOOKBACK}' "
+        "AND serial_no IS NOT NULL AND serial_no != ''"
+        ") AS latest WHERE sample_rank = 1 ORDER BY serial_no"
     )
     try:
         result = await client.query(query)
@@ -1771,10 +1992,12 @@ async def _influxdb_latest_device_rows() -> list[dict]:
     rows: list[dict] = []
     seen: set[str] = set()
     for row in _parse_influx_rows(result):
-        device = row.get("device")
-        if isinstance(device, str) and device and device not in seen:
-            seen.add(device)
-            rows.append(_InfluxSample(row, failures_by_device.get(device, [])))
+        serial = _identity_value(row.get("serial_no"))
+        if not serial or serial in seen:
+            continue
+        seen.add(serial)
+        label = _identity_value(row.get("device"))
+        rows.append(_InfluxSample(row, failures_by_device.get(label, [])))
     return rows
 
 
@@ -1804,7 +2027,12 @@ async def get_full_disk_report(device: str | None = None) -> str | ToolOutput:
 
     # Overview of all disks - try InfluxDB first
     lines = ["=== Disk Health Overview ===\n"]
+    # Parallel lists: a kernel name ``get_disk_health()`` accepts (or "" when the
+    # disk could not be matched to a live device), the static role label ("" for
+    # a legacy tag that still holds a kernel name) and the serial.
     overview_devices: list[str] = []
+    overview_labels: list[str] = []
+    overview_serials: list[str] = []
 
     if await _is_influxdb_available():
         rows = await _influxdb_latest_device_rows()
@@ -1827,7 +2055,6 @@ async def get_full_disk_report(device: str | None = None) -> str | ToolOutput:
             return _cap_composite(f"{note}\n\n{await _get_full_report_via_ssh()}")
 
         live_devices = await _get_live_devices()
-        overview_devices = [row["device"] for row in rows]
         lines.append("Source: InfluxDB (Telegraf smart plugin)\n")
         lines.append(
             f"Found {len(rows)} devices with a valid sample in the last "
@@ -1850,22 +2077,25 @@ async def get_full_disk_report(device: str | None = None) -> str | ToolOutput:
                 require_live_identity=True,
             )
 
+            label = _identity_value(dev_name)
+            is_label = bool(label) and not KERNEL_NAME_PATTERN.match(label)
+            live_name = _identity_value(assessment["live_device_name"])
+            overview_devices.append(live_name or ("" if is_label else label))
+            overview_labels.append(label if is_label else "")
+            overview_serials.append(serial)
+
             temp = row.get("temp_c")
             poh = row.get("power_on_hours")
             age = _format_sample_age(row)
             temp_flag = " 🔥" if isinstance(temp, int | float) and temp > 55 else ""
             parts = [
-                f"  {assessment['emoji']} /dev/{dev_name} - "
+                f"  {assessment['emoji']} "
+                f"{_describe_disk(dev_name, assessment['live_device_name'])} - "
                 f"{assessment['sample_model']}",
                 f"Health: {assessment['health_text']}",
                 f"Serial: {serial or 'unknown'}",
             ]
-            if assessment["live_device_name"]:
-                parts.append(
-                    f"Live: /dev/{assessment['live_device_name']} "
-                    f"(serial {assessment['live_device_serial'] or 'unknown'})"
-                )
-            else:
+            if not assessment["live_device_name"]:
                 parts.append("Live: unavailable")
             if temp is not None:
                 parts.append(f"Temp: {temp}°C{temp_flag}")
@@ -1902,7 +2132,12 @@ async def get_full_disk_report(device: str | None = None) -> str | ToolOutput:
 
     return ToolOutput(
         _cap_composite("\n".join(lines)),
-        data={"source": "influxdb", "devices": overview_devices},
+        data={
+            "source": "influxdb",
+            "devices": overview_devices,
+            "labels": overview_labels,
+            "serials": overview_serials,
+        },
     )
 
 

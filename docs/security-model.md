@@ -151,6 +151,12 @@ the HTTP client, not the original input. PromQL is sent to Prometheus's read-onl
 instant-query endpoint; quotes, label matchers and comparison operators are allowed because
 the query is never executed by a shell.
 
+`disk-health-mcp` builds some queries itself (device tag, disk serial) and the client does
+not re-validate those, so the serial and the tag are allowlisted before they are quoted into
+a literal: only letters, digits, space and `. _ : # / + -` are accepted, and a value that
+does not match is dropped in favour of the device tag. An unreadable or odd serial therefore
+degrades the lookup to a tag match instead of entering the query string.
+
 Use read-only tokens for both services. The MCP is not a substitute for database-side
 authorization.
 

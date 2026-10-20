@@ -170,3 +170,20 @@ def patched_server(
             "executor": mock_ssh_manager,
             "security": mock_security,
         }
+
+
+@pytest.fixture(autouse=True)
+def _isolate_metric_clients():
+    """Drop the cached InfluxDB/Prometheus clients around every test.
+
+    ``server._metric_clients`` is a module-level cache. Without this, a client
+    built for one test (usually an ``AsyncMock``) is returned to the next test
+    that patches ``config`` with an equivalent endpoint, so the assertions see
+    another test's response. Observed as an intermittent failure in the
+    attribute-lookup tests before the cache key was made content-based.
+    """
+    from disk_health_mcp import server
+
+    server._metric_clients.clear()
+    yield
+    server._metric_clients.clear()

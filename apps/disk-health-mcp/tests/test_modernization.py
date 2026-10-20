@@ -321,9 +321,101 @@ class TestEveryToolHasStructuredData:
         queries = [call.args[0] for call in client.query.await_args_list]
         assert any("exit_status != 0" in query for query in queries)
         assert any(
-            "ROW_NUMBER() OVER (PARTITION BY device" in query for query in queries
+            "ROW_NUMBER() OVER (PARTITION BY serial_no" in query for query in queries
         )
         assert response.data["devices"] == ["sda"]
+        assert response.data["serials"] == ["ZVTFE2SL"]
+
+    def test_full_report_payload_keeps_devices_usable(
+        self, patched_server, monkeypatch
+    ):
+        """`devices` must stay an argument `get_disk_health` accepts.
+
+        The role label is reported separately, and a tag that still holds a
+        kernel name is not presented as a label, so a client can never feed a
+        value back and land on a different physical disk.
+        """
+        from datetime import UTC, datetime
+        from unittest.mock import AsyncMock
+
+        from server_management_lib import SecurityValidator
+
+        rows = [
+            {
+                "device": "Data1",
+                "exit_status": 0,
+                "health_ok": True,
+                "model": "ST18000NT001",
+                "serial_no": "ZVTFF270",
+                "time": datetime.now(UTC).isoformat(),
+            },
+            {
+                "device": "sdd",
+                "exit_status": 0,
+                "health_ok": True,
+                "model": "ST18000NT001",
+                "serial_no": "ZVTFF3JB",
+                "time": datetime.now(UTC).isoformat(),
+            },
+        ]
+        client = AsyncMock()
+        client.query = AsyncMock(
+            return_value=(f"✅ Query successful\n\n{json.dumps(rows)}")
+        )
+        monkeypatch.setattr(server, "_metric_clients", {})
+        monkeypatch.setattr(server, "_make_influxdb_client", lambda: client)
+        monkeypatch.setattr(
+            server,
+            "_get_live_devices",
+            AsyncMock(
+                return_value={
+                    "sda": {"name": "sda", "model": "m", "serial": "ZVTFF270"},
+                    "sdc": {"name": "sdc", "model": "m", "serial": "ZVTFF3JB"},
+                }
+            ),
+        )
+        tool = server.mcp._tool_manager.get_tool("get_full_disk_report")
+
+        response = asyncio.run(tool.fn())
+
+        assert response.data["devices"] == ["sda", "sdc"]
+        assert response.data["labels"] == ["Data1", ""]
+        assert response.data["serials"] == ["ZVTFF270", "ZVTFF3JB"]
+
+        validator = SecurityValidator({})
+        for device in response.data["devices"]:
+            assert validator.validate_device_name(device) is True
+
+    def test_unresolved_disk_is_not_returned_as_a_device(
+        self, patched_server, monkeypatch
+    ):
+        """Without a live match, `devices` must not carry a role label."""
+        from datetime import UTC, datetime
+        from unittest.mock import AsyncMock
+
+        rows = [
+            {
+                "device": "Data1",
+                "exit_status": 0,
+                "health_ok": True,
+                "model": "ST18000NT001",
+                "serial_no": "ZVTFF270",
+                "time": datetime.now(UTC).isoformat(),
+            }
+        ]
+        client = AsyncMock()
+        client.query = AsyncMock(
+            return_value=(f"✅ Query successful\n\n{json.dumps(rows)}")
+        )
+        monkeypatch.setattr(server, "_metric_clients", {})
+        monkeypatch.setattr(server, "_make_influxdb_client", lambda: client)
+        monkeypatch.setattr(server, "_get_live_devices", AsyncMock(return_value=None))
+        tool = server.mcp._tool_manager.get_tool("get_full_disk_report")
+
+        response = asyncio.run(tool.fn())
+
+        assert response.data["devices"] == [""]
+        assert response.data["labels"] == ["Data1"]
 
 
 class TestProxyErrorPages:

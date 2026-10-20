@@ -5,7 +5,8 @@ Uses mocked SSH, security, and config to test
 the actual tool logic without a real host.
 """
 
-from datetime import UTC
+import json
+from datetime import UTC, datetime
 
 import pytest
 
@@ -67,6 +68,92 @@ class TestEnrichErrorOutput:
 # ============================================================================
 # InfluxDB Health Formatting
 # ============================================================================
+
+
+class TestDiskDisplayName:
+    """Reports name the role label and the current kernel device together."""
+
+    def test_label_and_live_device_are_combined(self):
+        assert server._describe_disk("Data1", "sda", "sda") == "Data1 (/dev/sda)"
+
+    def test_nvme_label_uses_live_namespace(self):
+        assert server._describe_disk("Cache1", "nvme0n1") == "Cache1 (/dev/nvme0n1)"
+
+    def test_legacy_kernel_name_tag_is_not_shown_as_label(self):
+        assert server._describe_disk("sdd", "sdc", "sdc") == "/dev/sdc"
+
+    def test_missing_live_device_falls_back_to_requested(self):
+        assert server._describe_disk("Data1", "", "sda") == "/dev/sda"
+
+    def test_unresolved_disk_is_named(self):
+        assert server._describe_disk("", "", "") == "unknown disk"
+
+    def test_pairing_can_be_suppressed(self):
+        assert server._describe_disk("Data2", "sda", pair=False) == "/dev/sda"
+
+    def test_mismatched_sample_is_not_paired_with_the_requested_device(self):
+        """The title must not assert a label/device pairing the report denies."""
+        row = {
+            "device": "Data2",
+            "serial_no": "ZVTFE2SL",
+            "model": "ST18000NT001",
+            "exit_status": 0,
+            "health_ok": True,
+            "time": datetime.now(UTC).isoformat(),
+        }
+        live = {"name": "sda", "model": "ST18000NT001", "serial": "ZVTFF270"}
+
+        text, data, ok = server._render_influxdb_health(row, "sda", live_device=live)
+
+        assert ok is False
+        assert data["identity"]["state"] == "mismatch"
+        assert text.splitlines()[0] == "🔴 Device Health Report: /dev/sda"
+        assert "Data2 (/dev/sda)" not in text
+        assert "Sample Device Tag: Data2" in text
+
+    def test_verified_sample_is_paired(self):
+        row = {
+            "device": "Data1",
+            "serial_no": "ZVTFF270",
+            "model": "ST18000NT001",
+            "exit_status": 0,
+            "health_ok": True,
+            "time": datetime.now(UTC).isoformat(),
+        }
+        live = {"name": "sda", "model": "ST18000NT001", "serial": "ZVTFF270"}
+
+        text, data, _ = server._render_influxdb_health(row, "sda", live_device=live)
+
+        assert data["identity"]["state"] == "verified"
+        assert text.splitlines()[0] == "✅ Device Health Report: Data1 (/dev/sda)"
+
+
+class TestMetricClientCache:
+    """The HTTP client cache is keyed by endpoint, not by config object identity."""
+
+    def test_equal_endpoints_share_one_client(self):
+        calls = []
+
+        def factory():
+            client = object()
+            calls.append(client)
+            return client
+
+        first = server._cached_client("influxdb", {"host": "h", "port": 1}, factory)
+        second = server._cached_client("influxdb", {"host": "h", "port": 1}, factory)
+
+        assert first is second
+        assert len(calls) == 1
+
+    def test_a_different_endpoint_gets_a_new_client(self):
+        first = server._cached_client(
+            "influxdb", {"host": "h", "port": 1}, lambda: object()
+        )
+        second = server._cached_client(
+            "influxdb", {"host": "h", "port": 2}, lambda: object()
+        )
+
+        assert first is not second
 
 
 class TestInfluxDBHealthFormatting:
@@ -318,11 +405,150 @@ class TestInfluxDBDeviceMapping:
             row = await server._get_influxdb_latest_device("nvme0n1")
 
         assert row == {"device": "nvme0", "health_ok": True}
+        # The newest-sample query is no longer the last call: failed polls are
+        # looked up afterwards (by label, because they carry no serial).
+        queries = [call.args[0] for call in client.query.await_args_list]
+        sample_query = next(q for q in queries if "exit_status = 0" in q)
+        assert "device = 'nvme0'" in sample_query
+        assert "nvme0n1" not in sample_query
+        assert f"INTERVAL '{server.SMART_LOOKBACK}'" in sample_query
+
+    async def test_serial_lookup_wins_over_device_tag(self, mock_config):
+        from unittest.mock import AsyncMock, patch
+
+        client = AsyncMock()
+        client.query = AsyncMock(
+            return_value=(
+                '✅ Query successful\n\n[{"device": "Parity1", "serial_no": "ZVTFF3JB", '
+                '"exit_status": 0, "health_ok": true}]'
+            )
+        )
+
+        with (
+            patch("disk_health_mcp.server.config", mock_config),
+            patch(
+                "disk_health_mcp.server._make_influxdb_client",
+                return_value=client,
+            ),
+        ):
+            row = await server._get_influxdb_latest_device("sdc", serial="ZVTFF3JB")
+
+        assert row == {
+            "device": "Parity1",
+            "serial_no": "ZVTFF3JB",
+            "exit_status": 0,
+            "health_ok": True,
+        }
+        queries = [call.args[0] for call in client.query.await_args_list]
+        sample_query = next(q for q in queries if "exit_status = 0" in q)
+        assert "serial_no = 'ZVTFF3JB'" in sample_query
+        assert "device = 'sdc'" not in sample_query
+        # Failed polls are matched on the label of the successful sample (and on
+        # the serial for pollers that report one), never on the requested
+        # kernel name: kernel names are reused across disks.
+        failure_query = next(q for q in queries if "exit_status != 0" in q)
+        assert "serial_no = 'ZVTFF3JB'" in failure_query
+        assert "device = 'Parity1'" in failure_query
+        assert "sdc" not in failure_query
+
+    async def test_failed_polls_ignore_a_reused_kernel_name(self, mock_config):
+        """`sdd` was the parity disk's tag before the redeploy and is the System
+        SSD's kernel name now; its failures must not be attached to it."""
+        from unittest.mock import AsyncMock, patch
+
+        client = AsyncMock()
+        client.query = AsyncMock(
+            return_value=(
+                '✅ Query successful\n\n[{"device": "System", '
+                '"serial_no": "2421E8B28A83", "exit_status": 0}]'
+            )
+        )
+        with (
+            patch("disk_health_mcp.server.config", mock_config),
+            patch(
+                "disk_health_mcp.server._make_influxdb_client",
+                return_value=client,
+            ),
+        ):
+            await server._get_influxdb_latest_device("sdd", serial="2421E8B28A83")
+
+        failure_query = next(
+            q
+            for q in (call.args[0] for call in client.query.await_args_list)
+            if "exit_status != 0" in q
+        )
+        assert "device = 'System'" in failure_query
+        assert "device = 'sdd'" not in failure_query
+
+    async def test_get_disk_health_resolves_serial_without_mismatch(self, mock_config):
+        """A label tag plus a live kernel name must resolve to one disk."""
+        from datetime import UTC, datetime
+        from unittest.mock import AsyncMock, patch
+
+        client = AsyncMock()
+        sample = {
+            "device": "Data2",
+            "serial_no": "ZVTFE2SL",
+            "exit_status": 0,
+            "health_ok": True,
+            "model": "ST18000NT001",
+            "temp_c": 33,
+            "time": datetime.now(UTC).isoformat(),
+        }
+        client.query = AsyncMock(
+            return_value=("✅ Query successful\n\n" + json.dumps([sample]))
+        )
+
+        with (
+            patch("disk_health_mcp.server.config", mock_config),
+            patch("disk_health_mcp.server._metric_clients", {}),
+            patch(
+                "disk_health_mcp.server._make_influxdb_client",
+                return_value=client,
+            ),
+            patch(
+                "disk_health_mcp.server._get_live_devices",
+                new=AsyncMock(
+                    return_value={
+                        "sdb": {
+                            "name": "sdb",
+                            "model": "ST18000NT001",
+                            "serial": "ZVTFE2SL",
+                        }
+                    }
+                ),
+            ),
+        ):
+            result = await server.get_disk_health("sdb")
+
+        assert "Identity: verified" in result
+        assert "Live Device: /dev/sdb" in result
+        assert "Sample Device Tag: Data2" in result
+        queries = [call.args[0] for call in client.query.await_args_list]
+        sample_query = next(q for q in queries if "exit_status = 0" in q)
+        assert "serial_no = 'ZVTFE2SL'" in sample_query
+        assert "device = 'sdb'" not in sample_query
+
+    async def test_attributes_lookup_uses_serial(self, mock_config):
+        from unittest.mock import AsyncMock, patch
+
+        client = AsyncMock()
+        client.query = AsyncMock(
+            return_value='✅ Query successful\n\n[{"name": "Temperature_Celsius", "raw_value": 30}]'
+        )
+
+        with (
+            patch("disk_health_mcp.server.config", mock_config),
+            patch(
+                "disk_health_mcp.server._make_influxdb_client",
+                return_value=client,
+            ),
+        ):
+            await server._get_influxdb_latest_attributes("sda", serial="ZVTFF270")
+
         query = client.query.await_args.args[0]
-        assert "device = 'nvme0'" in query
-        assert "nvme0n1" not in query
-        assert "exit_status = 0" in query
-        assert f"INTERVAL '{server.SMART_LOOKBACK}'" in query
+        assert "serial_no = 'ZVTFF270'" in query
+        assert "device = 'sda'" not in query
 
     async def test_attribute_lookup_uses_normalized_name(self, mock_config):
         from unittest.mock import AsyncMock, patch
@@ -348,7 +574,9 @@ class TestInfluxDBDeviceMapping:
         query = client.query.await_args.args[0]
         assert "device = 'nvme0'" in query
         assert "nvme0n1" not in query
-        assert "exit_status = 0" in query
+        # NVMe smart_attribute rows carry no exit_status in Telegraf, so the
+        # filter would discard every NVMe attribute.
+        assert "exit_status" not in query
         assert f"INTERVAL '{server.SMART_LOOKBACK}'" in query
 
 
@@ -417,7 +645,8 @@ class TestInfluxValidSamples:
         from unittest.mock import AsyncMock, patch
 
         valid = {
-            "device": "sda",
+            "device": "Data1",
+            "serial_no": "ZVTFF270",
             "exit_status": 0,
             "health_ok": True,
             "model": "ST18000NT001",
@@ -470,7 +699,7 @@ class TestInfluxValidSamples:
         assert "0 hours" not in result
         assert "Power Cycles: 0" not in result
 
-    async def test_attribute_lookup_ignores_standby_rows(self, mock_config):
+    async def test_attribute_lookup_returns_none_without_rows(self, mock_config):
         from unittest.mock import AsyncMock, patch
 
         client = AsyncMock()
@@ -484,13 +713,17 @@ class TestInfluxValidSamples:
 
         assert rows is None
         query = client.query.await_args.args[0]
-        assert "exit_status = 0" in query
+        # Attribute rows are only written for successful samples, so standby
+        # rows need no exit_status filter (and NVMe rows have no such field).
+        assert "device = 'sda'" in query
+        assert "exit_status" not in query
 
     async def test_overview_counts_only_valid_samples(self, mock_config):
         from unittest.mock import AsyncMock, patch
 
         valid = {
-            "device": "sda",
+            "device": "Data1",
+            "serial_no": "ZVTFF270",
             "exit_status": 0,
             "health_ok": True,
             "model": "ST18000NT001",
@@ -513,10 +746,12 @@ class TestInfluxValidSamples:
             result = await server.get_full_disk_report()
 
         assert "Found 1 devices" in result
-        assert "/dev/sda" in result
+        # The label is display only; the serial is the identity.
+        assert "Data1" in result
+        assert "Serial: ZVTFF270" in result
         assert "Sample:" in result
 
-        # One window-function query returns the latest valid row per device and
+        # One window-function query returns the latest valid row per disk and
         # one query reports recent failed polls; still no per-disk N+1 query.
         assert client.query.await_count == 2
         queries = [call.args[0] for call in client.query.await_args_list]
@@ -525,9 +760,10 @@ class TestInfluxValidSamples:
         device_query = next(
             query
             for query in queries
-            if "ROW_NUMBER() OVER (PARTITION BY device" in query
+            if "ROW_NUMBER() OVER (PARTITION BY serial_no" in query
         )
         assert "exit_status = 0" in device_query
+        assert "serial_no IS NOT NULL" in device_query
 
     async def test_overview_without_valid_samples_falls_back_to_ssh(
         self, mock_config, sample_smart_json
@@ -570,6 +806,56 @@ class TestInfluxValidSamples:
         assert server._parse_influx_rows("❌ failed") == []
         assert server._parse_influx_rows("✅ Query successful\n\nnot json") == []
         assert server._parse_influx_rows("✅ Query successful\n\n{}") == []
+
+
+class TestInfluxSelectorHardening:
+    """Host values are allowlisted before they enter an InfluxDB SQL literal."""
+
+    @pytest.mark.parametrize(
+        "value",
+        [
+            "ZVTFE2SL",
+            "2146E5E54409",
+            "WD-WCC4M1234567",
+            "50026B7383E4529D",
+            "Data1",
+            "NVMe2",
+        ],
+    )
+    def test_ordinary_serials_and_labels_are_accepted(self, value):
+        assert server._sql_literal(value) == value
+
+    @pytest.mark.parametrize(
+        "value",
+        [
+            "X' OR '1'='1",
+            "x'); DROP TABLE smart_device; --",
+            "a\\",
+            "-- comment",
+            "a\nb",
+            "'",
+            "",
+            "   ",
+            None,
+        ],
+    )
+    def test_unsafe_values_are_dropped(self, value):
+        assert server._sql_literal(value) == ""
+
+    def test_hostile_serial_falls_back_to_the_device_tag(self):
+        assert server._identity_selector("sda", "X' OR '1'='1") == "device = 'sda'"
+        assert server._identity_selector("sda", "ZVTFE2SL") == "serial_no = 'ZVTFE2SL'"
+
+    def test_failed_poll_selector_matches_label_and_serial(self):
+        assert server._failed_poll_selector("sda") == "device = 'sda'"
+        assert server._failed_poll_selector("sda", "ZVTFF270") == (
+            "(serial_no = 'ZVTFF270' OR "
+            "(device = 'sda' AND (serial_no IS NULL OR serial_no = '')))"
+        )
+        # An NVMe namespace name keeps its legacy namespace-less tag.
+        assert server._failed_poll_selector("nvme0n1") == "device = 'nvme0'"
+        assert server._failed_poll_selector("'") is None
+        assert server._failed_poll_selector("", "'") is None
 
 
 class TestInfluxFreshnessAndIdentity:
@@ -772,6 +1058,74 @@ class TestInfluxFreshnessAndIdentity:
         assert "✅" not in result
         assert "Live Device: unavailable" in result
         assert "Identity: ⚠️ UNVERIFIED" in result
+
+    async def test_missing_requested_name_is_amber_not_verified(self, mock_config):
+        """A name that no longer resolves must not turn into a green report
+        about whichever disk owns the stale tag."""
+        from unittest.mock import AsyncMock, patch
+
+        row = self._row(device="sdd", serial_no="ZVTFF3JB")
+        live = {"sdc": self._live(name="sdc", serial="ZVTFF3JB")}
+        with (
+            patch("disk_health_mcp.server.config", mock_config),
+            patch(
+                "disk_health_mcp.server._get_influxdb_latest_device",
+                new=AsyncMock(return_value=row),
+            ),
+            patch(
+                "disk_health_mcp.server._get_live_devices",
+                new=AsyncMock(return_value=live),
+            ),
+        ):
+            result = await server.get_disk_health("sdd")
+
+        assert "✅" not in result
+        assert result.startswith("🟡")
+        assert "Identity: verified" not in result
+        assert "UNVERIFIED for /dev/sdd" in result
+        assert "belongs to live /dev/sdc" in result
+        assert "Health: UNVERIFIED" in result
+
+    async def test_resolved_device_without_serial_is_not_verified(self, mock_config):
+        """A resolvable device with an unreadable serial keeps the name as the
+        reference, so another disk's sample cannot be called verified."""
+        from unittest.mock import AsyncMock, patch
+
+        row = self._row(device="sdd", serial_no="ZVTFF3JB")
+        live = {"sdd": self._live(name="sdd", serial="")}
+        with (
+            patch("disk_health_mcp.server.config", mock_config),
+            patch(
+                "disk_health_mcp.server._get_influxdb_latest_device",
+                new=AsyncMock(return_value=row),
+            ),
+            patch(
+                "disk_health_mcp.server._get_live_devices",
+                new=AsyncMock(return_value=live),
+            ),
+        ):
+            result = await server.get_disk_health("sdd")
+
+        assert "✅" not in result
+        assert "Identity: verified" not in result
+        assert "Identity: ⚠️ UNVERIFIED" in result
+
+    async def test_health_report_runs_lsblk_once(self, mock_config):
+        """Resolving the serial and verifying the sample share one lsblk call."""
+        from unittest.mock import AsyncMock, patch
+
+        live_devices = AsyncMock(return_value={"sda": self._live()})
+        with (
+            patch("disk_health_mcp.server.config", mock_config),
+            patch(
+                "disk_health_mcp.server._get_influxdb_latest_device",
+                new=AsyncMock(return_value=self._row()),
+            ),
+            patch("disk_health_mcp.server._get_live_devices", new=live_devices),
+        ):
+            await server.get_disk_health("sda")
+
+        assert live_devices.await_count == 1
 
     async def test_full_report_overview_reports_stale_mismatch_and_failures(
         self, mock_config
