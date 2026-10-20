@@ -80,34 +80,146 @@ some links. The new-repository path is cleaner.
 
 ## PyPI releases
 
-Publish the library first; the apps depend on `server-management-lib>=0.2,<0.3`.
+The three packages are published separately but share one version. **Publish the library
+first:** the apps depend on `server-management-lib>=0.2,<0.3`, so an app that is uploaded
+before its library resolves to nothing and cannot be installed.
 
-```bash
-# Build all workspace packages
-rm -rf dist    # never reuse artifacts from an earlier build of this same version
-uv build --all-packages
+| PyPI project | Source directory |
+|---|---|
+| `server-management-lib` | `packages/server-management-lib` |
+| `remote-server-mcp` | `apps/remote-server-mcp` |
+| `disk-health-mcp` | `apps/disk-health-mcp` |
 
-# Publish in dependency order (glob the exact files so only one package is sent)
-uv publish "dist/server_management_lib-0.2.0*"
-uv publish "dist/remote_server_mcp-0.2.0*"
-uv publish "dist/disk_health_mcp-0.2.0*"
-```
-
-`uv publish` reads credentials from `UV_PUBLISH_TOKEN` (or `~/.pypirc`). The package names
-`remote-server-mcp`, `disk-health-mcp` and `server-management-lib` are the published names.
-
-After publishing, the short install commands work:
-
-```bash
-uvx remote-server-mcp
-uvx disk-health-mcp
-```
-
-Until then, use the workspace command from [harnesses.md](harnesses.md):
+Until a release is on PyPI, install from the workspace as described in
+[harnesses.md](harnesses.md):
 
 ```bash
 uv run --project /path/to/server-mcp --package remote-server-mcp remote-server-mcp
 ```
+
+### 1. Pre-flight
+
+The release version did **not** change between the pre-remediation builds and the tagged
+commit, so `uv build` will happily reuse a stale `dist/` and publish pre-fix wheels as
+`0.2.0`. Always confirm the tree and rebuild from scratch:
+
+```bash
+git status --short                     # must print nothing
+git describe --tags --exact-match      # must print v0.2.0
+rm -rf dist
+uv build --all-packages
+uv publish --dry-run "dist/*"          # metadata check; uploads nothing
+```
+
+`--dry-run` validates every artifact against `https://upload.pypi.org/legacy/` and needs no
+credentials, so it catches malformed metadata and name conflicts before the real upload.
+
+### 2. Account prerequisites
+
+PyPI requires 2FA on every account; token creation is blocked without it.
+
+A **project-scoped** token can only be created once the project exists, so the first upload
+of a new project needs one of two paths:
+
+- **Account-scoped token, revoked immediately** — the shortest path, described in step 3.
+  Use it when the version has to be published now.
+- **A pending trusted publisher** — no token at all, described in step 5. Add it before the
+  first upload if you want the very first release to go through CI.
+
+### 3. Publish `0.2.0` with an account-scoped token
+
+In the PyPI web UI: *Account settings* → *API tokens* → *Add API token*, scope *Entire
+account (all projects)*, named for example `server-mcp 0.2.0 bootstrap`. The token is
+shown once and cannot be read again.
+
+```bash
+read -rs UV_PUBLISH_TOKEN && export UV_PUBLISH_TOKEN    # paste; keeps it out of history
+uv publish "dist/server_management_lib-0.2.0*"
+uv publish "dist/remote_server_mcp-0.2.0*"
+uv publish "dist/disk_health_mcp-0.2.0*"
+unset UV_PUBLISH_TOKEN
+```
+
+- Publish sequentially and **stop at the first failure**. A partial release is recoverable;
+  a version that half-exists on PyPI and cannot be installed is not.
+- If a run fails after some files were accepted, retry with
+  `--check-url https://pypi.org/simple/` so already-uploaded files are skipped instead of
+  rejected as duplicates.
+- `--token "$UV_PUBLISH_TOKEN"` is equivalent; `uv` derives the username from the token, so
+  no `~/.pypirc` is required.
+- The token is a publishing credential. Never write it into the repository, a
+  `pyproject.toml`, or the runtime `.env` files used by the MCP servers.
+- Revoke the bootstrap token in the UI as soon as all three uploads succeed.
+
+### 4. Verify the release
+
+```bash
+uvx remote-server-mcp --help
+uvx disk-health-mcp --help
+```
+
+Both must resolve `server-management-lib` from PyPI instead of a workspace checkout. Then
+re-run the live smoke checks in
+[section 6.3 of the plan](modernization-plan.md#63-live-smoke-checks-read-only).
+
+A published version cannot be replaced. If an artifact is wrong, yank the files in the PyPI
+UI and ship `0.2.1`; do not delete and re-upload a version that someone may already have
+installed.
+
+### 5. Trusted publishing for later releases
+
+Long-lived tokens are avoidable: PyPI can trust one specific workflow in a public repository
+through OIDC. This is the recommended steady state; keep manual tokens only as the bootstrap.
+
+In the PyPI project settings of **each** project: *Publishing* → *Add a publisher*
+(*pending publisher* while the project does not exist yet), configured as:
+
+| Field | Value |
+|---|---|
+| PyPI Project Name | `server-management-lib`, `remote-server-mcp`, `disk-health-mcp` |
+| Owner | `elmuz` |
+| Repository name | `server-mcp` |
+| Workflow name | `publish.yml` |
+| Environment name | `pypi` |
+
+Then add `.github/workflows/publish.yml`:
+
+```yaml
+name: Publish
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    environment: pypi          # must match the environment name registered on PyPI
+    permissions:
+      id-token: write          # OIDC token that PyPI exchanges for an upload token
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - run: uv build --all-packages
+      - run: uv publish --trusted-publishing always "dist/server_management_lib-*"
+      - run: uv publish --trusted-publishing always "dist/remote_server_mcp-*"
+      - run: uv publish --trusted-publishing always "dist/disk_health_mcp-*"
+```
+
+A tag push then publishes in dependency order with no secret stored anywhere. Trusted
+publishing also lets PyPI record signed attestations for each file; `uv` uploads them
+automatically and `--no-attestations` opts out.
+
+`workflow_dispatch` exists so an already-tagged release (such as `v0.2.0`, tagged before the
+workflow landed) can be published through CI without moving a published tag. Never retag a
+released version: bump the version instead.
+
+If the projects were created by token upload first, skip the *pending* publisher and register
+the same configuration from the existing project's *Publishing* page.
 
 ## Versioning
 
@@ -129,11 +241,15 @@ uv run --project /path/to/server-mcp --package remote-server-mcp remote-server-m
 
 ## Checklist
 
-- [ ] Tests and hooks pass
-- [ ] `CHANGELOG.md` updated
+- [ ] Tests and hooks pass (`env -u VIRTUAL_ENV pre-commit run --all-files`)
+- [ ] `CHANGELOG.md` updated, `[Unreleased]` emptied into a dated release section
 - [ ] Version consistent in the four `pyproject.toml` files (three packages plus the
       workspace root), the three `__version__` values and the newest `CHANGELOG.md` section
 - [ ] `uv lock` regenerated
-- [ ] Tag created and pushed
-- [ ] Library published before the apps
+- [ ] Tag created and pushed, signed and annotated (`git tag -s`)
+- [ ] `git describe --tags --exact-match` on the release commit prints the tag
+- [ ] `rm -rf dist && uv build --all-packages`, then `uv publish --dry-run "dist/*"`
+- [ ] Library published before the apps, uploads not interleaved
+- [ ] `uvx remote-server-mcp --help` and `uvx disk-health-mcp --help` resolve from PyPI
+- [ ] Live smoke checks re-run with the installed packages
 - [ ] Old repositories archived with a pointer to the monorepo
