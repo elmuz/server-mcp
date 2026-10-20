@@ -5,13 +5,13 @@ modernization backlog, the live-deployment findings from the `catafalco` host, a
 2026-10-19 architecture/security review (`docs/next-phase-plan.md` is merged here and
 removed). Earlier snapshots remain in git history.
 
-- **Status:** all P0, P1 and P2 items are complete and the release is tagged: `v0.2.0` is a
-  signed tag on `9901974`, pushed to `origin`, with `dist/` built from `3c5f307` and verified
-  against the tree. The version is **`0.2.0`** because `0.2.0` was never previously tagged or
-  published; the `[Unreleased]` changelog entries are folded into
-  `## [0.2.0] - 2026-10-20`. Remaining: publish to PyPI (`server-management-lib` first), then
-  re-run the live smoke checks in 6.3.
-- **Last updated:** 2026-10-20 (tag `v0.2.0` created and pushed)
+- **Status:** the release is out. `v0.2.0` is a signed tag on `9901974` pushed to `origin`,
+  and all three packages are published on PyPI at `0.2.0` (`uvx remote-server-mcp` and
+  `uvx disk-health-mcp` install from the index). The version is **`0.2.0`** because `0.2.0`
+  had never been tagged or published before; the `[Unreleased]` changelog entries are folded
+  into `## [0.2.0] - 2026-10-20`. Remaining: register the PyPI trusted publishers and re-run
+  the live smoke checks in 6.3 against the installed packages.
+- **Last updated:** 2026-10-20 (`0.2.0` published on PyPI)
 - **Provenance:** every finding below was re-verified against `81733d2` before merging;
   findings already fixed are marked `[x]` and kept only as history.
 - **Target deployment:** `catafalco` (Ubuntu home server/NAS; Docker services under `/srv`)
@@ -758,9 +758,12 @@ blocked the release.
       of `3c5f307`), pushed to `origin`. The release artifacts in `dist/` were rebuilt from
       `3c5f307` and diffed file-by-file against the three source trees before tagging; the
       documentation-only commit does not change them.
-- [ ] **Publish to PyPI.** `server-management-lib` first, then the two apps. PyPI currently
-      returns 404 for all three names, so `uvx remote-server-mcp` does not work; only
-      `uv run` from the workspace does.
+- [x] **Publish to PyPI.** `server-management-lib` went first, then `remote-server-mcp` and
+      `disk-health-mcp`. All three now answer on the PyPI JSON API at `0.2.0` with a wheel
+      and an sdist, and `uvx remote-server-mcp --help` / `uvx disk-health-mcp --help`
+      install from the index instead of the workspace. The bootstrap account token was used
+      once for this upload; `.github/workflows/publish.yml` now publishes through PyPI
+      trusted publishing, so later releases store no token.
 - [x] **Archive the old repositories.** `remote-server-mcp`, `disk-health-mcp` and
       `server-management-lib` are archived on GitHub.
 - [x] **Make the CI badge live.** The README badge URL resolves and the workflow is green.

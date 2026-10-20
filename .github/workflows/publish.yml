@@ -1,0 +1,89 @@
+name: Publish
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing tag to publish (for example v0.2.0)"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+# Never let two releases race each other on the same index.
+concurrency:
+  group: publish
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    # Must match the "Environment name" registered as a trusted publisher on PyPI.
+    environment: pypi
+    permissions:
+      contents: read
+      id-token: write # OIDC token that PyPI exchanges for a short-lived upload token
+    steps:
+      - name: Check out the release tag
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+
+      - name: Verify the tag matches every package version
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
+        run: |
+          set -eu
+          tag="${INPUT_TAG:-${GITHUB_REF_NAME}}"
+          version="$(python3 -c 'import pathlib, tomllib; print(tomllib.loads(pathlib.Path("pyproject.toml").read_text())["project"]["version"])')"
+          status=0
+          for pyproject in pyproject.toml \
+            packages/server-management-lib/pyproject.toml \
+            apps/remote-server-mcp/pyproject.toml \
+            apps/disk-health-mcp/pyproject.toml; do
+            got="$(python3 -c 'import pathlib, sys, tomllib; print(tomllib.loads(pathlib.Path(sys.argv[1]).read_text())["project"]["version"])' "$pyproject")"
+            echo "${pyproject}: ${got}"
+            if [ "${got}" != "${version}" ]; then
+              echo "::error file=${pyproject}::declares ${got}, expected ${version}"
+              status=1
+            fi
+          done
+          if [ "${tag}" != "v${version}" ]; then
+            echo "::error::tag ${tag} does not match the checked-out version ${version}"
+            status=1
+          fi
+          exit "${status}"
+
+      - name: Install the workspace
+        run: uv sync --locked --all-packages --all-extras
+
+      # PyPI uploads cannot be replaced, so the release gate runs the suite itself
+      # instead of trusting a parallel CI run.
+      - name: Lint, type check and test
+        run: |
+          uv run ruff check .
+          uv run ruff format --check .
+          uv run ty check
+          uv run --directory packages/server-management-lib pytest -q
+          uv run --directory apps/remote-server-mcp pytest -q
+          uv run --directory apps/disk-health-mcp pytest -q
+
+      - name: Build
+        run: uv build --all-packages
+
+      # Dependency order matters: the apps require server-management-lib>=0.2,<0.3.
+      # --check-url makes a re-run skip files that already uploaded.
+      - name: Publish server-management-lib
+        run: uv publish --trusted-publishing always --check-url https://pypi.org/simple/ "dist/server_management_lib-*"
+
+      - name: Publish remote-server-mcp
+        run: uv publish --trusted-publishing always --check-url https://pypi.org/simple/ "dist/remote_server_mcp-*"
+
+      - name: Publish disk-health-mcp
+        run: uv publish --trusted-publishing always --check-url https://pypi.org/simple/ "dist/disk_health_mcp-*"

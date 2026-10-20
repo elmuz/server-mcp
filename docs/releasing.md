@@ -90,7 +90,9 @@ before its library resolves to nothing and cannot be installed.
 | `remote-server-mcp` | `apps/remote-server-mcp` |
 | `disk-health-mcp` | `apps/disk-health-mcp` |
 
-Until a release is on PyPI, install from the workspace as described in
+`0.2.0` is published on PyPI, so steps 1–4 are the one-off bootstrap that was used for it
+and §5 is the steady state for every later release. Released versions install with `uvx`;
+an unreleased commit still runs from the workspace as described in
 [harnesses.md](harnesses.md):
 
 ```bash
@@ -126,7 +128,7 @@ of a new project needs one of two paths:
 - **A pending trusted publisher** — no token at all, described in step 5. Add it before the
   first upload if you want the very first release to go through CI.
 
-### 3. Publish `0.2.0` with an account-scoped token
+### 3. First upload of a new project (account-scoped token)
 
 In the PyPI web UI: *Account settings* → *API tokens* → *Add API token*, scope *Entire
 account (all projects)*, named for example `server-mcp 0.2.0 bootstrap`. The token is
@@ -168,11 +170,13 @@ installed.
 
 ### 5. Trusted publishing for later releases
 
-Long-lived tokens are avoidable: PyPI can trust one specific workflow in a public repository
-through OIDC. This is the recommended steady state; keep manual tokens only as the bootstrap.
+`0.2.0` needed a bootstrap token because the projects did not exist yet. From now on no
+token has to exist at all: PyPI trusts one specific workflow in a public repository through
+OIDC, and [`.github/workflows/publish.yml`](../.github/workflows/publish.yml) implements it.
+Keep the manual path only as a fallback (§6).
 
-In the PyPI project settings of **each** project: *Publishing* → *Add a publisher*
-(*pending publisher* while the project does not exist yet), configured as:
+**Register the publisher** (once per project) in PyPI → the project → *Publishing* → *Add a
+publisher*, configured as:
 
 | Field | Value |
 |---|---|
@@ -182,44 +186,47 @@ In the PyPI project settings of **each** project: *Publishing* → *Add a publis
 | Workflow name | `publish.yml` |
 | Environment name | `pypi` |
 
-Then add `.github/workflows/publish.yml`:
+**Create the environment** in GitHub: *Settings* → *Environments* → *New environment* named
+`pypi`. It must match the PyPI configuration and the `environment:` key in the workflow.
+Adding *Required reviewers* makes every publish wait for a manual approval, which is the
+cheapest guard against an accidental release tag.
 
-```yaml
-name: Publish
+**Trigger the workflow** — both paths end in the same job:
 
-on:
-  push:
-    tags: ["v*"]
-  workflow_dispatch:
+- push a release tag: `git tag -s v0.2.1 -m "v0.2.1" && git push origin v0.2.1`;
+- or publish a tag that already exists: *Actions* → *Publish* → *Run workflow*, branch
+  `main`, `tag` = `v0.2.0`.
 
-permissions:
-  contents: read
+The job checks out the tag, verifies that the tag equals the version in all four
+`pyproject.toml` files (so a mistyped tag fails before any upload), runs the test suite,
+then publishes the library and the two apps in that order with `--check-url` so a re-run
+skips files that were already uploaded.
 
-jobs:
-  publish:
-    runs-on: ubuntu-latest
-    environment: pypi          # must match the environment name registered on PyPI
-    permissions:
-      id-token: write          # OIDC token that PyPI exchanges for an upload token
-    steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v6
-      - run: uv build --all-packages
-      - run: uv publish --trusted-publishing always "dist/server_management_lib-*"
-      - run: uv publish --trusted-publishing always "dist/remote_server_mcp-*"
-      - run: uv publish --trusted-publishing always "dist/disk_health_mcp-*"
-```
-
-A tag push then publishes in dependency order with no secret stored anywhere. Trusted
-publishing also lets PyPI record signed attestations for each file; `uv` uploads them
-automatically and `--no-attestations` opts out.
-
-`workflow_dispatch` exists so an already-tagged release (such as `v0.2.0`, tagged before the
-workflow landed) can be published through CI without moving a published tag. Never retag a
+**No token is stored.** The job requests an OIDC token (`id-token: write`) and PyPI returns
+an upload token scoped to that single run; `uv publish --trusted-publishing always` uses it
+and attaches signed attestations automatically (`--no-attestations` opts out). Never retag a
 released version: bump the version instead.
 
-If the projects were created by token upload first, skip the *pending* publisher and register
-the same configuration from the existing project's *Publishing* page.
+### 6. Fallback: publishing with a stored token
+
+Use this when trusted publishing is unavailable (private repository, fork, local machine).
+Now that the projects exist, mint a **project-scoped** token per package — PyPI → the
+project → *Settings* → *API tokens* → *Add API token*, scope = that single project.
+
+Store it where it cannot leak, in order of preference:
+
+1. **GitHub environment secret** `PYPI_API_TOKEN` on the `pypi` environment, passed to the
+   publish step as `--token "$UV_PUBLISH_TOKEN"` (or
+   `UV_PUBLISH_TOKEN: ${{ secrets.PYPI_API_TOKEN }}`) and **without**
+   `--trusted-publishing`. Environment secrets are not exposed to pull-request runs from
+   forks and can require approval.
+2. **A local shell only**, never a file: `read -rs UV_PUBLISH_TOKEN && export
+   UV_PUBLISH_TOKEN`, as in step 3.
+3. `~/.pypirc` with mode `0600`, if a tool insists. Never a repository file, a
+   `pyproject.toml`, or the MCP runtime `.env` files.
+
+Delete the account-scoped bootstrap token from step 3 once trusted publishing works: an
+account-wide token can overwrite every project you own.
 
 ## Versioning
 

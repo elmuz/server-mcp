@@ -5,8 +5,9 @@ clients that cannot launch a process; see
 [configuration.md](configuration.md#transport). The snippets below assume the repository is
 at `/path/to/server-mcp`; replace that path and the config paths.
 
-For an installed release, replace the `uv run --project ... --package ...` command with
-`uvx remote-server-mcp` or `uvx disk-health-mcp` once the packages are on PyPI.
+For an installed release (0.2.0 and later is on PyPI), replace the
+`uv run --project ... --package ...` command with `uvx remote-server-mcp` or
+`uvx disk-health-mcp`; see [releasing.md](releasing.md).
 
 ## Generic stdio entry
 
