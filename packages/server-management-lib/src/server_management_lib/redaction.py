@@ -63,15 +63,36 @@ def redact_env_content(text: str) -> str:
 # General secret redaction (service config files and host status/log output)
 # ============================================================================
 
-# Key names whose values are secrets. Matching is on the key itself, so
-# ``POSTGRES_PASSWORD``, ``GITHUB_TOKEN`` and ``api_key`` are covered without
-# treating unrelated ``*.key`` file names as secrets (that policy lives in
-# ``security.BLOCKED_PATH_*``).
-_SENSITIVE_KEY_WORD = re.compile(
-    r"(?:password|passwd|pwd|secret|token|api[_-]?key|private[_-]?key|"
-    r"authorization|access[_-]?key|client[_-]?secret|credential)",
-    re.IGNORECASE,
+# Key names whose values are secrets. Keys are split into words on separators
+# (``_``, ``-``, ``.``, ...) and each word is checked, so ``POSTGRES_PASSWORD``,
+# ``GITHUB_TOKEN``, ``api_key``, ``db-pass`` and a bare INI ``pass`` are covered
+# without treating unrelated ``*.key`` file names as secrets (that policy lives
+# in ``security.BLOCKED_PATH_*``).
+#
+# Short generic names are matched as word suffixes rather than substrings:
+# ``dbpass``/``smtpPass`` are credentials, while ``tokenizer`` and ``keyboard``
+# are not. The trade-off is deliberate: ``bypass`` is masked too, because a
+# spurious mask is harmless and a missed credential is not.
+_SENSITIVE_KEY_WORDS: tuple[str, ...] = (
+    "auth",
+    "authorization",
+    "credential",
+    "credentials",
+    "key",
+    "pass",
+    "passphrase",
+    "passwd",
+    "password",
+    "pw",
+    "pwd",
+    "secret",
+    "secrets",
+    "token",
+    "tokens",
 )
+
+# Word separators used when normalizing a key (``db_pass`` -> ``db``, ``pass``).
+_KEY_SEPARATOR = re.compile(r"[^A-Za-z0-9]+")
 
 # JSON object member: "key": "value" or "key": value
 _JSON_MEMBER = re.compile(
@@ -108,10 +129,23 @@ _URL_PASSWORD = re.compile(
 )
 
 
+def _key_words(key: str) -> list[str]:
+    """Split a normalized key into lowercase words on non-alphanumerics."""
+    return [word.lower() for word in _KEY_SEPARATOR.split(key) if word]
+
+
 def _is_sensitive_key(key: str) -> bool:
-    """Return True when an assignment key names a credential."""
-    cleaned = key.strip().strip("\"'").lstrip("-")
-    return bool(cleaned) and _SENSITIVE_KEY_WORD.search(cleaned) is not None
+    """Return True when an assignment key names a credential.
+
+    The key is normalized (quotes and leading CLI dashes removed) and split
+    into words. A word matches when it equals a sensitive name or ends with
+    one, so separators and concatenation (``api_key``, ``apikey``,
+    ``db-pass``, ``dbpass``) are all recognized.
+    """
+    cleaned = key.strip().strip("\"'").lstrip("-").strip()
+    if not cleaned:
+        return False
+    return any(word.endswith(_SENSITIVE_KEY_WORDS) for word in _key_words(cleaned))
 
 
 def _redact_line(line: str) -> str:

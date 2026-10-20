@@ -1,5 +1,7 @@
 """Tests for the file-content redaction helpers."""
 
+import pytest
+
 from server_management_lib.redaction import REDACTED_VALUE, redact_env_content
 
 
@@ -130,3 +132,67 @@ class TestRedactSecrets:
         text = "# token=comment\nmonkey.txt is readable\n"
 
         assert redact_secrets(text) == text
+
+    def test_ini_short_password_key_is_masked(self):
+        from server_management_lib.redaction import redact_secrets
+
+        text = "[mail]\npass = hunter2\nuser = bob\n"
+
+        result = redact_secrets(text)
+
+        assert "hunter2" not in result
+        assert "[mail]" in result
+        assert "user = bob" in result
+        assert result.splitlines()[1] == f"pass = {REDACTED_VALUE}"
+
+    @pytest.mark.parametrize(
+        "key",
+        [
+            "pass",
+            "PASS",
+            "Pass",
+            "pw",
+            "pwd",
+            "passphrase",
+            "passwd",
+            "db_pass",
+            "db-pass",
+            "dbpass",
+            "smtpPass",
+            "api_key",
+            "apikey",
+            "apiKey",
+            "auth_token",
+            "authToken",
+            "secret_key",
+            "client_secret",
+            "credentials",
+        ],
+    )
+    def test_credential_key_spellings_are_masked(self, key):
+        from server_management_lib.redaction import redact_secrets
+
+        result = redact_secrets(f"{key} = hunter2")
+
+        assert "hunter2" not in result, f"leaked value for key {key!r}: {result}"
+        assert result == f"{key} = {REDACTED_VALUE}"
+
+    @pytest.mark.parametrize(
+        "key",
+        ["user", "username", "host", "port", "tokenizer", "keyboard", "mode"],
+    )
+    def test_non_credential_keys_stay_readable(self, key):
+        from server_management_lib.redaction import redact_secrets
+
+        assert redact_secrets(f"{key} = visible") == f"{key} = visible"
+
+    def test_short_password_key_is_masked_in_yaml_and_json(self):
+        from server_management_lib.redaction import redact_secrets
+
+        yaml_result = redact_secrets("  pass: hunter2\n")
+        json_result = redact_secrets('{"pass": "hunter2"}')
+
+        assert "hunter2" not in yaml_result
+        assert f"pass: {REDACTED_VALUE}" in yaml_result
+        assert "hunter2" not in json_result
+        assert f'"pass": "{REDACTED_VALUE}"' in json_result

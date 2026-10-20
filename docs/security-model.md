@@ -103,8 +103,11 @@ and blank lines are preserved.
 Redaction does not stop at dotenv files. Other readable service files pass through a
 general key/value redactor before they are returned: YAML, JSON, INI and command-line
 shapes whose key names a password, secret, token, API/private key or authorization value
-are masked while the key and file structure stay readable. `Authorization: Bearer ...`
-headers, JWT-shaped values and credentials embedded in URLs are masked as well.
+are masked while the key and file structure stay readable. Keys are split on separators
+and matched per word, so `POSTGRES_PASSWORD`, `api_key`, `apiKey`, `db-pass`, `dbpass`
+and a bare INI `pass` or `pw` are all recognized, while `tokenizer` and `keyboard` stay
+readable. `Authorization: Bearer ...` headers, JWT-shaped values and credentials embedded
+in URLs are masked as well.
 `systemctl status` and `journalctl -u` output is passed through the same redactor, because
 `--full` command lines and journal tails can contain tokens.
 

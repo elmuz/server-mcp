@@ -560,6 +560,14 @@ rather than adding new surface.
       output. The `BLOCKED_*` policy still refuses real credential stores. Tests cover a
       compose password, JSON token field, bearer/JWT values, `systemctl` command lines and
       URL credentials.
+- **Live finding (fixed, unreleased):** the key matcher was a substring search over a
+      fixed word list, so short spellings leaked. An INI file such as
+      `[section]` / `pass = XXXX` was returned verbatim, and so were `db_pass`, `pw`,
+      `passphrase` and `credential`-only keys. Keys are now normalized and split on
+      separators, and each word is matched as an exact name or suffix, so `pass`, `pw`,
+      `db_pass`, `dbpass`, `apiKey` and `POSTGRES_PASSWORD` are masked while `tokenizer`
+      and `keyboard` stay readable. Tests cover the reported INI shape end to end through
+      `get_service_file` and the key spellings at the redactor level.
 
 ### 3.3 P2 — modernization and polish
 

@@ -284,7 +284,8 @@ directory or add its name to `security.allowed_containers`.
   credential stores and secret-named paths with a specific sensitive-file error. Matching
   is per path component and extension, so `monkey.txt` and `tokenizer.json` are readable.
   Other readable config files (YAML/JSON/INI/command-line shapes) are passed through a
-  secret redactor: password/secret/token/API-key/authorization values, bearer headers,
-  JWTs and URL passwords are replaced with `***` while keys and structure stay readable.
+  secret redactor: password/secret/token/API-key/authorization values (including short
+  spellings such as `pass`, `pw`, `passphrase` and `db_pass`), bearer headers, JWTs and
+  URL passwords are replaced with `***` while keys and structure stay readable.
   `get_host_service_status` and `get_host_service_logs` apply the same redaction because
   `systemctl status --full` and journal tails can contain command-line tokens.

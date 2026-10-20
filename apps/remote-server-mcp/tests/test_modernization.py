@@ -405,6 +405,20 @@ class TestOperationalHardening:
         assert "hunter2" not in result
         assert "Sensitive values are masked" in result
 
+    def test_ini_secrets_are_redacted(self, patched):
+        patched.read_remote_file.return_value = (
+            "[mail]\npass = hunter2\nuser = bob\ndb_pass = s3cret\n"
+        )
+
+        result = asyncio.run(server.get_service_file("app", "msmtp.ini"))
+
+        assert "pass = ***" in result
+        assert "db_pass = ***" in result
+        assert "user = bob" in result
+        assert "hunter2" not in result
+        assert "s3cret" not in result
+        assert "Sensitive values are masked" in result
+
     def test_host_status_output_is_redacted(self, patched):
         patched.execute_safe_command.return_value = (
             "Command: /usr/bin/app --token tok_123\n"
