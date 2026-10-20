@@ -5,12 +5,13 @@ modernization backlog, the live-deployment findings from the `catafalco` host, a
 2026-10-19 architecture/security review (`docs/next-phase-plan.md` is merged here and
 removed). Earlier snapshots remain in git history.
 
-- **Status:** `81733d2` is pushed to `origin/main` and green in remote CI, and all P0, P1
-  and P2 items are complete in the worktree. The release version is **resolved: the current
-  tree is `0.2.0`**, because `0.2.0` was never tagged or published; the `[Unreleased]`
-  changelog entries are folded into `## [0.2.0] - 2026-10-20`. Remaining: push the release
-  commit, tag `v0.2.0`, publish to PyPI, then re-run the live smoke checks in 6.3.
-- **Last updated:** 2026-10-20 (release version decision)
+- **Status:** `3c5f307` is pushed to `origin/main` and all P0, P1 and P2 items are complete.
+  The release version is **resolved: the current tree is `0.2.0`**, because `0.2.0` was never
+  tagged or published; the `[Unreleased]` changelog entries are folded into
+  `## [0.2.0] - 2026-10-20`. The release build was rebuilt from `3c5f307` and verified
+  file-by-file against the tree. Remaining: tag `v0.2.0`, publish to PyPI, then re-run the
+  live smoke checks in 6.3.
+- **Last updated:** 2026-10-20 (release build re-verified against `3c5f307`)
 - **Provenance:** every finding below was re-verified against `81733d2` before merging;
   findings already fixed are marked `[x]` and kept only as history.
 - **Target deployment:** `catafalco` (Ubuntu home server/NAS; Docker services under `/srv`)
