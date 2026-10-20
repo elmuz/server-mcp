@@ -767,8 +767,9 @@ blocked the release.
 - [x] **Archive the old repositories.** `remote-server-mcp`, `disk-health-mcp` and
       `server-management-lib` are archived on GitHub.
 - [x] **Make the CI badge live.** The README badge URL resolves and the workflow is green.
-- **Prerequisite:** `gh` is not installed in the development environment. Use `git` to push
-  the tag and the GitHub web UI/API for any remaining repository settings.
+- **Prerequisite:** `gh` was missing during the migration and is now installed and
+  authenticated (`gh auth status`), so `gh workflow run`, `gh run watch` and
+  `gh api repos/elmuz/server-mcp/environments` are available for the release steps.
 
 ### 3.5 Cross-repo prerequisites (`~/projects/catafalco`)
 
