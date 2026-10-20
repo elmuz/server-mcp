@@ -175,6 +175,10 @@ token has to exist at all: PyPI trusts one specific workflow in a public reposit
 OIDC, and [`.github/workflows/publish.yml`](../.github/workflows/publish.yml) implements it.
 Keep the manual path only as a fallback (§6).
 
+**Verified with `v0.2.1`** (run `39507146796`): pushing the signed tag was the only manual
+step, the job passed the tag/version check, tests and all three uploads, and no
+`UV_PUBLISH_TOKEN` existed on the runner or in the repository.
+
 **Register the publisher** (once per project) in PyPI → the project → *Publishing* → *Add a
 publisher*, configured as:
 
@@ -230,7 +234,7 @@ account-wide token can overwrite every project you own.
 
 ## Versioning
 
-- The three packages share the suite version (`0.2.0`). The workspace root
+- The three packages share the suite version (`0.2.1`). The workspace root
   `pyproject.toml` carries the same version for `uv` output and should not drift.
 - **`0.2.0` is the first published release.** It was never tagged when the monorepo
   consolidation landed (`50de082`, commit message `… (v0.2.0)`), so the P0/P1/P2
@@ -243,8 +247,14 @@ account-wide token can overwrite every project you own.
 - Tag releases as `v0.2.0`, `v0.2.1`, ... The next change after this release gets a new
   version: `v0.2.1` for fixes, `v0.3.0` for features or breaking config/tool changes while
   the suite is pre-1.0.
-- Keep [CHANGELOG.md](../CHANGELOG.md) up to date. `## [0.2.0]` is dated with the release
-  date and stays a released section; new work goes under `## [Unreleased]`.
+- **The `v` belongs to the tag, not to the version.** The tag is `v0.2.1` and the packaged
+  version is `0.2.1`; PEP 440 does not allow a `v` prefix in `project.version`, so `0.2.1`
+  is what `pip`/`uvx` resolve and what PyPI lists. The workflow depends on both forms: the
+  `on.push.tags` filter matches `v*` only, and the guard compares the tag with
+  `v${version}`. A bare `0.2.1` tag would neither trigger the workflow nor pass the check.
+- Keep [CHANGELOG.md](../CHANGELOG.md) up to date. Released sections (`## [0.2.0]`,
+  `## [0.2.1]`) are dated with their release date and stay unchanged; new work goes under
+  `## [Unreleased]`.
 
 ## Checklist
 

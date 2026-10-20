@@ -5,13 +5,15 @@ modernization backlog, the live-deployment findings from the `catafalco` host, a
 2026-10-19 architecture/security review (`docs/next-phase-plan.md` is merged here and
 removed). Earlier snapshots remain in git history.
 
-- **Status:** the release is out. `v0.2.0` is a signed tag on `9901974` pushed to `origin`,
-  and all three packages are published on PyPI at `0.2.0` (`uvx remote-server-mcp` and
-  `uvx disk-health-mcp` install from the index). The version is **`0.2.0`** because `0.2.0`
-  had never been tagged or published before; the `[Unreleased]` changelog entries are folded
-  into `## [0.2.0] - 2026-10-20`. Remaining: register the PyPI trusted publishers and re-run
-  the live smoke checks in 6.3 against the installed packages.
-- **Last updated:** 2026-10-20 (`0.2.0` published on PyPI)
+- **Status:** the releases are out. `v0.2.0` (signed, on `9901974`) and `v0.2.1` (signed, on
+  `2a5de15`) are tags pushed to `origin`, and all three packages are published on PyPI at
+  both versions; `uvx remote-server-mcp` and `uvx disk-health-mcp` install from the index.
+  `0.2.0` folded the pre-release remediation into the first published version; `0.2.1` ships
+  the stale-SMART and short-credential-key fixes. `v0.2.1` was published by
+  `.github/workflows/publish.yml` through PyPI trusted publishing with no stored token
+  (run `39507146796`), so the steady-state release path is verified. Remaining: re-run the
+  live smoke checks in 6.3 against the installed packages.
+- **Last updated:** 2026-10-21 (`0.2.1` published to PyPI by CI, trusted publishing verified)
 - **Provenance:** every finding below was re-verified against `81733d2` before merging;
   findings already fixed are marked `[x]` and kept only as history.
 - **Target deployment:** `catafalco` (Ubuntu home server/NAS; Docker services under `/srv`)
