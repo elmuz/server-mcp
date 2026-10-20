@@ -6,6 +6,15 @@ versioning.
 
 ## [Unreleased]
 
+### Fixed
+
+- `disk-health-mcp` no longer presents stale or mismatched InfluxDB SMART data as current
+  health. Samples older than two 5-minute poll intervals are marked stale instead of green,
+  recent non-success polls are reported, and the stored serial/model/sample time are echoed
+  alongside the live `lsblk` identity when available. A serial mismatch names both disks and
+  refuses to call the requested device healthy. `get_nvme_health` and the overview in
+  `get_full_disk_report` apply the same rules.
+
 ## [0.2.0] - 2026-10-20
 
 This is the first published release. `0.2.0` was never tagged or published when the monorepo

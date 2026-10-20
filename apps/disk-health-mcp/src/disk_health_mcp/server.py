@@ -87,7 +87,26 @@ EXIT_CODE_PATTERN = re.compile(r"⚠️ Exit code:\s*(-?\d+)")
 # enough to find the last successful sample instead of a 10-minute window that
 # a 5-minute poll plus one sleep cycle can miss.
 SMART_LOOKBACK = "24 hours"
+# Telegraf's smart plugin polls every 5 minutes. Two missed polls mean the newest
+# successful sample is no longer current health data.
+SMART_POLL_INTERVAL_SECONDS = 5 * 60
+SMART_STALE_AFTER_SECONDS = 2 * SMART_POLL_INTERVAL_SECONDS
+SMART_FAILURE_LIMIT = 100
 INFLUX_SUCCESS_PREFIX = "✅ Query successful"
+
+
+class _InfluxSample(dict):
+    """A smart_device row plus recent non-success polls for the same device.
+
+    Subclassing ``dict`` keeps the row shape (and equality) used by callers while
+    carrying failure evidence without adding a synthetic database column.
+    """
+
+    failed_polls: list[dict]
+
+    def __init__(self, row: dict | None = None, failed_polls: list[dict] | None = None):
+        super().__init__(row or {})
+        self.failed_polls = list(failed_polls or [])
 
 
 def _parse_influx_rows(result: str) -> list[dict]:
@@ -150,6 +169,162 @@ def _format_sample_age(row: dict) -> str | None:
     else:
         age = f"{seconds // 86400} days"
     return f"{age} ago ({timestamp.strftime('%Y-%m-%dT%H:%M:%SZ')})"
+
+
+def _sample_age_seconds(row: dict) -> int | None:
+    """Return the sample age in seconds, or None when its time is unusable."""
+    timestamp = _parse_influx_time(row.get("time"))
+    if timestamp is None:
+        return None
+    return max(0, int((datetime.now(UTC) - timestamp).total_seconds()))
+
+
+def _identity_value(value: object) -> str:
+    """Normalize a model/serial value, treating placeholders as missing."""
+    if value is None:
+        return ""
+    text = str(value).strip()
+    if text.casefold() in {"", "unknown", "n/a", "none", "null"}:
+        return ""
+    return text
+
+
+def _same_serial(left: str, right: str) -> bool:
+    return left.strip().casefold() == right.strip().casefold()
+
+
+def _exit_status(value: object) -> int | None:
+    try:
+        return int(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
+
+
+def _format_failed_polls(failed_polls: list[dict] | None, *, prefix: str = "  ") -> str:
+    """Describe recent non-success polls instead of hiding them."""
+    failures = [row for row in (failed_polls or []) if isinstance(row, dict)]
+    if not failures:
+        return f"{prefix}Recent failed polls: none in the last {SMART_LOOKBACK}."
+
+    def sort_key(row: dict) -> datetime:
+        return _parse_influx_time(row.get("time")) or datetime.min.replace(tzinfo=UTC)
+
+    latest = max(failures, key=sort_key)
+    latest_status = _exit_status(latest.get("exit_status"))
+    statuses = sorted(
+        status
+        for row in failures
+        if (status := _exit_status(row.get("exit_status"))) is not None
+    )
+    latest_age = _format_sample_age(latest) or "timestamp unavailable"
+    count = len(failures)
+    count_text = f"at least {count}" if count >= SMART_FAILURE_LIMIT else str(count)
+    suffix = " (standby/skipped)" if latest_status == 2 else ""
+    status_text = "unknown" if latest_status is None else str(latest_status)
+    statuses_text = ", ".join(str(status) for status in statuses) or "unknown"
+    return (
+        f"{prefix}⚠️ Recent failed polls: {count_text} non-success SMART poll(s) "
+        f"in the last {SMART_LOOKBACK}; latest {latest_age} "
+        f"(exit_status={status_text}{suffix}; seen: {statuses_text})."
+    )
+
+
+_UNSET = object()
+
+
+def _assess_influxdb_sample(
+    row: dict,
+    device: str | None = None,
+    *,
+    failed_polls: list[dict] | None = None,
+    live_device: object = _UNSET,
+    require_live_identity: bool = False,
+) -> dict:
+    """Assess freshness, identity and poll failures for one InfluxDB sample."""
+    requested = device or str(row.get("device") or "unknown")
+    sample_serial = _identity_value(row.get("serial_no"))
+    sample_model = _identity_value(row.get("model")) or "unknown"
+    age_seconds = _sample_age_seconds(row)
+    stale = age_seconds is None or age_seconds > SMART_STALE_AFTER_SECONDS
+    failures = [item for item in (failed_polls or []) if isinstance(item, dict)]
+    health_ok = row.get("health_ok")
+
+    identity_checked = live_device is not _UNSET
+    live = live_device if isinstance(live_device, dict) else None
+    live_name = _identity_value(live.get("name")) if live else ""
+    live_model = _identity_value(live.get("model")) if live else ""
+    live_serial = _identity_value(live.get("serial")) if live else ""
+
+    if not identity_checked:
+        identity_state = "unchecked"
+    elif live is None:
+        identity_state = "unresolved"
+    elif not sample_serial or not live_serial:
+        identity_state = "unverified"
+    elif _same_serial(sample_serial, live_serial):
+        identity_state = "verified"
+    else:
+        identity_state = "mismatch"
+
+    statuses = [_exit_status(item.get("exit_status")) for item in failures]
+    non_standby_failure = any(status not in (None, 2) for status in statuses)
+
+    if identity_state == "mismatch":
+        status = "identity_mismatch"
+        severity = "critical"
+        emoji = "🔴"
+        health_text = "UNKNOWN — sample belongs to a different disk"
+    elif health_ok is False:
+        status = "failed"
+        severity = "critical"
+        emoji = "🔴"
+        health_text = "FAILED"
+    elif stale:
+        status = "stale"
+        severity = "critical" if non_standby_failure else "warning"
+        emoji = "🔴" if severity == "critical" else "🟡"
+        health_text = (
+            "STALE — last sample PASSED, not current"
+            if health_ok is True
+            else "STALE — last sample UNKNOWN, not current"
+        )
+    elif identity_state == "unverified" or (
+        identity_state == "unresolved" and require_live_identity
+    ):
+        status = "identity_unverified"
+        severity = "warning"
+        emoji = "🟡"
+        health_text = "UNVERIFIED — serial cannot be matched to the requested device"
+    elif health_ok is True:
+        status = "ok"
+        severity = "ok"
+        emoji = "✅"
+        health_text = "PASSED"
+    else:
+        status = "unknown"
+        severity = "warning"
+        emoji = "⚠️"
+        health_text = "UNKNOWN"
+
+    return {
+        "device": requested,
+        "sample_device": row.get("device", "unknown"),
+        "sample_model": sample_model,
+        "sample_serial": sample_serial,
+        "sample_timestamp": row.get("time"),
+        "age_seconds": age_seconds,
+        "stale": stale,
+        "failed_polls": failures,
+        "identity_checked": identity_checked,
+        "identity_state": identity_state,
+        "live_device_name": live_name,
+        "live_device_model": live_model,
+        "live_device_serial": live_serial,
+        "status": status,
+        "severity": severity,
+        "emoji": emoji,
+        "health_text": health_text,
+    }
 
 
 logger = logging.getLogger(__name__)
@@ -307,7 +482,12 @@ def _influxdb_device_name(device: str) -> str:
     return match.group(1) if match else device
 
 
-def _no_smart_data_message(device: str, detail: str = "") -> str:
+def _no_smart_data_message(
+    device: str,
+    detail: str = "",
+    *,
+    failed_polls: list[dict] | None = None,
+) -> str:
     """Build an explicit no-data error instead of a fabricated health report."""
     message = (
         f"❌ No SMART data available for /dev/{device}.\n"
@@ -316,6 +496,8 @@ def _no_smart_data_message(device: str, detail: str = "") -> str:
         "standby rows for a sleeping disk are ignored. The smartctl fallback "
         "did not produce data either. No health status is being inferred."
     )
+    if failed_polls:
+        message += f"\n\n{_format_failed_polls(failed_polls, prefix='')}"
     if detail.strip():
         message += f"\n\n{detail.strip()}"
     return message
@@ -387,6 +569,104 @@ def _enrich_error_output(raw_output: str, device: str = "") -> str:
     return raw_output
 
 
+async def _get_live_devices() -> dict[str, dict] | None:
+    """Return live ``lsblk`` identities keyed by kernel device name.
+
+    This is best-effort: host commands may be disabled or unavailable, in which
+    case the caller can only report the stored sample identity and must not
+    pretend that it was verified against the live device.
+    """
+    if not config.get("host", {}).get("enabled", False):
+        return None
+
+    cmd = LIST_DISKS.render()
+    if not security.is_command_safe(cmd):
+        return None
+    try:
+        output = await executor.execute_safe_command(cmd)
+    except Exception as exc:  # pragma: no cover - defensive around executors
+        logger.debug("Live device lookup failed: %s", exc)
+        return None
+    if _command_failed(output):
+        return None
+    try:
+        payload = json.loads(output)
+    except (json.JSONDecodeError, TypeError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+
+    devices: dict[str, dict] = {}
+    for dev in _disk_devices(payload.get("blockdevices", [])):
+        name = dev.get("name")
+        if isinstance(name, str) and name:
+            devices[name] = dev
+    return devices
+
+
+def _resolve_live_device(
+    device: str,
+    live_devices: dict[str, dict] | None,
+    *,
+    serial: str = "",
+    allow_serial_match: bool = True,
+) -> dict | None:
+    """Find the live row for a kernel name or InfluxDB device tag.
+
+    Exact kernel names win. NVMe tags without a namespace (``nvme0``) are then
+    matched to their live namespace device (``nvme0n1``). If those lookups fail,
+    a serial match identifies the disk even when the tag is stale after a reboot.
+    """
+    if not live_devices:
+        return None
+
+    exact = live_devices.get(device)
+    if exact is not None:
+        return exact
+
+    match = NVME_NAMESPACE_PATTERN.match(device)
+    prefix = (
+        f"{match.group(1)}n"
+        if match
+        else (f"{device}n" if device.startswith("nvme") else "")
+    )
+    if prefix:
+        for name, dev in live_devices.items():
+            if name.startswith(prefix):
+                return dev
+
+    wanted = _identity_value(serial)
+    if allow_serial_match and wanted:
+        for dev in live_devices.values():
+            if _same_serial(wanted, _identity_value(dev.get("serial"))):
+                return dev
+    return None
+
+
+async def _get_influxdb_recent_failed_polls(device: str) -> list[dict]:
+    """Return recent non-success smart_device rows for one device (newest first)."""
+    if not await _is_influxdb_available():
+        return []
+
+    influx_device = _influxdb_device_name(device)
+    client = _get_influxdb_client()
+    query = (
+        f"SELECT device, exit_status, time FROM smart_device "
+        f"WHERE device = '{influx_device}' AND exit_status != 0 "
+        f"AND time > now() - INTERVAL '{SMART_LOOKBACK}' "
+        f"ORDER BY time DESC LIMIT {SMART_FAILURE_LIMIT}"
+    )
+    try:
+        result = await client.query(query)
+    except (json.JSONDecodeError, IndexError, KeyError):
+        return []
+    return [
+        row
+        for row in _parse_influx_rows(result)
+        if _exit_status(row.get("exit_status")) not in (None, 0)
+    ]
+
+
 async def _is_influxdb_available() -> bool:
     """Check if InfluxDB is enabled and reachable."""
     influx_config = config.get("influxdb", {})
@@ -403,11 +683,15 @@ async def _get_influxdb_latest_device(device: str) -> dict | None:
     samples (``exit_status = 0``) are health data, so they are the only rows
     considered. The lookback covers a full sleep cycle plus the poll interval.
 
-    Returns a dict of the latest valid reading, or None if unavailable.
+    The returned row carries recent non-success polls in its ``failed_polls``
+    attribute. When InfluxDB is available but has no valid sample, an empty
+    (falsy) row is returned so callers can still explain why the disk is not
+    healthy. ``None`` means InfluxDB is disabled or the query failed.
     """
     if not await _is_influxdb_available():
         return None
 
+    failed_polls = await _get_influxdb_recent_failed_polls(device)
     influx_device = _influxdb_device_name(device)
     client = _get_influxdb_client()
     query = (
@@ -418,10 +702,9 @@ async def _get_influxdb_latest_device(device: str) -> dict | None:
     try:
         result = await client.query(query)
         rows = _parse_influx_rows(result)
-        return rows[0] if rows else None
     except (json.JSONDecodeError, IndexError, KeyError):
-        pass
-    return None
+        return None
+    return _InfluxSample(rows[0] if rows else None, failed_polls)
 
 
 async def _get_influxdb_latest_attributes(device: str) -> list[dict] | None:
@@ -459,46 +742,106 @@ async def _get_influxdb_latest_attributes(device: str) -> list[dict] | None:
     return None
 
 
-def _format_influxdb_device_health(row: dict, device: str | None = None) -> str:
-    """Format an InfluxDB smart_device row into a human-readable health report.
+def _render_influxdb_health(
+    row: dict,
+    device: str | None = None,
+    *,
+    failed_polls: list[dict] | object | None = _UNSET,
+    live_device: object = _UNSET,
+    require_live_identity: bool = False,
+) -> tuple[str, dict, bool]:
+    """Render an InfluxDB sample with freshness, identity and poll-failure checks."""
+    if failed_polls is _UNSET:
+        failed_polls = getattr(row, "failed_polls", [])
+    if not isinstance(failed_polls, list):
+        failed_polls = []
 
-    ``device`` lets callers display the kernel name (for example ``nvme0n1``)
-    while the InfluxDB row uses the Telegraf tag (``nvme0``).
-    """
-    device = device or row.get("device", "unknown")
-    model = row.get("model", "unknown")
-    serial = row.get("serial_no", "unknown")
-    health_ok = row.get("health_ok", None)
+    assessment = _assess_influxdb_sample(
+        row,
+        device,
+        failed_polls=failed_polls,
+        live_device=live_device,
+        require_live_identity=require_live_identity,
+    )
+    requested = assessment["device"]
+    model = assessment["sample_model"]
+    serial = assessment["sample_serial"]
     temp = row.get("temp_c")
     power_on_hours = row.get("power_on_hours")
     power_cycles = row.get("power_cycle_count")
-
-    # Health assessment
-    if health_ok is True:
-        health_emoji = "✅"
-        health_text = "PASSED"
-    elif health_ok is False:
-        health_emoji = "🔴"
-        health_text = "FAILED"
-    else:
-        health_emoji = "⚠️"
-        health_text = "Unknown"
+    age = _format_sample_age(row)
+    stale_after_minutes = SMART_STALE_AFTER_SECONDS // 60
+    poll_minutes = SMART_POLL_INTERVAL_SECONDS // 60
 
     lines = [
-        f"{health_emoji} Device Health Report: /dev/{device}",
+        f"{assessment['emoji']} Device Health Report: /dev/{requested}",
         f"{'=' * 50}",
         "  Source: InfluxDB (Telegraf smart plugin)",
     ]
-    age = _format_sample_age(row)
-    if age:
-        lines.append(f"  Sample: {age}")
-    lines.extend(
-        [
-            f"  Model: {model}",
-            f"  Serial: {serial}",
-            f"  Health: {health_text}",
-        ]
-    )
+    lines.append(f"  Sample: {age}" if age else "  Sample: timestamp unavailable")
+    lines.append(f"  Sample Device Tag: {assessment['sample_device']}")
+    lines.append(f"  Model: {model}")
+    lines.append(f"  Serial: {serial or 'unknown'}")
+
+    if assessment["identity_checked"]:
+        live_name = assessment["live_device_name"]
+        live_model = assessment["live_device_model"]
+        live_serial = assessment["live_device_serial"]
+        if live_name:
+            lines.append(
+                f"  Live Device: /dev/{live_name} "
+                f"(model {live_model or 'unknown'}, "
+                f"serial {live_serial or 'unknown'})"
+            )
+        else:
+            lines.append(
+                "  Live Device: unavailable (host data source disabled or lsblk failed)"
+            )
+
+        state = assessment["identity_state"]
+        if state == "verified":
+            lines.append(
+                f"  Identity: verified — sample serial {serial} matches live "
+                f"/dev/{live_name}."
+            )
+        elif state == "mismatch":
+            lines.append(
+                f"  Identity: 🔴 MISMATCH — requested /dev/{requested} resolves "
+                f"to live serial {live_serial or 'unknown'} "
+                f"({live_model or 'unknown'}), but the sample serial is "
+                f"{serial or 'unknown'} ({model})."
+            )
+        elif state == "unverified":
+            lines.append(
+                "  Identity: ⚠️ UNVERIFIED — serial is missing from the sample "
+                "or the live device, so it cannot be matched."
+            )
+        else:
+            lines.append(
+                f"  Identity: ⚠️ UNVERIFIED — live /dev/{requested} could not be "
+                f"resolved; sample serial {serial or 'unknown'} cannot be matched."
+            )
+
+    if assessment["age_seconds"] is None:
+        lines.append(
+            "  Freshness: ⚠️ UNVERIFIED — sample timestamp is missing; current "
+            f"health cannot be established (threshold {stale_after_minutes} min)."
+        )
+    elif assessment["stale"]:
+        lines.append(
+            f"  Freshness: ⚠️ STALE — no successful sample within "
+            f"{stale_after_minutes} minutes "
+            f"(2 x {poll_minutes}-minute poll interval); this is not current health."
+        )
+    else:
+        lines.append(
+            f"  Freshness: current — sample is within {stale_after_minutes} "
+            f"minutes (2 x {poll_minutes}-minute poll interval)."
+        )
+
+    lines.append(f"  Health: {assessment['health_text']}")
+    lines.append(_format_failed_polls(failed_polls))
+
     if temp is not None:
         lines.append(f"  Temperature: {temp}°C{' 🔥' if temp > 55 else ''}")
     if power_on_hours is not None:
@@ -526,7 +869,60 @@ def _format_influxdb_device_health(row: dict, device: str | None = None) -> str:
         lines.append(f"  Unsafe Shutdowns: {row['unsafe_shutdowns']}")
 
     lines.append(f"{'=' * 50}")
-    return "\n".join(lines)
+
+    data = {
+        "device": requested,
+        "source": "influxdb",
+        "sample": dict(row),
+        "sample_device": assessment["sample_device"],
+        "sample_model": model,
+        "sample_serial": serial,
+        "sample_timestamp": assessment["sample_timestamp"],
+        "age_seconds": assessment["age_seconds"],
+        "stale": assessment["stale"],
+        "freshness": (
+            "unknown"
+            if assessment["age_seconds"] is None
+            else "stale"
+            if assessment["stale"]
+            else "current"
+        ),
+        "failed_poll_count": len(failed_polls),
+        "recent_failed_polls": failed_polls,
+        "identity": {
+            "state": assessment["identity_state"],
+            "live_device": assessment["live_device_name"],
+            "live_model": assessment["live_device_model"],
+            "live_serial": assessment["live_device_serial"],
+        },
+        "status": assessment["status"],
+        "severity": assessment["severity"],
+    }
+    return "\n".join(lines), data, assessment["severity"] == "ok"
+
+
+def _format_influxdb_device_health(
+    row: dict,
+    device: str | None = None,
+    *,
+    failed_polls: list[dict] | object | None = _UNSET,
+    live_device: object = _UNSET,
+    require_live_identity: bool = False,
+) -> str:
+    """Format an InfluxDB smart_device row into a human-readable health report.
+
+    ``device`` lets callers display the kernel name (for example ``nvme0n1``)
+    while the InfluxDB row uses the Telegraf tag (``nvme0``). Callers that can
+    resolve the live device pass it so serial mismatches are not hidden.
+    """
+    text, _, _ = _render_influxdb_health(
+        row,
+        device,
+        failed_polls=failed_polls,
+        live_device=live_device,
+        require_live_identity=require_live_identity,
+    )
+    return text
 
 
 @structured_tool(READ_ONLY)
@@ -564,6 +960,30 @@ async def list_disks() -> str | ToolOutput:
     )
 
 
+async def _influxdb_health_tool_output(
+    row: dict,
+    device: str,
+    *,
+    require_live_identity: bool = True,
+) -> ToolOutput:
+    """Resolve the live identity and render one InfluxDB-backed health report."""
+    live_devices = await _get_live_devices()
+    live_device = _resolve_live_device(
+        device,
+        live_devices,
+        serial=_identity_value(row.get("serial_no")),
+        allow_serial_match=not require_live_identity,
+    )
+    text, data, ok = _render_influxdb_health(
+        row,
+        device,
+        failed_polls=getattr(row, "failed_polls", None),
+        live_device=live_device,
+        require_live_identity=require_live_identity,
+    )
+    return ToolOutput(_cap_composite(text), ok=ok, data=data)
+
+
 @structured_tool(READ_ONLY)
 async def get_disk_health(device: str) -> str | ToolOutput:
     """Get a comprehensive health analysis for a specific disk.
@@ -583,16 +1003,14 @@ async def get_disk_health(device: str) -> str | ToolOutput:
 
     # Priority 1: Try InfluxDB (no root needed)
     influx_data = await _get_influxdb_latest_device(device)
+    failed_polls = getattr(influx_data, "failed_polls", None)
     if influx_data:
-        return ToolOutput(
-            _cap_composite(_format_influxdb_device_health(influx_data, device)),
-            data={"device": device, "source": "influxdb", "sample": influx_data},
-        )
+        return await _influxdb_health_tool_output(influx_data, device)
 
     # Priority 2: Fall back to smartctl via SSH
     if not config.get("host", {}).get("enabled", False):
         if await _is_influxdb_available():
-            return _no_smart_data_message(device)
+            return _no_smart_data_message(device, failed_polls=failed_polls)
         return (
             "❌ No data sources available.\n"
             "Enable at least one: host.enabled or influxdb.enabled in config.yaml."
@@ -604,14 +1022,18 @@ async def get_disk_health(device: str) -> str | ToolOutput:
 
     raw_output = await _run_command(cmd)
     if _command_failed(raw_output):
-        return _enrich_error_output(_no_smart_data_message(device, raw_output), device)
+        return _enrich_error_output(
+            _no_smart_data_message(device, raw_output, failed_polls=failed_polls),
+            device,
+        )
 
     try:
         data = json.loads(raw_output)
         smart_device: SmartDevice = parse_smart_json(data)
         if not has_usable_smart_data(smart_device):
             return _enrich_error_output(
-                _no_smart_data_message(device, raw_output), device
+                _no_smart_data_message(device, raw_output, failed_polls=failed_polls),
+                device,
             )
         return ToolOutput(
             _cap_composite(format_smart_summary(smart_device)),
@@ -630,13 +1052,15 @@ async def get_disk_health(device: str) -> str | ToolOutput:
         raw_text = await _run_command(text_cmd)
         if _command_failed(raw_text):
             return _enrich_error_output(
-                _no_smart_data_message(device, raw_text), device
+                _no_smart_data_message(device, raw_text, failed_polls=failed_polls),
+                device,
             )
 
         text_device = parse_smart_text(raw_text)
         if text_device is None:
             return _enrich_error_output(
-                _no_smart_data_message(device, raw_text), device
+                _no_smart_data_message(device, raw_text, failed_polls=failed_polls),
+                device,
             )
         return ToolOutput(
             _cap_composite(format_smart_summary(text_device)),
@@ -822,16 +1246,14 @@ async def get_nvme_health(device: str) -> str | ToolOutput:
 
     # Priority 1: Try InfluxDB first. The lookup normalizes nvme0n1 -> nvme0.
     influx_data = await _get_influxdb_latest_device(device)
+    failed_polls = getattr(influx_data, "failed_polls", None)
     if influx_data:
-        return ToolOutput(
-            _cap_composite(_format_influxdb_device_health(influx_data, device)),
-            data={"device": device, "source": "influxdb", "sample": influx_data},
-        )
+        return await _influxdb_health_tool_output(influx_data, device)
 
     # Priority 2: Fall back to nvme-cli
     if not config.get("host", {}).get("enabled", False):
         if await _is_influxdb_available():
-            return _no_smart_data_message(device)
+            return _no_smart_data_message(device, failed_polls=failed_polls)
         return (
             "❌ No data sources available.\n"
             "Enable at least one: host.enabled or influxdb.enabled in config.yaml."
@@ -1298,13 +1720,41 @@ async def query_influxdb_disk(
 # ============================================================================
 
 
+async def _influxdb_recent_failures_by_device() -> dict[str, list[dict]]:
+    """Return recent non-success smart_device rows grouped by device tag."""
+    if not await _is_influxdb_available():
+        return {}
+
+    client = _get_influxdb_client()
+    query = (
+        "SELECT device, exit_status, time FROM smart_device "
+        f"WHERE exit_status != 0 AND time > now() - INTERVAL '{SMART_LOOKBACK}' "
+        f"ORDER BY time DESC LIMIT {SMART_FAILURE_LIMIT * 10}"
+    )
+    try:
+        result = await client.query(query)
+    except (json.JSONDecodeError, IndexError, KeyError):
+        return {}
+
+    grouped: dict[str, list[dict]] = {}
+    for row in _parse_influx_rows(result):
+        device = row.get("device")
+        status = _exit_status(row.get("exit_status"))
+        if not isinstance(device, str) or not device or status in (None, 0):
+            continue
+        grouped.setdefault(device, []).append(row)
+    return grouped
+
+
 async def _influxdb_latest_device_rows() -> list[dict]:
     """Return the latest valid smart_device row per device in one query.
 
     The previous overview issued ``1 + N`` sequential queries (one per
     device). A window function ranks the rows per device so the whole report
-    costs one round trip regardless of how many disks are installed.
+    costs one round trip regardless of how many disks are installed. Recent
+    non-success polls are attached per row so staleness has an explanation.
     """
+    failures_by_device = await _influxdb_recent_failures_by_device()
     client = _get_influxdb_client()
     query = (
         "SELECT * FROM ("
@@ -1324,7 +1774,7 @@ async def _influxdb_latest_device_rows() -> list[dict]:
         device = row.get("device")
         if isinstance(device, str) and device and device not in seen:
             seen.add(device)
-            rows.append(row)
+            rows.append(_InfluxSample(row, failures_by_device.get(device, [])))
     return rows
 
 
@@ -1359,13 +1809,24 @@ async def get_full_disk_report(device: str | None = None) -> str | ToolOutput:
     if await _is_influxdb_available():
         rows = await _influxdb_latest_device_rows()
         if not rows:
+            failures_by_device = await _influxdb_recent_failures_by_device()
             note = (
                 "⚠️  No valid SMART sample in InfluxDB "
                 f"(last {SMART_LOOKBACK}; standby rows are ignored), "
                 "falling back to SSH..."
             )
+            if failures_by_device:
+                failure_lines = [
+                    f"  {dev}: {_format_failed_polls(failures, prefix='')}"
+                    for dev, failures in sorted(failures_by_device.items())
+                ]
+                note += (
+                    "\n\nRecent non-success SMART polls explain the missing sample:"
+                    "\n" + "\n".join(failure_lines)
+                )
             return _cap_composite(f"{note}\n\n{await _get_full_report_via_ssh()}")
 
+        live_devices = await _get_live_devices()
         overview_devices = [row["device"] for row in rows]
         lines.append("Source: InfluxDB (Telegraf smart plugin)\n")
         lines.append(
@@ -1374,35 +1835,66 @@ async def get_full_disk_report(device: str | None = None) -> str | ToolOutput:
         )
         for row in rows:
             dev_name = row["device"]
+            serial = _identity_value(row.get("serial_no"))
+            failed_polls = getattr(row, "failed_polls", [])
+            live_device = _resolve_live_device(
+                dev_name,
+                live_devices,
+                serial=serial,
+            )
+            assessment = _assess_influxdb_sample(
+                row,
+                dev_name,
+                failed_polls=failed_polls,
+                live_device=live_device,
+                require_live_identity=True,
+            )
 
-            model = row.get("model", "unknown")
-            health_ok = row.get("health_ok")
             temp = row.get("temp_c")
             poh = row.get("power_on_hours")
             age = _format_sample_age(row)
-
-            if health_ok is True:
-                emoji = "✅"
-                health_text = "PASSED"
-            elif health_ok is False:
-                emoji = "🔴"
-                health_text = "FAILED"
-            else:
-                emoji = "⚠️"
-                health_text = "UNKNOWN"
-
             temp_flag = " 🔥" if isinstance(temp, int | float) and temp > 55 else ""
             parts = [
-                f"  {emoji} /dev/{dev_name} - {model}",
-                f"Health: {health_text}",
+                f"  {assessment['emoji']} /dev/{dev_name} - "
+                f"{assessment['sample_model']}",
+                f"Health: {assessment['health_text']}",
+                f"Serial: {serial or 'unknown'}",
             ]
+            if assessment["live_device_name"]:
+                parts.append(
+                    f"Live: /dev/{assessment['live_device_name']} "
+                    f"(serial {assessment['live_device_serial'] or 'unknown'})"
+                )
+            else:
+                parts.append("Live: unavailable")
             if temp is not None:
                 parts.append(f"Temp: {temp}°C{temp_flag}")
             if poh is not None:
                 parts.append(f"POH: {poh:,}")
             if age:
                 parts.append(f"Sample: {age}")
-            lines.append(" | ".join(parts))
+            else:
+                parts.append("Sample: timestamp unavailable")
+            if assessment["stale"]:
+                parts.append(
+                    f"Freshness: STALE (>{SMART_STALE_AFTER_SECONDS // 60} min)"
+                )
+            if assessment["identity_state"] == "mismatch":
+                parts.append(
+                    f"Identity: MISMATCH sample serial {serial or 'unknown'} != "
+                    f"live serial {assessment['live_device_serial'] or 'unknown'}"
+                )
+            elif assessment["identity_state"] == "unverified":
+                parts.append("Identity: UNVERIFIED (serial missing)")
+            elif assessment["identity_state"] == "unresolved":
+                parts.append("Identity: UNVERIFIED (live device not resolved)")
+            elif assessment["identity_state"] == "verified":
+                parts.append("Identity: verified")
+
+            line = " | ".join(parts)
+            if failed_polls:
+                line += "\n    " + _format_failed_polls(failed_polls, prefix="")
+            lines.append(line)
         lines.append(f"\n{'=' * 50}\n")
     else:
         lines.append("⚠️  InfluxDB not enabled, using SSH fallback\n")

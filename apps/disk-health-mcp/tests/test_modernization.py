@@ -292,15 +292,23 @@ class TestEveryToolHasStructuredData:
         assert response.data["row_count"] == 1
         assert response.data["rows"] == [{"device": "sda"}]
 
-    def test_full_report_uses_one_influx_query(self, patched_server, monkeypatch):
+    def test_full_report_queries_valid_sample_and_failed_polls(
+        self, patched_server, monkeypatch
+    ):
+        from datetime import UTC, datetime
         from unittest.mock import AsyncMock
 
+        sample = {
+            "device": "sda",
+            "exit_status": 0,
+            "health_ok": True,
+            "model": "ST18000NT001",
+            "serial_no": "ZVTFE2SL",
+            "time": datetime.now(UTC).isoformat(),
+        }
         client = AsyncMock()
         client.query = AsyncMock(
-            return_value=(
-                "✅ Query successful\n\n"
-                '[{"device": "sda", "health_ok": true, "model": "disk"}]'
-            )
+            return_value=(f"✅ Query successful\n\n{json.dumps([sample])}")
         )
         monkeypatch.setattr(server, "_metric_clients", {})
         monkeypatch.setattr(server, "_make_influxdb_client", lambda: client)
@@ -309,7 +317,12 @@ class TestEveryToolHasStructuredData:
         response = asyncio.run(tool.fn())
 
         assert response.ok is True
-        assert client.query.await_count == 1
+        assert client.query.await_count == 2
+        queries = [call.args[0] for call in client.query.await_args_list]
+        assert any("exit_status != 0" in query for query in queries)
+        assert any(
+            "ROW_NUMBER() OVER (PARTITION BY device" in query for query in queries
+        )
         assert response.data["devices"] == ["sda"]
 
 

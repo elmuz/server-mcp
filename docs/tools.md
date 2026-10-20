@@ -69,10 +69,10 @@ query_influxdb("SELECT * FROM smart_device WHERE time > now() - INTERVAL '1 hour
 | Tool | Arguments | Access | What it does |
 |---|---|---|---|
 | `list_disks` | — | read-only | `lsblk` JSON: names, models, serials, sizes |
-| `get_disk_health` | `device` | read-only | Full health report from the latest valid InfluxDB sample (successful rows in the last 24 hours, with sample age) or `smartctl` |
+| `get_disk_health` | `device` | read-only | Full health report from the latest valid InfluxDB sample (successful rows in the last 24 hours) with freshness, serial/live-device identity and failed-poll evidence, or `smartctl` |
 | `get_smart_attributes` | `device` | read-only | SMART attribute table with severity notes, ignoring standby rows |
-| `get_nvme_health` | `device` | read-only | NVMe SMART log (latest valid InfluxDB sample first, then `nvme-cli`) |
-| `get_full_disk_report` | `device` (optional) | read-only | Overview of all disks with sample ages, or a detailed report |
+| `get_nvme_health` | `device` | read-only | NVMe SMART log (latest valid InfluxDB sample first, then `nvme-cli`) with the same freshness and identity checks |
+| `get_full_disk_report` | `device` (optional) | read-only | Overview of all disks with sample age, freshness, identity and failed polls, or a detailed report |
 | `get_zfs_status` | — | read-only | ZFS pool status, capacity and scrub state |
 | `get_raid_status` | — | read-only | `/proc/mdstat` and `mdadm --detail` |
 | `get_snapraid_status` | — | read-only | `snapraid status`: parity age, sync state and disk errors |
@@ -216,6 +216,18 @@ has `exit_status=2` and no `health_ok`, `temp_c` or wear fields. The disk-health
 use rows with `exit_status = 0`, look back 24 hours for the last valid sample and report its
 age. If no valid sample exists, they return an explicit "no recent valid sample" error
 instead of rendering `Unknown`, `0°C` or `0 hours`.
+
+Freshness and identity are assessed before a sample can be called healthy. Telegraf polls
+SMART every five minutes, so a successful sample older than two poll intervals (10 minutes)
+is marked **STALE** and is not rendered green. Recent non-success polls (`exit_status != 0`,
+including standby/skipped polls) are listed with their latest timestamp and exit status.
+The report echoes the stored model and serial and, when `host.enabled` allows `lsblk`, the
+live device name/model/serial. If the live serial does not match the sample serial, the
+report names both identities, refuses to use the sample for the requested disk and returns
+an `UNKNOWN`/mismatch status. If the live device or serial cannot be resolved, the identity
+is marked unverified rather than healthy. This applies to `get_disk_health`,
+`get_nvme_health` and the no-device overview in `get_full_disk_report`; passing a device to
+`get_full_disk_report` uses `get_disk_health`.
 
 ## Service and container names
 

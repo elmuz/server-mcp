@@ -13,10 +13,14 @@ Storage coverage includes ZFS, mdadm and mergerFS + SnapRAID (SnapRAID status an
 summary), so the same server can diagnose NAS stacks that do not use ZFS or RAID.
 
 InfluxDB lookups use only successful SMART samples (`exit_status = 0`) from the last 24
-hours, report the sample age and ignore standby rows instead of presenting them as zeroed
-health data. `run_smart_test` pre-flights `smartctl` and uses `-n standby`, so it reports an
-unavailable tool or a sleeping disk instead of starting a test blindly. Telegraf ->
-InfluxDB is the supported SMART source; Prometheus is optional and
+hours and ignore standby rows instead of presenting them as zeroed health data. Reports
+show the sample timestamp, model and serial, plus the live `lsblk` identity when it can be
+resolved. A sample older than two 5-minute poll intervals (10 minutes) is marked stale, and
+recent non-success polls are reported instead of hidden. A serial that does not match the
+live device is named as a mismatch and is never rendered as the requested disk's health.
+`run_smart_test` pre-flights `smartctl` and uses `-n standby`, so it reports an unavailable
+tool or a sleeping disk instead of starting a test blindly. Telegraf -> InfluxDB is the
+supported SMART source; Prometheus is optional and
 the `smartmon_*` metrics require `node_exporter` with its smartmon collector. A
 loopback-only InfluxDB can be reached with the optional `ssh_tunnel` block (or a manual
 `ssh -N -L`); see [configuration](../../docs/configuration.md#database-endpoints).

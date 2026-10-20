@@ -406,8 +406,11 @@ class TestInfluxValidSamples:
         assert "0°C" not in result
         assert "0 hours" not in result
         assert queries
-        assert all("exit_status = 0" in sql for sql in queries)
+        assert any("exit_status = 0" in sql for sql in queries)
+        assert any("exit_status != 0" in sql for sql in queries)
         assert all(f"INTERVAL '{server.SMART_LOOKBACK}'" in sql for sql in queries)
+        assert "Recent failed polls" in result
+        assert "standby/skipped" in result
 
     async def test_latest_valid_sample_wins_over_newer_standby_rows(self, mock_config):
         """The valid row is used even when standby rows are more recent."""
@@ -502,6 +505,10 @@ class TestInfluxValidSamples:
             patch("disk_health_mcp.server.config", mock_config),
             patch("disk_health_mcp.server._metric_clients", {}),
             patch("disk_health_mcp.server._make_influxdb_client", return_value=client),
+            patch(
+                "disk_health_mcp.server._get_live_devices",
+                new=AsyncMock(return_value=None),
+            ),
         ):
             result = await server.get_full_disk_report()
 
@@ -509,12 +516,18 @@ class TestInfluxValidSamples:
         assert "/dev/sda" in result
         assert "Sample:" in result
 
-        # One window-function query returns the latest valid row per device;
-        # the overview must not issue one query per disk (P2-11).
-        assert client.query.await_count == 1
-        device_query = client.query.await_args.args[0]
+        # One window-function query returns the latest valid row per device and
+        # one query reports recent failed polls; still no per-disk N+1 query.
+        assert client.query.await_count == 2
+        queries = [call.args[0] for call in client.query.await_args_list]
+        assert any("exit_status = 0" in query for query in queries)
+        assert any("exit_status != 0" in query for query in queries)
+        device_query = next(
+            query
+            for query in queries
+            if "ROW_NUMBER() OVER (PARTITION BY device" in query
+        )
         assert "exit_status = 0" in device_query
-        assert "ROW_NUMBER() OVER (PARTITION BY device" in device_query
 
     async def test_overview_without_valid_samples_falls_back_to_ssh(
         self, mock_config, sample_smart_json
@@ -557,6 +570,292 @@ class TestInfluxValidSamples:
         assert server._parse_influx_rows("❌ failed") == []
         assert server._parse_influx_rows("✅ Query successful\n\nnot json") == []
         assert server._parse_influx_rows("✅ Query successful\n\n{}") == []
+
+
+class TestInfluxFreshnessAndIdentity:
+    """T-05: stale, failed or mismatched samples must not look current."""
+
+    @staticmethod
+    def _row(**overrides):
+        from datetime import datetime, timedelta
+
+        row = {
+            "device": "sda",
+            "exit_status": 0,
+            "health_ok": True,
+            "model": "ST18000NT001",
+            "serial_no": "ZVTFE2SL",
+            "temp_c": 33,
+            "power_on_hours": 10508,
+            "time": (datetime.now(UTC) - timedelta(minutes=1)).isoformat(),
+        }
+        row.update(overrides)
+        return row
+
+    @staticmethod
+    def _live(name="sda", model="ST18000NT001", serial="ZVTFE2SL"):
+        return {"name": name, "model": model, "serial": serial}
+
+    async def test_fresh_matching_sample_is_green(self, mock_config):
+        from unittest.mock import AsyncMock, patch
+
+        row = self._row()
+        with (
+            patch("disk_health_mcp.server.config", mock_config),
+            patch(
+                "disk_health_mcp.server._get_influxdb_latest_device",
+                new=AsyncMock(return_value=row),
+            ),
+            patch(
+                "disk_health_mcp.server._get_live_devices",
+                new=AsyncMock(return_value={"sda": self._live()}),
+            ),
+        ):
+            result = await server.get_disk_health("sda")
+
+        assert result.startswith("✅")
+        assert "Freshness: current" in result
+        assert "Identity: verified" in result
+        assert "Serial: ZVTFE2SL" in result
+        assert "Sample Device Tag: sda" in result
+        assert "Recent failed polls: none" in result
+
+    async def test_stale_sample_is_amber_not_green(self, mock_config):
+        from datetime import datetime, timedelta
+        from unittest.mock import AsyncMock, patch
+
+        stale_time = datetime.now(UTC) - timedelta(minutes=30)
+        row = self._row(time=stale_time.isoformat())
+        with (
+            patch("disk_health_mcp.server.config", mock_config),
+            patch(
+                "disk_health_mcp.server._get_influxdb_latest_device",
+                new=AsyncMock(return_value=row),
+            ),
+            patch(
+                "disk_health_mcp.server._get_live_devices",
+                new=AsyncMock(return_value={"sda": self._live()}),
+            ),
+        ):
+            result = await server.get_disk_health("sda")
+
+        assert "✅" not in result
+        assert "🟡" in result
+        assert "STALE" in result
+        assert "not current health" in result
+        assert "Recent failed polls: none" in result
+
+    async def test_stale_sample_with_failed_polls_is_red(self, mock_config):
+        from datetime import datetime, timedelta
+        from unittest.mock import AsyncMock, patch
+
+        now = datetime.now(UTC)
+        row = self._row(time=(now - timedelta(minutes=30)).isoformat())
+        failures = [
+            {
+                "device": "sda",
+                "exit_status": 1,
+                "time": (now - timedelta(minutes=1)).isoformat(),
+            }
+        ]
+        sample = server._InfluxSample(row, failures)
+        with (
+            patch("disk_health_mcp.server.config", mock_config),
+            patch(
+                "disk_health_mcp.server._get_influxdb_latest_device",
+                new=AsyncMock(return_value=sample),
+            ),
+            patch(
+                "disk_health_mcp.server._get_live_devices",
+                new=AsyncMock(return_value={"sda": self._live()}),
+            ),
+        ):
+            result = await server.get_disk_health("sda")
+
+        assert "✅" not in result
+        assert result.startswith("🔴")
+        assert "STALE" in result
+        assert "Recent failed polls" in result
+        assert "exit_status=1" in result
+
+    async def test_fresh_sample_still_reports_recent_failed_polls(self, mock_config):
+        from datetime import datetime, timedelta
+        from unittest.mock import AsyncMock, patch
+
+        now = datetime.now(UTC)
+        failures = [
+            {
+                "device": "sda",
+                "exit_status": 2,
+                "time": (now - timedelta(minutes=2)).isoformat(),
+            }
+        ]
+        sample = server._InfluxSample(self._row(), failures)
+        with (
+            patch("disk_health_mcp.server.config", mock_config),
+            patch(
+                "disk_health_mcp.server._get_influxdb_latest_device",
+                new=AsyncMock(return_value=sample),
+            ),
+            patch(
+                "disk_health_mcp.server._get_live_devices",
+                new=AsyncMock(return_value={"sda": self._live()}),
+            ),
+        ):
+            result = await server.get_disk_health("sda")
+
+        assert "✅" in result
+        assert "Recent failed polls" in result
+        assert "standby/skipped" in result
+
+    @pytest.mark.parametrize(
+        ("tool_name", "device", "live_name"),
+        [
+            ("get_disk_health", "sda", "sda"),
+            ("get_nvme_health", "nvme0n1", "nvme0n1"),
+        ],
+    )
+    async def test_identity_mismatch_refuses_healthy(
+        self, mock_config, tool_name, device, live_name
+    ):
+        from unittest.mock import AsyncMock, patch
+
+        row = self._row(
+            device="nvme0" if live_name.startswith("nvme") else "sda",
+            model="KINGSTON-SOMETHING",
+            serial_no="KINGSTON-SERIAL",
+        )
+        live = {
+            live_name: self._live(
+                name=live_name,
+                model="CT1000P2SSD8",
+                serial="CT1000-SERIAL",
+            )
+        }
+        with (
+            patch("disk_health_mcp.server.config", mock_config),
+            patch(
+                "disk_health_mcp.server._get_influxdb_latest_device",
+                new=AsyncMock(return_value=row),
+            ),
+            patch(
+                "disk_health_mcp.server._get_live_devices",
+                new=AsyncMock(return_value=live),
+            ),
+        ):
+            result = await getattr(server, tool_name)(device)
+
+        assert "✅" not in result
+        assert result.startswith("🔴")
+        assert "MISMATCH" in result
+        assert "KINGSTON-SERIAL" in result
+        assert "CT1000-SERIAL" in result
+        assert "Health: PASSED" not in result
+        assert "UNKNOWN — sample belongs to a different disk" in result
+
+    async def test_unresolved_live_identity_is_not_green(self, mock_config):
+        from unittest.mock import AsyncMock, patch
+
+        with (
+            patch("disk_health_mcp.server.config", mock_config),
+            patch(
+                "disk_health_mcp.server._get_influxdb_latest_device",
+                new=AsyncMock(return_value=self._row()),
+            ),
+            patch(
+                "disk_health_mcp.server._get_live_devices",
+                new=AsyncMock(return_value=None),
+            ),
+        ):
+            result = await server.get_disk_health("sda")
+
+        assert "✅" not in result
+        assert "Live Device: unavailable" in result
+        assert "Identity: ⚠️ UNVERIFIED" in result
+
+    async def test_full_report_overview_reports_stale_mismatch_and_failures(
+        self, mock_config
+    ):
+        from datetime import datetime, timedelta
+        from unittest.mock import AsyncMock, patch
+
+        now = datetime.now(UTC)
+        row = self._row(
+            device="nvme0",
+            model="KINGSTON-SOMETHING",
+            serial_no="KINGSTON-SERIAL",
+            time=(now - timedelta(minutes=30)).isoformat(),
+        )
+        failures = [
+            {
+                "device": "nvme0",
+                "exit_status": 1,
+                "time": (now - timedelta(minutes=1)).isoformat(),
+            }
+        ]
+        sample = server._InfluxSample(row, failures)
+        live = {
+            "nvme0n1": self._live(
+                name="nvme0n1",
+                model="CT1000P2SSD8",
+                serial="CT1000-SERIAL",
+            )
+        }
+        with (
+            patch("disk_health_mcp.server.config", mock_config),
+            patch(
+                "disk_health_mcp.server._influxdb_latest_device_rows",
+                new=AsyncMock(return_value=[sample]),
+            ),
+            patch(
+                "disk_health_mcp.server._get_live_devices",
+                new=AsyncMock(return_value=live),
+            ),
+        ):
+            result = await server.get_full_disk_report()
+
+        assert "✅" not in result
+        assert "STALE" in result
+        assert "Identity: MISMATCH" in result
+        assert "KINGSTON-SERIAL" in result
+        assert "CT1000-SERIAL" in result
+        assert "Recent failed polls" in result
+        assert "exit_status=1" in result
+
+    async def test_full_report_without_sample_reports_failed_polls(self, mock_config):
+        from datetime import datetime, timedelta
+        from unittest.mock import AsyncMock, patch
+
+        now = datetime.now(UTC)
+        failures = {
+            "sda": [
+                {
+                    "device": "sda",
+                    "exit_status": 1,
+                    "time": (now - timedelta(minutes=1)).isoformat(),
+                }
+            ]
+        }
+        with (
+            patch("disk_health_mcp.server.config", mock_config),
+            patch(
+                "disk_health_mcp.server._influxdb_latest_device_rows",
+                new=AsyncMock(return_value=[]),
+            ),
+            patch(
+                "disk_health_mcp.server._influxdb_recent_failures_by_device",
+                new=AsyncMock(return_value=failures),
+            ),
+            patch(
+                "disk_health_mcp.server._get_full_report_via_ssh",
+                new=AsyncMock(return_value="ssh fallback"),
+            ),
+        ):
+            result = await server.get_full_disk_report()
+
+        assert "No valid SMART sample" in result
+        assert "Recent non-success SMART polls" in result
+        assert "exit_status=1" in result
 
 
 class TestAbsoluteHostToolPaths:
