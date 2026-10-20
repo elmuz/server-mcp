@@ -6,8 +6,15 @@ versioning.
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-10-21
+
 ### Fixed
 
+- `get_service_file` masks short credential keys it previously returned verbatim. Key names
+  are normalized (quotes and leading CLI dashes removed) and matched as a whole word or word
+  suffix, so `pass`, `pw`, `pwd`, `passphrase`, `db_pass`, `apikey`, `authToken`,
+  `client_secret` and `Proxy-Authorization` are redacted while `tokenizer`, `keyboard`,
+  `user`, `host` and `mode` stay readable. An INI file with `pass = …` is now masked.
 - `disk-health-mcp` no longer presents stale or mismatched InfluxDB SMART data as current
   health. Samples older than two 5-minute poll intervals are marked stale instead of green,
   recent non-success polls are reported, and the stored serial/model/sample time are echoed

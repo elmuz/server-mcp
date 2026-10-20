@@ -1,6 +1,6 @@
 [project]
 name = "server-management-lib"
-version = "0.2.0"
+version = "0.2.1"
 description = "Shared security, SSH/local execution, configuration and HTTP clients for the Server MCP suite."
 readme = "README.md"
 license = "MIT"

@@ -121,4 +121,4 @@ __all__ = [
     "validate_http_binding",
 ]
 
-__version__ = "0.2.0"
+__version__ = "0.2.1"

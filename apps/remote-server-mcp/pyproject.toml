@@ -1,6 +1,6 @@
 [project]
 name = "remote-server-mcp"
-version = "0.2.0"
+version = "0.2.1"
 description = "Security-first MCP server for managing Docker services on a remote server or on the local host."
 readme = "README.md"
 license = "MIT"

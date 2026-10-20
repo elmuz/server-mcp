@@ -1,6 +1,6 @@
 [project]
 name = "disk-health-mcp"
-version = "0.2.0"
+version = "0.2.1"
 description = "Disk health diagnostics MCP server: SMART, NVMe, ZFS, RAID and I/O metrics with manufacturer-aware severity."
 readme = "README.md"
 license = "MIT"
