@@ -5,13 +5,13 @@ modernization backlog, the live-deployment findings from the `catafalco` host, a
 2026-10-19 architecture/security review (`docs/next-phase-plan.md` is merged here and
 removed). Earlier snapshots remain in git history.
 
-- **Status:** `3c5f307` is pushed to `origin/main` and all P0, P1 and P2 items are complete.
-  The release version is **resolved: the current tree is `0.2.0`**, because `0.2.0` was never
-  tagged or published; the `[Unreleased]` changelog entries are folded into
-  `## [0.2.0] - 2026-10-20`. The release build was rebuilt from `3c5f307` and verified
-  file-by-file against the tree. Remaining: tag `v0.2.0`, publish to PyPI, then re-run the
-  live smoke checks in 6.3.
-- **Last updated:** 2026-10-20 (release build re-verified against `3c5f307`)
+- **Status:** all P0, P1 and P2 items are complete and the release is tagged: `v0.2.0` is a
+  signed tag on `9901974`, pushed to `origin`, with `dist/` built from `3c5f307` and verified
+  against the tree. The version is **`0.2.0`** because `0.2.0` was never previously tagged or
+  published; the `[Unreleased]` changelog entries are folded into
+  `## [0.2.0] - 2026-10-20`. Remaining: publish to PyPI (`server-management-lib` first), then
+  re-run the live smoke checks in 6.3.
+- **Last updated:** 2026-10-20 (tag `v0.2.0` created and pushed)
 - **Provenance:** every finding below was re-verified against `81733d2` before merging;
   findings already fixed are marked `[x]` and kept only as history.
 - **Target deployment:** `catafalco` (Ubuntu home server/NAS; Docker services under `/srv`)
@@ -731,9 +731,10 @@ blocked the release.
       needs investigating.
 - [x] **Create the remote repository.** `elmuz/server-mcp` exists and is configured as
       `origin`.
-- [x] **Push `main`.** `origin/main` matches local `main` at `81733d2`;
-      `feat: complete P0/P1 remediation and library hardening` (`de6d981`) and
-      `feat: complete P2 modernization` (`81733d2`) are pushed.
+- [x] **Push `main`.** `origin/main` and local `main` both point at `9901974`;
+      `feat: complete P0/P1 remediation and library hardening` (`de6d981`),
+      `feat: complete P2 modernization` (`81733d2`) and
+      `feat: complete 0.2.0 remediation and harden metric clients` (`3c5f307`) are pushed.
 - [x] **Resolve the version number before tagging.** The current tree is **`v0.2.0`**. The
       `[Unreleased]` entries moved into `## [0.2.0] - 2026-10-20`, and the version strings
       (three package `pyproject.toml` files, the workspace root `pyproject.toml`, the three
@@ -752,8 +753,11 @@ blocked the release.
   The first change *after* this release starts at `v0.2.1`/`v0.3.0`. `docs/releasing.md`
   records the decision and warns that, because the version string did not change, `dist/`
   must be cleaned before `uv build` so a stale pre-fix wheel cannot be published.
-- [ ] **Create and push the tag.** No tag exists locally or remotely. Commands are in
-      `docs/releasing.md`.
+- [x] **Create and push the tag.** `v0.2.0` is a GPG-signed annotated tag on `9901974`
+      (`docs: record the verified 0.2.0 release build`, which adds only documentation on top
+      of `3c5f307`), pushed to `origin`. The release artifacts in `dist/` were rebuilt from
+      `3c5f307` and diffed file-by-file against the three source trees before tagging; the
+      documentation-only commit does not change them.
 - [ ] **Publish to PyPI.** `server-management-lib` first, then the two apps. PyPI currently
       returns 404 for all three names, so `uvx remote-server-mcp` does not work; only
       `uv run` from the workspace does.
