@@ -8,6 +8,10 @@ versioning.
 
 ### Fixed
 
+- `get_full_disk_report` no longer loses failed-poll evidence after a disk label change.
+  The overview keys standby/failed rows by `serial_no`, falling back to the `device` label
+  only for rows that carry no serial, so a sleeping disk's stale sample keeps its
+  explanation when the tag is rewritten.
 - `get_smart_attributes` works again for NVMe disks. Its InfluxDB query filtered on
   `exit_status = 0`, but Telegraf writes that field only on the SATA `smartctl` rows, never
   on the NVMe ones, so every NVMe attribute was discarded and the tool fell through to an
@@ -27,15 +31,16 @@ versioning.
   `serial_no`, so one physical disk stays one line even if its label changes, and its
   structured payload reports `devices` (kernel names a per-disk tool accepts, empty when the
   disk has no live match), `labels` (the static role label, empty for a legacy tag) and
-  `serials`, aligned by index. Failed polls are still grouped by the `device` label because
-  standby rows carry no serial. This keeps a report attached to the
-  same disk across a reboot that re-enumerates controllers; the deployment side publishes a
-  static label (`Data1`, `Parity1`, ...) in the tag instead of a kernel name.
+  `serials`, aligned by index. Failed polls are keyed by `serial_no` when the poller records
+  one (the current Telegraf deployment stamps it on every poll, standby rows included) and
+  fall back to the `device` label only for rows without it. This keeps a report attached to
+  the same disk across a reboot that re-enumerates controllers; the deployment side
+  publishes a static label (`Data1`, `Parity1`, ...) in the tag instead of a kernel name.
 - The requested kernel name stays the reference for the identity check: when it no longer
   resolves, the report names the disk the sample actually belongs to and marks the identity
-  unverified instead of verified. Failed polls are matched on the label the newest sample
-  reported, plus the exact serial when a poller records one, never on a kernel name that
-  another disk may have used. Serials and tags are allowlisted before they are quoted into a
+  unverified instead of verified. Failed polls are matched on the exact serial when a
+  poller records one, plus the label the newest sample reported as a fallback, never on a
+  kernel name that another disk may have used. Serials and tags are allowlisted before they are quoted into a
   query, and the failed-poll summary counts statuses instead of repeating each one.
 
 ## [0.2.1] - 2026-10-21

@@ -13,7 +13,8 @@ removed). Earlier snapshots remain in git history.
   `.github/workflows/publish.yml` through PyPI trusted publishing with no stored token
   (run `39507146796`), so the steady-state release path is verified. Remaining: re-run the
   live smoke checks in 6.3 against the installed packages.
-- **Last updated:** 2026-10-21 (`0.2.1` published to PyPI by CI, trusted publishing verified)
+- **Last updated:** 2026-10-21 (`0.2.1` published to PyPI by CI, trusted publishing verified;
+  P1-18/T-20 fixed)
 - **Provenance:** every finding below was re-verified against `81733d2` before merging;
   findings already fixed are marked `[x]` and kept only as history.
 - **Target deployment:** `catafalco` (Ubuntu home server/NAS; Docker services under `/srv`)
@@ -570,6 +571,21 @@ rather than adding new surface.
       `db_pass`, `dbpass`, `apiKey` and `POSTGRES_PASSWORD` are masked while `tokenizer`
       and `keyboard` stay readable. Tests cover the reported INI shape end to end through
       `get_service_file` and the key spellings at the redactor level.
+
+#### P1-18 Overview failed polls follow the mutable `device` label
+
+- [x] **Fix and test (T-20).** The Telegraf deployment now stamps `serial_no` on every
+      poll, including standby rows, but `get_full_disk_report` still built its failure
+      evidence from `_influxdb_recent_failures_by_device()`, which grouped rows by the
+      `device` tag. After a label rewrite, failures written under the old label were no
+      longer attached to the disk's newest valid sample (keyed by serial), so a sleeping
+      disk could lose the explanation for its stale sample.
+- **Done (unreleased):** `_influxdb_recent_failures_by_disk()` returns a `_FailedPolls`
+      index: rows with `serial_no` are keyed by serial, and only rows without one fall back
+      to the label. `_influxdb_latest_device_rows()` attaches evidence with
+      `for_disk(serial, label)`, and the no-valid-sample path groups by label for display.
+      Tests cover a standby row written under the old label, a legacy row without a serial
+      and the label fallback in the index.
 
 ### 3.3 P2 — modernization and polish
 

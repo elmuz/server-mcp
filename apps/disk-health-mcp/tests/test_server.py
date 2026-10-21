@@ -406,7 +406,7 @@ class TestInfluxDBDeviceMapping:
 
         assert row == {"device": "nvme0", "health_ok": True}
         # The newest-sample query is no longer the last call: failed polls are
-        # looked up afterwards (by label, because they carry no serial).
+        # looked up afterwards (by serial when present, label as the fallback).
         queries = [call.args[0] for call in client.query.await_args_list]
         sample_query = next(q for q in queries if "exit_status = 0" in q)
         assert "device = 'nvme0'" in sample_query
@@ -642,6 +642,7 @@ class TestInfluxValidSamples:
 
     async def test_latest_valid_sample_wins_over_newer_standby_rows(self, mock_config):
         """The valid row is used even when standby rows are more recent."""
+        from datetime import datetime, timedelta
         from unittest.mock import AsyncMock, patch
 
         valid = {
@@ -652,7 +653,7 @@ class TestInfluxValidSamples:
             "model": "ST18000NT001",
             "temp_c": 33,
             "power_on_hours": 10508,
-            "time": "2026-10-18T21:05:00",
+            "time": (datetime.now(UTC) - timedelta(minutes=1)).isoformat(),
         }
         client = AsyncMock()
         client.query = AsyncMock(return_value=self._success([valid]))
@@ -660,6 +661,18 @@ class TestInfluxValidSamples:
         with (
             patch("disk_health_mcp.server.config", mock_config),
             patch("disk_health_mcp.server._make_influxdb_client", return_value=client),
+            patch(
+                "disk_health_mcp.server._get_live_devices",
+                new=AsyncMock(
+                    return_value={
+                        "sda": {
+                            "name": "sda",
+                            "model": "ST18000NT001",
+                            "serial": "ZVTFF270",
+                        }
+                    }
+                ),
+            ),
         ):
             result = await server.get_disk_health("sda")
 
@@ -856,6 +869,127 @@ class TestInfluxSelectorHardening:
         assert server._failed_poll_selector("nvme0n1") == "device = 'nvme0'"
         assert server._failed_poll_selector("'") is None
         assert server._failed_poll_selector("", "'") is None
+
+
+class TestFailedPollAttribution:
+    """T-20: failed polls follow the serial, not the mutable device label."""
+
+    @staticmethod
+    def _success(rows):
+        import json
+
+        return f"✅ Query successful\n\n{json.dumps(rows)}"
+
+    @staticmethod
+    def _valid_row(**overrides):
+        from datetime import datetime
+
+        row = {
+            "device": "Data1",
+            "serial_no": "ZVTFF270",
+            "exit_status": 0,
+            "health_ok": True,
+            "model": "ST18000NT001",
+            "temp_c": 33,
+            "time": datetime.now(UTC).isoformat(),
+        }
+        row.update(overrides)
+        return row
+
+    async def test_failed_polls_follow_the_serial_across_a_label_change(
+        self, mock_config
+    ):
+        from unittest.mock import AsyncMock, patch
+
+        valid = self._valid_row()
+        # The standby row was written under the old label; only the serial ties
+        # it to the disk whose newest valid sample now carries "Data1".
+        standby = {
+            "device": "sda",
+            "serial_no": "ZVTFF270",
+            "exit_status": 2,
+            "time": valid["time"],
+        }
+        client = AsyncMock()
+        client.query = AsyncMock(
+            side_effect=lambda sql: self._success(
+                [valid] if "exit_status = 0" in sql else [standby]
+            )
+        )
+
+        with (
+            patch("disk_health_mcp.server.config", mock_config),
+            patch("disk_health_mcp.server._make_influxdb_client", return_value=client),
+            patch(
+                "disk_health_mcp.server._get_live_devices",
+                new=AsyncMock(return_value=None),
+            ),
+        ):
+            result = await server.get_full_disk_report()
+
+        assert "Recent failed polls" in result
+        assert "standby/skipped" in result
+        failure_query = next(
+            call.args[0]
+            for call in client.query.await_args_list
+            if "exit_status != 0" in call.args[0]
+        )
+        assert "serial_no" in failure_query
+
+    async def test_failed_poll_without_a_serial_falls_back_to_the_label(
+        self, mock_config
+    ):
+        from unittest.mock import AsyncMock, patch
+
+        valid = self._valid_row()
+        standby = {
+            "device": "Data1",
+            "exit_status": 2,
+            "time": valid["time"],
+        }
+        client = AsyncMock()
+        client.query = AsyncMock(
+            side_effect=lambda sql: self._success(
+                [valid] if "exit_status = 0" in sql else [standby]
+            )
+        )
+
+        with (
+            patch("disk_health_mcp.server.config", mock_config),
+            patch("disk_health_mcp.server._make_influxdb_client", return_value=client),
+            patch(
+                "disk_health_mcp.server._get_live_devices",
+                new=AsyncMock(return_value=None),
+            ),
+        ):
+            result = await server.get_full_disk_report()
+
+        assert "Recent failed polls" in result
+        assert "standby/skipped" in result
+
+    def test_groups_use_the_label_for_the_no_sample_report(self):
+        serial_row = {
+            "device": "Data1",
+            "serial_no": "ZVTFF270",
+            "exit_status": 2,
+            "time": "2026-10-21T21:30:00",
+        }
+        label_row = {
+            "device": "sda",
+            "exit_status": 2,
+            "time": "2026-10-21T21:30:00",
+        }
+        failures = server._FailedPolls(
+            by_serial={"ZVTFF270": [serial_row]},
+            by_label={"sda": [label_row]},
+        )
+
+        assert failures.for_disk("ZVTFF270", "Data1") == [serial_row]
+        # A legacy label that wrote failures without a serial belongs to the
+        # same disk, so both evidence sources are merged.
+        assert failures.for_disk("ZVTFF270", "sda") == [serial_row, label_row]
+        assert failures.for_disk("OTHER", "sda") == [label_row]
+        assert failures.groups() == {"Data1": [serial_row], "sda": [label_row]}
 
 
 class TestInfluxFreshnessAndIdentity:
@@ -1197,8 +1331,8 @@ class TestInfluxFreshnessAndIdentity:
                 new=AsyncMock(return_value=[]),
             ),
             patch(
-                "disk_health_mcp.server._influxdb_recent_failures_by_device",
-                new=AsyncMock(return_value=failures),
+                "disk_health_mcp.server._influxdb_recent_failures_by_disk",
+                new=AsyncMock(return_value=server._FailedPolls({}, failures)),
             ),
             patch(
                 "disk_health_mcp.server._get_full_report_via_ssh",

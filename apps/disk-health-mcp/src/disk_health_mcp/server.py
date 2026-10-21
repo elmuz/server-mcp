@@ -21,7 +21,7 @@ import json
 import logging
 import os
 import re
-from dataclasses import asdict
+from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -586,10 +586,10 @@ def _identity_selector(device: str, serial: str = "") -> str:
 def _failed_poll_selector(label: str, serial: str = "") -> str | None:
     """Build the predicate for the failed polls of one disk.
 
-    Failed polls (``exit_status != 0``) can carry no serial: Telegraf writes no
-    health fields, and no serial, for a standby row. They are then matched
-    through ``device`` tags, and the only tag known to belong to this disk is
-    the ``label`` its newest valid sample reported.
+    Failed polls (``exit_status != 0``) may carry no serial on a host whose
+    Telegraf does not stamp one, and their health fields are absent. They are
+    then matched through ``device`` tags, and the only tag known to belong to
+    this disk is the ``label`` its newest valid sample reported.
 
     A kernel name is *not* a safe handle: the same name is reused after a
     reboot and can still be a tag of another disk, so including it would attach
@@ -1935,30 +1935,76 @@ async def query_influxdb_disk(
 # ============================================================================
 
 
-async def _influxdb_recent_failures_by_device() -> dict[str, list[dict]]:
-    """Return recent non-success smart_device rows grouped by device tag."""
+@dataclass
+class _FailedPolls:
+    """Recent non-success SMART rows, indexed by physical disk.
+
+    The current Telegraf deployment stamps ``serial_no`` on every poll,
+    including a standby row, so the serial is the primary key. A row from a
+    poller that recorded no serial is kept under the ``device`` label that
+    wrote it; the label is only a fallback because it is mutable across a
+    redeploy.
+    """
+
+    by_serial: dict[str, list[dict]]
+    by_label: dict[str, list[dict]]
+
+    def for_disk(self, serial: str, label: str = "") -> list[dict]:
+        """Return the failures that belong to one physical disk."""
+        rows = list(self.by_serial.get(_identity_value(serial), []))
+        wanted_label = _identity_value(label)
+        if wanted_label:
+            rows.extend(self.by_label.get(wanted_label, []))
+        return rows
+
+    def groups(self) -> dict[str, list[dict]]:
+        """Group failures by the label they carry, for the no-sample report."""
+        grouped: dict[str, list[dict]] = {}
+        for rows in self.by_serial.values():
+            key = _identity_value(rows[0].get("device")) if rows else ""
+            grouped.setdefault(key or "unknown", []).extend(rows)
+        for label, rows in self.by_label.items():
+            grouped.setdefault(label, []).extend(rows)
+        return grouped
+
+
+async def _influxdb_recent_failures_by_disk() -> _FailedPolls:
+    """Return recent non-success smart_device rows indexed by physical disk.
+
+    Grouping by ``serial_no`` is what keeps failure evidence attached to the
+    right disk after a label change: Telegraf now tags every poll, including a
+    standby row, with the disk serial. Rows without a serial still fall back to
+    the ``device`` label for hosts that have not been redeployed yet.
+    """
+    empty = _FailedPolls({}, {})
     if not await _is_influxdb_available():
-        return {}
+        return empty
 
     client = _get_influxdb_client()
     query = (
-        "SELECT device, exit_status, time FROM smart_device "
+        "SELECT device, serial_no, exit_status, time FROM smart_device "
         f"WHERE exit_status != 0 AND time > now() - INTERVAL '{SMART_LOOKBACK}' "
         f"ORDER BY time DESC LIMIT {SMART_FAILURE_LIMIT * 10}"
     )
     try:
         result = await client.query(query)
     except (json.JSONDecodeError, IndexError, KeyError):
-        return {}
+        return empty
 
-    grouped: dict[str, list[dict]] = {}
+    by_serial: dict[str, list[dict]] = {}
+    by_label: dict[str, list[dict]] = {}
     for row in _parse_influx_rows(result):
-        device = row.get("device")
         status = _exit_status(row.get("exit_status"))
-        if not isinstance(device, str) or not device or status in (None, 0):
+        if status in (None, 0):
             continue
-        grouped.setdefault(device, []).append(row)
-    return grouped
+        serial = _identity_value(row.get("serial_no"))
+        if serial:
+            by_serial.setdefault(serial, []).append(row)
+            continue
+        label = _identity_value(row.get("device"))
+        if label:
+            by_label.setdefault(label, []).append(row)
+    return _FailedPolls(by_serial, by_label)
 
 
 async def _influxdb_latest_device_rows() -> list[dict]:
@@ -1971,10 +2017,10 @@ async def _influxdb_latest_device_rows() -> list[dict]:
     Ranking is partitioned by ``serial_no``, not by the ``device`` tag: the
     tag is only a label, and grouping on it would split one disk into two
     series whenever the label changes. Recent non-success polls are attached
-    per row (by label, because failed polls carry no serial) so staleness has
-    an explanation.
+    by serial (label only as a fallback for rows without one) so staleness has
+    an explanation even after the label is rewritten.
     """
-    failures_by_device = await _influxdb_recent_failures_by_device()
+    failures = await _influxdb_recent_failures_by_disk()
     client = _get_influxdb_client()
     query = (
         "SELECT * FROM ("
@@ -1997,7 +2043,7 @@ async def _influxdb_latest_device_rows() -> list[dict]:
             continue
         seen.add(serial)
         label = _identity_value(row.get("device"))
-        rows.append(_InfluxSample(row, failures_by_device.get(label, [])))
+        rows.append(_InfluxSample(row, failures.for_disk(serial, label)))
     return rows
 
 
@@ -2037,16 +2083,17 @@ async def get_full_disk_report(device: str | None = None) -> str | ToolOutput:
     if await _is_influxdb_available():
         rows = await _influxdb_latest_device_rows()
         if not rows:
-            failures_by_device = await _influxdb_recent_failures_by_device()
+            failures = await _influxdb_recent_failures_by_disk()
             note = (
                 "⚠️  No valid SMART sample in InfluxDB "
                 f"(last {SMART_LOOKBACK}; standby rows are ignored), "
                 "falling back to SSH..."
             )
-            if failures_by_device:
+            failure_groups = failures.groups()
+            if failure_groups:
                 failure_lines = [
-                    f"  {dev}: {_format_failed_polls(failures, prefix='')}"
-                    for dev, failures in sorted(failures_by_device.items())
+                    f"  {label}: {_format_failed_polls(polls, prefix='')}"
+                    for label, polls in sorted(failure_groups.items())
                 ]
                 note += (
                     "\n\nRecent non-success SMART polls explain the missing sample:"
