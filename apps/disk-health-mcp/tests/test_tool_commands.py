@@ -221,19 +221,14 @@ No error detected.
 """
 
 
-def test_snapraid_status_parses_the_report():
+def test_snapraid_status_parses_the_report(patched_server):
     sample = SNAPRAID_SAMPLE
+    executor = patched_server["executor"]
+    executor.execute_safe_command.side_effect = None
+    executor.execute_safe_command.return_value = sample
+    tool = server.mcp._tool_manager.get_tool("get_snapraid_status")
 
-    async def run():
-        from unittest.mock import AsyncMock, patch
-
-        executor = AsyncMock()
-        executor.execute_safe_command = AsyncMock(return_value=sample)
-        tool = server.mcp._tool_manager.get_tool("get_snapraid_status")
-        with patch("disk_health_mcp.server.executor", executor):
-            return await tool.fn()
-
-    response = asyncio.run(run())
+    response = asyncio.run(tool.fn())
     parsed = response.data["parsed"]
 
     assert parsed["disks"][0] == {
