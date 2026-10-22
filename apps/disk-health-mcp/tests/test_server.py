@@ -6,7 +6,7 @@ the actual tool logic without a real host.
 """
 
 import json
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
@@ -679,6 +679,7 @@ class TestInfluxValidSamples:
         assert "PASSED" in result
         assert "33°C" in result
         assert "Sample:" in result
+        assert "1 minutes" not in result
         assert "Standby" not in result
 
     def test_sample_age_is_reported(self):
@@ -693,7 +694,27 @@ class TestInfluxValidSamples:
         assert age.startswith("4")
         assert "minutes ago" in age
 
-    def test_invalid_sample_time_is_ignored(self):
+    @pytest.mark.parametrize(
+        ("age", "expected"),
+        [
+            (timedelta(seconds=1), "1 second ago"),
+            (timedelta(seconds=59), "59 seconds ago"),
+            (timedelta(minutes=1), "1 minute ago"),
+            (timedelta(minutes=2), "2 minutes ago"),
+            (timedelta(hours=1), "1 hour ago"),
+            (timedelta(days=1), "1 day ago"),
+            (timedelta(days=2), "2 days ago"),
+        ],
+    )
+    def test_sample_age_is_pluralized(self, age, expected):
+        from datetime import datetime
+
+        row = {"time": (datetime.now(UTC) - age).replace(tzinfo=None).isoformat()}
+
+        result = server._format_sample_age(row)
+
+        assert result is not None
+        assert result.startswith(f"{expected} (")
         assert server._format_sample_age({"time": "not-a-time"}) is None
         assert server._format_sample_age({}) is None
 

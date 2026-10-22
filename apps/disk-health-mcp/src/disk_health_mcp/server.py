@@ -174,13 +174,14 @@ def _format_sample_age(row: dict) -> str | None:
 
     seconds = max(0, int((datetime.now(UTC) - timestamp).total_seconds()))
     if seconds < 60:
-        age = f"{seconds} seconds"
+        value, unit = seconds, "second"
     elif seconds < 3600:
-        age = f"{seconds // 60} minutes"
+        value, unit = seconds // 60, "minute"
     elif seconds < 86400:
-        age = f"{seconds // 3600} hours"
+        value, unit = seconds // 3600, "hour"
     else:
-        age = f"{seconds // 86400} days"
+        value, unit = seconds // 86400, "day"
+    age = f"{value} {unit}{'' if value == 1 else 's'}"
     return f"{age} ago ({timestamp.strftime('%Y-%m-%dT%H:%M:%SZ')})"
 
 
