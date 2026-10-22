@@ -48,6 +48,7 @@ from .security import (
     FileAccess,
     SecurityValidator,
     ServiceFilePath,
+    normalize_device_name,
 )
 from .ssh_manager import SSHConfigurationError, SSHManager
 from .transport import (
@@ -109,6 +110,7 @@ __all__ = [
     "is_loopback_host",
     "load_config",
     "make_structured_tool",
+    "normalize_device_name",
     "open_metric_tunnels",
     "parse_duration",
     "redact_config_values",
@@ -121,4 +123,4 @@ __all__ = [
     "validate_http_binding",
 ]
 
-__version__ = "0.3.0"
+__version__ = "0.4.0"

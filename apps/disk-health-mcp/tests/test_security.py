@@ -66,7 +66,10 @@ class TestDeviceNameValidation:
             "sda ",  # Trailing space
             " sda",  # Leading space
             "sda1",  # Partition notation not valid (only whole disks)
-            "nvme0",  # Missing n1 suffix
+            # Not canonical: a bare controller is resolved to its namespace by
+            # server_management_lib.normalize_device_name before validation, so
+            # the command boundary must keep rejecting it.
+            "nvme0",
         ]
         for name in invalid_names:
             assert self.security.validate_device_name(name) is False, (

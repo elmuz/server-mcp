@@ -70,8 +70,12 @@ without a shell.
 ### 3. Input validation
 
 Service names must match `^[a-zA-Z0-9][a-zA-Z0-9_-]*$`, start with an alphanumeric character
-and be at most 100 characters. Device names must match a block-device pattern (`sda`,
-`sdaa`–`sdzz`, `nvme0n1`, `vda`, `mmcblk0p1`, `dm-0`, ...). File paths are relative, length-limited,
+and be at most 100 characters. The device name rendered into a command must match a
+block-device pattern (`sda`, `sdaa`–`sdzz`, `nvme0n1`, `vda`, `mmcblk0p1`, `dm-0`, ...).
+A caller may pass a wider vocabulary (`/dev/sda`, `/dev/disk/by-id/...`, a bare `nvme0`, a
+serial or a role label); it is normalized and resolved to a canonical kernel name first,
+and only that name is validated and rendered into `/dev/<name>`, so the command boundary is
+unchanged. File paths are relative, length-limited,
 reject null bytes, URL-encoded traversal, Unicode dot variants and shell metacharacters,
 and must resolve inside the service directory. Sensitive names are handled by the policy
 in section 4.

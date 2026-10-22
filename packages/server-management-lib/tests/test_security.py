@@ -16,6 +16,7 @@ import pytest
 from server_management_lib.security import (
     FileAccess,
     SecurityValidator,
+    normalize_device_name,
 )
 
 # ============================================================================
@@ -66,7 +67,12 @@ class TestDeviceNameValidation:
         assert self.security.validate_device_name("a" * 33) is False
 
     def test_injection_patterns_blocked(self):
-        """Device names with injection patterns should be blocked."""
+        """Device names with injection patterns should be blocked.
+
+        ``validate_device_name`` stays the canonical command boundary; see
+        :func:`normalize_device_name` for the forms a caller may actually pass
+        (``nvme0``, ``/dev/...``, by-id paths, serials and role labels).
+        """
         injection_patterns = [
             "sda;rm",  # semicolon
             "sda|cat",  # pipe
@@ -86,6 +92,65 @@ class TestDeviceNameValidation:
             assert self.security.validate_device_name(name) is False, (
                 f"Should block: {name}"
             )
+
+
+class TestNormalizeDeviceName:
+    """The caller-facing vocabulary, normalised before validation."""
+
+    @pytest.mark.parametrize(
+        ("raw", "expected"),
+        [
+            ("sda", "sda"),
+            ("sdz", "sdz"),
+            ("nvme0n1", "nvme0n1"),
+            (" nvme0n1 ", "nvme0n1"),
+            ("nvme0", "nvme0"),  # controller, resolved against live namespaces
+            ("/dev/sda", "sda"),
+            ("/dev/nvme0n1", "nvme0n1"),
+            (
+                "/dev/disk/by-id/ata-ST18000NT001-3NF101_ZVTFF3JB",
+                "ZVTFF3JB",
+            ),
+            (
+                "/dev/disk/by-id/nvme-CT1000P2SSD8_2146E5E54409",
+                "2146E5E54409",
+            ),
+            ("2146E5E54409", "2146E5E54409"),  # serial
+            ("Cache1", "Cache1"),  # role label
+            ("wwn-0x5000c500e8e30d8b", "wwn-0x5000c500e8e30d8b"),
+        ],
+    )
+    def test_accepted_forms(self, raw, expected):
+        assert normalize_device_name(raw) == expected
+
+    @pytest.mark.parametrize(
+        "raw",
+        [
+            "sda;rm -rf /",
+            "sda1",  # partition notation is not a whole disk
+            "sda/../etc",
+            "../../etc",
+            "nvme0n1n1",
+            "",
+            "   ",
+            "a" * 129,
+            None,
+            123,
+            "sda\nreboot",
+            "/dev/disk/by-id/",
+            "/dev/disk/by-id/../../etc/shadow",
+            "$()",
+        ],
+    )
+    def test_rejected_forms(self, raw):
+        assert normalize_device_name(raw) is None
+
+    def test_canonical_result_still_needs_validation(self):
+        """The normaliser is syntactic; it never widens the command boundary."""
+        security = SecurityValidator({})
+        assert security.validate_device_name(normalize_device_name("/dev/sda"))
+        # ``nvme0`` is accepted as input but is not a canonical kernel name.
+        assert security.validate_device_name(normalize_device_name("nvme0")) is False
 
 
 # ============================================================================

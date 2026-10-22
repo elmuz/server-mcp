@@ -71,7 +71,7 @@ query_influxdb("SELECT * FROM smart_device WHERE time > now() - INTERVAL '1 hour
 | `list_disks` | — | read-only | `lsblk` JSON: names, models, serials, sizes |
 | `get_disk_health` | `device` | read-only | Full health report from the latest valid InfluxDB sample (successful rows in the last 24 hours), selected by the live serial, with freshness, serial/live-device identity and failed-poll evidence, or `smartctl` |
 | `get_smart_attributes` | `device` | read-only | SMART attribute table with severity notes, ignoring standby rows |
-| `get_nvme_health` | `device` | read-only | NVMe SMART log (latest valid InfluxDB sample first, then `nvme-cli`) with the same freshness and identity checks |
+| `get_nvme_health` | `device` | read-only | NVMe SMART log (latest valid InfluxDB sample first, then `nvme-cli`) with the same freshness and identity checks; a SATA disk is refused |
 | `get_full_disk_report` | `device` (optional) | read-only | Overview of all disks (one line per serial) with sample age, freshness, identity and failed polls, or a detailed report |
 | `get_zfs_status` | — | read-only | ZFS pool status, capacity and scrub state |
 | `get_raid_status` | — | read-only | `/proc/mdstat` and `mdadm --detail` |
@@ -87,7 +87,9 @@ query_influxdb("SELECT * FROM smart_device WHERE time > now() - INTERVAL '1 hour
 ```text
 list_disks()
 get_disk_health("sda")
-get_smart_attributes("nvme0n1")
+get_disk_health("ZVTFF3JB")  # serial, resolved serial-first
+get_smart_attributes("nvme0")
+get_nvme_health("Cache1")
 get_full_disk_report()
 get_snapraid_status()
 get_mount_status()
@@ -201,15 +203,43 @@ and both the sudoers rule and `SNAPRAID_STATUS_SUDO_ARGV` must change.
 
 ## Device names
 
-Block devices must match `sda`, `sdaa`–`sdzz`, `nvme0n1`, `vda`, `hda`, `mmcblk0p1` or
-`dm-0`. The two-letter SATA/SAS form supports hosts with more than 26 disks. Partitions are
-accepted where the pattern allows them (`mmcblk0p1`), but SMART tools expect a whole-disk
-name. `get_full_disk_report` filters `lsblk` to `type: disk` and validates every name, so
-`loop0`, `sr0`, `zram0` and partition rows never reach `smartctl`.
+Every device-taking tool (`get_disk_health`, `get_smart_attributes`, `get_nvme_health`,
+`run_smart_test` and `get_full_disk_report(device=...)`) accepts one vocabulary and resolves
+every spelling to the same physical disk:
+
+| Input | Example | Resolved to |
+|---|---|---|
+| Kernel name | `sda`, `nvme0n1` | itself |
+| NVMe controller | `nvme0` | the live namespace, normally `nvme0n1` |
+| Absolute path | `/dev/sda`, `/dev/nvme0n1` | the kernel name |
+| udev by-id path | `/dev/disk/by-id/ata-ST18000NT001-3NF101_ZVTFF3JB` | the serial segment |
+| Disk serial | `ZVTFF3JB` | the disk that reports it |
+| Role label | `Cache1`, `Parity1` | the serial of that Telegraf `device` tag |
+
+Identity is serial-first: a serial, by-id serial or role label is matched against the live
+`lsblk` serials (and the InfluxDB sample serials when `host.enabled` is off), so
+`get_smart_attributes("nvme0n1")` and `get_smart_attributes("nvme0")` return the same
+attribute set and a serial still resolves the disk after a reboot renumbers it. A role label
+only resolves through a tag that is not kernel-name-like: a legacy tag holding `sda` may
+name another disk now and is not treated as identity.
+
+The resolved kernel name is the only value rendered into a command. It must match `sda`,
+`sdaa`–`sdzz`, `nvme0n1`, `vda`, `hda`, `mmcblk0p1` or `dm-0`; the two-letter SATA/SAS form
+supports hosts with more than 26 disks. Partition-shaped names (`sda1`, `nvme0n1p1`) are
+rejected because SMART tools expect a whole disk, while `mmcblk0p1` remains accepted where
+the pattern allows it. `get_full_disk_report` filters `lsblk` to `type: disk` and validates
+every name, so `loop0`, `sr0`, `zram0` and partition rows never reach `smartctl`.
+
+`get_nvme_health` also checks the protocol: `lsblk`'s `tran`, then the field set of the
+stored Telegraf sample (`percentage_used`, `available_spare`, … for NVMe;
+`reallocated_sectors_count`, `wwn`, … for ATA), then `smartctl -j` when neither is
+available. A SATA disk is refused with the detected type and a pointer to
+`get_disk_health` instead of being reported with the generic NVMe report; no `nvme-cli`
+command is attempted.
 
 Telegraf stores NVMe devices without the namespace suffix (`nvme0`, not `nvme0n1`). The
-disk-health tools normalize `nvmeXnY` to `nvmeX` for InfluxDB lookups; pass the kernel name
-that `list_disks` returns.
+disk-health tools normalize `nvmeXnY` to `nvmeX` for InfluxDB lookups; any spelling from
+the table above is accepted, and `list_disks` reports the canonical kernel names.
 
 A sleeping disk still produces a Telegraf `smart_device` row every poll interval. That row
 has `exit_status=2` and no `health_ok`, `temp_c` or wear fields. The disk-health tools only

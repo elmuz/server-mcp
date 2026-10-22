@@ -248,8 +248,32 @@ class TestEveryToolHasStructuredData:
     def test_host_tools_publish_data(
         self, patched_server, monkeypatch, tool_name, arguments, expected_keys
     ):
+        from unittest.mock import AsyncMock
+
         patched_server["config"]["influxdb"]["enabled"] = False
         monkeypatch.setattr(server, "_metric_clients", {})
+        # ``get_nvme_health`` classifies the device from lsblk ``tran`` and now
+        # refuses a SATA disk instead of rendering a generic health report.
+        monkeypatch.setattr(
+            server,
+            "_get_live_devices",
+            AsyncMock(
+                return_value={
+                    "sda": {
+                        "name": "sda",
+                        "model": "ST18000NT001",
+                        "serial": "ZVTFE2SL",
+                        "tran": "sata",
+                    },
+                    "nvme0n1": {
+                        "name": "nvme0n1",
+                        "model": "CT1000P2SSD8",
+                        "serial": "2146E5E54409",
+                        "tran": "nvme",
+                    },
+                }
+            ),
+        )
         tool = server.mcp._tool_manager.get_tool(tool_name)
 
         response = asyncio.run(tool.fn(**arguments))
@@ -385,6 +409,11 @@ class TestEveryToolHasStructuredData:
         validator = SecurityValidator({})
         for device in response.data["devices"]:
             assert validator.validate_device_name(device) is True
+            # T-11: the overview must only report arguments a per-disk tool
+            # accepts, and they must resolve back to the same kernel name.
+            resolved = asyncio.run(server._resolve_device_argument(device))
+            assert resolved is not None
+            assert resolved.kernel == device
 
     def test_unresolved_disk_is_not_returned_as_a_device(
         self, patched_server, monkeypatch

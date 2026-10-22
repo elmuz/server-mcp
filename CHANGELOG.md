@@ -4,6 +4,32 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses semantic
 versioning.
 
+## [0.4.0] - 2026-10-22
+
+### Changed
+
+- Disk tools accept one device vocabulary and resolve it serial-first. `get_disk_health`,
+  `get_smart_attributes`, `get_nvme_health`, `run_smart_test` and `get_full_disk_report`
+  now accept a kernel name (`sda`, `nvme0n1`), a bare NVMe controller (`nvme0`), a
+  `/dev/<name>` path, a `/dev/disk/by-id/` path, a disk serial or a Telegraf role label
+  (`Cache1`, `Parity1`), and resolve every spelling to the same physical disk. `nvme0` and
+  `nvme0n1` return the same report and attribute set, and `run_smart_test("nvme0")` renders
+  `/dev/nvme0n1`. Only the resolved canonical kernel name (still matched by
+  `DEVICE_NAME_PATTERN`) is rendered into a command; the caller's string never is.
+  Partition-shaped names (`sda1`, `nvme0n1p1`) are rejected.
+- `get_nvme_health` refuses a non-NVMe disk instead of returning a report. The protocol is
+  detected from `lsblk`'s `tran`, the field set of the stored Telegraf sample
+  (`percentage_used`/`available_spare`/... for NVMe,
+  `reallocated_sectors_count`/`wwn`/... for ATA) or `smartctl -j`, and a mismatch returns
+  the detected type, the detection source and no `nvme-cli` command.
+
+### Fixed
+
+- `get_nvme_health("sda")` used to return the same green generic SMART report as
+  `get_disk_health` with no NVMe metrics, and a by-id path, serial or role label was
+  rejected even though the serial is the documented disk identity. A non-NVMe request is
+  now refused explicitly, and those spellings resolve to the live kernel name.
+
 ## [0.3.0] - 2026-10-22
 
 ### Fixed

@@ -31,9 +31,87 @@ logger = logging.getLogger(__name__)
 # ============================================================================
 
 # Valid block device name pattern: sdX, nvmeXnY, vdX, hdX, mmcblkXpY, dm-X
+# This is the *command* boundary: only a name matching this pattern may be
+# rendered into an argv. Callers may pass other spellings; see
+# :func:`normalize_device_name` for the accepted input vocabulary.
 DEVICE_NAME_PATTERN = re.compile(
     r"^(sd[a-z]{1,2}|nvme\d+n\d+|vd[a-z]|hd[a-z]|mmcblk\d+(p\d+)?|dm-\d+)$"
 )
+
+# A bare NVMe controller name (``nvme0``) is what Telegraf, smartd and tool
+# output use, but Linux exposes namespaces (``nvme0n1``). The tools accept it
+# and resolve the namespace from the live host.
+NVME_CONTROLLER_PATTERN = re.compile(r"^nvme\d+$")
+
+# udev by-id prefixes. ``ata-<model>_<serial>``, ``nvme-<model>_<serial>``,
+# ``scsi-<id>``, ``usb-<id>`` and ``wwn-0x<id>`` all name one physical disk,
+# but only the serial segment maps back to a live kernel name.
+BY_ID_PREFIXES = ("ata-", "nvme-", "scsi-", "usb-", "wwn-")
+
+# Serials and role labels are not kernel names. Keep them to a conservative
+# allowlist: they are used for identity lookups, never for a command.
+DEVICE_IDENTITY_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 ._:#+-]{0,63}$")
+MAX_DEVICE_INPUT_LENGTH = 128
+
+# A token that looks like a kernel name but is not canonical (a partition such
+# as ``sda1``, where SMART needs the whole disk, or a malformed
+# ``nvme0n1n1``) must be rejected instead of being mistaken for a serial or a
+# role label.
+KERNEL_NAME_LIKE_PATTERN = re.compile(
+    r"^(?:sd[a-z]+\d*|hd[a-z]+\d*|vd[a-z]+\d*|xvd[a-z]+\d*"
+    r"|nvme\d+(?:n\d+)*(?:p\d+)?"
+    r"|mmcblk\d+(?:p\d+)*|md\d+|dm-\d+)$"
+)
+
+
+def normalize_device_name(raw: object) -> str | None:
+    """Normalise a caller-supplied device argument to a resolvable form.
+
+    Accepted spellings are the whole vocabulary an operator sees on a host:
+
+    - kernel names: ``sda``, ``nvme0n1``
+    - absolute paths: ``/dev/sda``, ``/dev/nvme0n1``
+    - udev by-id paths: ``/dev/disk/by-id/ata-ST18000NT001-3NF101_ZVTFF3JB``
+      (the trailing serial segment is returned)
+    - bare NVMe controller names (``nvme0``), returned unchanged so the caller
+      can pick the live namespace (``nvme0n1``)
+    - serial numbers and role labels (``ZVTFF3JB``, ``Cache1``), returned
+      unchanged so the caller can resolve them against live identities
+
+    Returns ``None`` for input that cannot name a disk. The function is purely
+    syntactic and never widens :data:`DEVICE_NAME_PATTERN`: the caller must
+    resolve the result to a canonical kernel name and pass *that* through
+    :meth:`SecurityValidator.validate_device_name` before rendering a command.
+    """
+    if not isinstance(raw, str):
+        return None
+
+    text = raw.strip()
+    if not text or len(text) > MAX_DEVICE_INPUT_LENGTH:
+        return None
+    if any(char in text for char in "\x00\r\n"):
+        return None
+
+    if text.startswith("/dev/"):
+        text = text[len("/dev/") :]
+    if text.startswith("disk/by-id/"):
+        text = text[len("disk/by-id/") :]
+    if not text or "/" in text:
+        return None
+
+    if DEVICE_NAME_PATTERN.match(text):
+        return text
+    if text.startswith(BY_ID_PREFIXES):
+        # The serial (or WWN) is the part that identifies the physical disk.
+        return text.rsplit("_", 1)[-1]
+    if NVME_CONTROLLER_PATTERN.match(text):
+        return text
+    if KERNEL_NAME_LIKE_PATTERN.match(text):
+        return None
+    if DEVICE_IDENTITY_PATTERN.match(text):
+        return text
+    return None
+
 
 # ============================================================================
 # Service name validation (remote-server-mcp)

@@ -234,7 +234,7 @@ account-wide token can overwrite every project you own.
 
 ## Versioning
 
-- The three packages share the suite version (`0.3.0`). The workspace root
+- The three packages share the suite version (`0.4.0`). The workspace root
   `pyproject.toml` carries the same version for `uv` output and should not drift.
 - **`0.2.0` is the first published release.** It was never tagged when the monorepo
   consolidation landed (`50de082`, commit message `… (v0.2.0)`), so the P0/P1/P2

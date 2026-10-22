@@ -42,11 +42,16 @@ from server_management_lib import (
     create_rate_limiter,
     load_config,
     make_structured_tool,
+    normalize_device_name,
     open_metric_tunnels,
     parse_duration,
     resolve_config_path,
     run_streamable_http,
     sanitize_output,
+)
+from server_management_lib.security import (
+    DEVICE_NAME_PATTERN,
+    NVME_CONTROLLER_PATTERN,
 )
 
 from .operations import (
@@ -70,6 +75,7 @@ from .operations import (
 )
 from .smart_parser import (
     SmartDevice,
+    classify_device_type,
     format_smart_summary,
     has_usable_smart_data,
     parse_smart_json,
@@ -618,6 +624,300 @@ def _live_serial(device: str, live_devices: dict[str, dict] | None) -> str:
     if not live:
         return ""
     return _identity_value(live.get("serial"))
+
+
+# ============================================================================
+# Device argument resolution
+# ============================================================================
+
+# The whole vocabulary an operator (or Telegraf/smartd output) uses for a disk.
+# Only the resolved kernel name is rendered into a command.
+DEVICE_ARGUMENT_HINT = (
+    "Accepted forms: sda, nvme0n1, nvme0, /dev/sda, /dev/nvme0n1, "
+    "/dev/disk/by-id/<id>, a disk serial number or a role label "
+    "(for example Parity1 or Cache1)."
+)
+
+# NVMe and ATA samples carry disjoint field sets, so a stored sample identifies
+# the protocol without opening the device. Shared fields (temp_c,
+# power_on_hours, power_cycle_count, health_ok) are deliberately excluded.
+NVME_SAMPLE_FIELDS = frozenset(
+    {
+        "percentage_used",
+        "available_spare",
+        "critical_warning",
+        "media_errors",
+        "unsafe_shutdowns",
+        "error_log_entries",
+        "data_units_read",
+        "data_units_written",
+        "host_read_commands",
+        "host_write_commands",
+    }
+)
+ATA_SAMPLE_FIELDS = frozenset(
+    {
+        "reallocated_sectors_count",
+        "seek_error_rate",
+        "spin_retry_count",
+        "udma_crc_errors",
+        "read_error_rate",
+        "pending_sector_count",
+        "wwn",
+    }
+)
+
+# ``tran`` values reported by lsblk that mean a SATA/ATA-family disk.
+ATA_TRANSPORTS = frozenset({"sata", "ata", "sat"})
+
+
+@dataclass(frozen=True)
+class _ResolvedDevice:
+    """A device argument resolved to one physical disk.
+
+    ``kernel`` is the only value a tool may render into ``/dev/<name>``: it has
+    passed :meth:`SecurityValidator.validate_device_name`. ``serial`` is the
+    identity the disk was resolved by (empty when the host cannot report it)
+    and ``live_devices`` is the ``lsblk`` result so callers do not run it twice.
+    """
+
+    kernel: str
+    serial: str = ""
+    live_devices: dict[str, dict] | None = None
+
+
+def _invalid_device_message(device: object) -> str:
+    """Reject a device argument without touching the host or the database."""
+    shown = device if isinstance(device, str) else repr(device)
+    shown = shown.strip()
+    if len(shown) > 80:
+        shown = f"{shown[:77]}..."
+    return f"❌ Invalid device name: {shown}\n{DEVICE_ARGUMENT_HINT}"
+
+
+def _match_live_identity(
+    identity: str, live_devices: dict[str, dict] | None
+) -> dict | None:
+    """Return the live row whose serial or WWN equals ``identity``.
+
+    Serial comparison is case-insensitive because Telegraf and ``lsblk`` do not
+    agree on the case of a WWN or a serial with letters. A ``wwn-0x...`` input
+    is compared as its hex value against the optional ``wwn`` column.
+    """
+    if not live_devices:
+        return None
+    wanted = _identity_value(identity)
+    if not wanted:
+        return None
+    wwn = wanted.casefold().removeprefix("wwn-").removeprefix("0x")
+    for dev in live_devices.values():
+        serial = _identity_value(dev.get("serial"))
+        if serial and _same_serial(serial, wanted):
+            return dev
+        live_wwn = _identity_value(dev.get("wwn")).casefold().removeprefix("0x")
+        if live_wwn and live_wwn == wwn:
+            return dev
+    return None
+
+
+async def _influxdb_identity_serial(identity: str) -> str:
+    """Return the serial of the newest InfluxDB sample that names ``identity``.
+
+    A role label (``Parity1``) or a serial the live host does not expose is
+    resolved to a serial here, and the serial then resolves to a live kernel
+    name. The ``device`` arm is only used for a tag that cannot be a kernel
+    name: a legacy tag holding ``sda`` may describe a different disk after a
+    reboot. Only rows that carry a serial are considered, because the serial is
+    what identifies the physical disk.
+    """
+    if not await _is_influxdb_available():
+        return ""
+    text = _identity_value(identity)
+    literal = _sql_literal(text)
+    if not text or not literal:
+        return ""
+
+    arms = [f"serial_no = '{literal}'"]
+    if not KERNEL_NAME_PATTERN.match(text):
+        arms.append(f"device = '{literal}'")
+    if text.casefold().startswith("wwn-"):
+        wwn = text[4:].removeprefix("0x")
+        wwn_literal = _sql_literal(wwn)
+        if wwn_literal:
+            arms.append(f"(wwn = '{wwn_literal}' OR wwn = '{wwn_literal.lower()}')")
+
+    client = _get_influxdb_client()
+    query = (
+        f"SELECT serial_no FROM smart_device WHERE ({' OR '.join(arms)}) "
+        f"AND time > now() - INTERVAL '{SMART_LOOKBACK}' "
+        "AND serial_no IS NOT NULL AND serial_no != '' "
+        "ORDER BY time DESC LIMIT 1"
+    )
+    try:
+        result = await client.query(query)
+        rows = _parse_influx_rows(result)
+    except (json.JSONDecodeError, IndexError, KeyError):
+        return ""
+    if not rows:
+        return ""
+    return _identity_value(rows[0].get("serial_no"))
+
+
+def _resolved_device(
+    kernel: object,
+    serial: object = "",
+    live_devices: dict[str, dict] | None = None,
+) -> _ResolvedDevice | None:
+    """Build a resolution result, enforcing the command boundary."""
+    name = _identity_value(kernel)
+    if not name or not security.validate_device_name(name):
+        return None
+    return _ResolvedDevice(name, _identity_value(serial), live_devices)
+
+
+async def _resolve_device_argument(device: object) -> _ResolvedDevice | None:
+    """Resolve any accepted device spelling to one physical disk.
+
+    Accepted inputs are normalised by
+    :func:`server_management_lib.normalize_device_name` and then resolved
+    serial-first, because the serial is the only identity that survives a
+    reboot or a tag rewrite:
+
+    1. canonical kernel names resolve directly (``nvmeXnY``, ``sdX``, ...);
+    2. bare NVMe controllers (``nvme0``) resolve to the live namespace
+       (``nvme0n1``), or to the canonical single-namespace form when the host
+       source is unavailable;
+    3. serials, by-id serial segments and role labels resolve through the live
+       ``lsblk`` serials, then through InfluxDB.
+
+    The caller's string is never rendered into a command. ``None`` means the
+    argument cannot name a disk, or a serial/label could not be mapped to a
+    kernel name (which needs ``host.enabled``).
+
+    A canonical name needs no host round trip, so ``live_devices`` is left
+    unset: callers that need the live identity fetch it with
+    :func:`_resolved_live_devices`. Only the forms that cannot be resolved
+    syntactically pay for ``lsblk``, and the result is handed back for reuse.
+    """
+    candidate = normalize_device_name(device)
+    if candidate is None:
+        return None
+
+    # ``DEVICE_NAME_PATTERN`` is checked directly: ``validate_device_name``
+    # logs every rejection, and an accepted input spelling is not an error.
+    if DEVICE_NAME_PATTERN.match(candidate):
+        return _resolved_device(candidate)
+
+    live_devices = await _get_live_devices()
+
+    if NVME_CONTROLLER_PATTERN.match(candidate):
+        live = _resolve_live_device(candidate, live_devices)
+        if live is not None:
+            return _resolved_device(
+                live.get("name") or f"{candidate}n1",
+                live.get("serial"),
+                live_devices,
+            )
+        if live_devices is None:
+            # Host source disabled: fall back to the single-namespace form.
+            return _resolved_device(f"{candidate}n1", "", None)
+        return None
+
+    live = _match_live_identity(candidate, live_devices)
+    if live is not None:
+        return _resolved_device(live.get("name"), live.get("serial"), live_devices)
+
+    serial = await _influxdb_identity_serial(candidate)
+    if not serial:
+        return None
+    live = _match_live_identity(serial, live_devices)
+    if live is not None:
+        return _resolved_device(live.get("name"), serial, live_devices)
+    return None
+
+
+async def _resolved_live_devices(
+    resolved: _ResolvedDevice,
+) -> dict[str, dict] | None:
+    """Return the ``lsblk`` identities for a resolution, fetching them if needed."""
+    if resolved.live_devices is not None:
+        return resolved.live_devices
+    return await _get_live_devices()
+
+
+def _detect_device_type(
+    kernel: str,
+    live_devices: dict[str, dict] | None,
+    sample: dict | None = None,
+) -> tuple[str, str]:
+    """Return ``(protocol, source)`` for a resolved kernel device.
+
+    ``lsblk`` ``tran`` is the cheapest answer, then the field set of a stored
+    Telegraf sample. ``("", "")`` means the protocol could not be established
+    without opening the device; callers may fall back to ``smartctl``.
+    """
+    live = _resolve_live_device(kernel, live_devices)
+    tran = _identity_value(live.get("tran")) if live else ""
+    if tran:
+        folded = tran.casefold()
+        if folded == "nvme":
+            return "NVMe", "lsblk"
+        if folded in ATA_TRANSPORTS:
+            return "SATA", "lsblk"
+        return tran.upper(), "lsblk"
+
+    if sample:
+        fields = set(sample)
+        if fields & NVME_SAMPLE_FIELDS:
+            return "NVMe", "influxdb"
+        if (fields & ATA_SAMPLE_FIELDS) or ("exit_status" in fields):
+            # ``exit_status`` is written on ATA smartctl rows only; NVMe rows
+            # carry the wear/error fields instead. A sample that is not
+            # NVMe-shaped is therefore an ATA-family disk.
+            return "SATA", "influxdb"
+    return "", ""
+
+
+async def _smartctl_device_type(device: str) -> tuple[str, str]:
+    """Classify a device from read-only ``smartctl -j`` metadata.
+
+    Used only when neither ``lsblk`` nor a stored sample can tell the protocol
+    apart. ``("", "smartctl")`` means the classification itself failed and the
+    caller may continue with the nvme-cli path.
+    """
+    cmd = SMART_JSON.render(device=device)
+    if not security.is_command_safe(cmd):
+        return "", "smartctl"
+    raw_output = await _run_command(cmd)
+    if _command_failed(raw_output):
+        return "", "smartctl"
+    try:
+        data = json.loads(raw_output)
+    except (json.JSONDecodeError, TypeError):
+        return "", "smartctl"
+    if not isinstance(data, dict):
+        return "", "smartctl"
+    return classify_device_type(data), "smartctl"
+
+
+def _not_nvme_message(device: str, detected: str, source: str) -> ToolOutput:
+    """Refuse a non-NVMe disk instead of returning a generic SMART report."""
+    label = "SATA (ATA/SAT)" if detected == "SATA" else detected
+    text = (
+        f"❌ /dev/{device} is a {label} disk, not NVMe.\n"
+        f'Use get_disk_health("{device}") or get_smart_attributes("{device}") '
+        "for its SMART data."
+    )
+    return ToolOutput(
+        text,
+        ok=False,
+        data={
+            "device": device,
+            "requested_type": "nvme",
+            "detected_type": label,
+            "detection_source": source,
+        },
+    )
 
 
 def _no_smart_data_message(
@@ -1189,20 +1489,24 @@ async def get_disk_health(device: str) -> str | ToolOutput:
     2. Direct smartctl via SSH - requires device access
 
     Args:
-        device: Block device name (e.g., 'sda', 'nvme0n1')
+        device: Disk to inspect. Accepted: a kernel name ('sda', 'nvme0n1'), a bare
+            NVMe controller ('nvme0'), '/dev/<name>', a '/dev/disk/by-id/' path, a
+            disk serial number or a role label ('Parity1', 'Cache1').
 
     Returns:
         Human-readable health assessment with severity flags
     """
-    if not security.validate_device_name(device):
-        return f"❌ Invalid device name: {device}\nUse format: sda, nvme0n1, vda, etc."
+    resolved = await _resolve_device_argument(device)
+    if resolved is None:
+        return _invalid_device_message(device)
+    device = resolved.kernel
 
     # Priority 1: Try InfluxDB (no root needed). Resolve the live serial first
     # so the sample is selected by identity, not by a tag that a previous
     # deployment may have pointed at another physical disk. The ``lsblk``
     # result is reused below instead of running it twice.
-    live_devices = await _get_live_devices()
-    serial = _live_serial(device, live_devices)
+    live_devices = await _resolved_live_devices(resolved)
+    serial = resolved.serial or _live_serial(device, live_devices)
     influx_data = await _get_influxdb_latest_device(device, serial=serial)
     failed_polls = getattr(influx_data, "failed_polls", None)
     if influx_data:
@@ -1286,18 +1590,22 @@ async def get_smart_attributes(device: str) -> str | ToolOutput:
     2. Direct smartctl via SSH - requires device access
 
     Args:
-        device: Block device name (e.g., 'sda', 'nvme0n1')
+        device: Disk to inspect. Accepted: a kernel name ('sda', 'nvme0n1'), a bare
+            NVMe controller ('nvme0'), '/dev/<name>', a '/dev/disk/by-id/' path, a
+            disk serial number or a role label ('Parity1', 'Cache1').
 
     Returns:
         SMART attribute table with severity annotations
     """
-    if not security.validate_device_name(device):
-        return f"❌ Invalid device name: {device}"
+    resolved = await _resolve_device_argument(device)
+    if resolved is None:
+        return _invalid_device_message(device)
+    device = resolved.kernel
 
     # Priority 1: Try InfluxDB (no root needed). Select the rows by serial so
     # a re-enumerated (or re-tagged) disk keeps reporting its own attributes.
-    live_devices = await _get_live_devices()
-    serial = _live_serial(device, live_devices)
+    live_devices = await _resolved_live_devices(resolved)
+    serial = resolved.serial or _live_serial(device, live_devices)
     influx_attrs = await _get_influxdb_latest_attributes(device, serial=serial)
     if influx_attrs:
         # Fetch device summary for SSD wear cross-reference
@@ -1442,19 +1750,33 @@ async def get_nvme_health(device: str) -> str | ToolOutput:
     2. Direct nvme-cli via SSH - requires device access
 
     Args:
-        device: NVMe device name (e.g., 'nvme0n1')
+        device: NVMe disk to inspect. Accepted: 'nvme0n1', 'nvme0', '/dev/nvme0n1',
+            a '/dev/disk/by-id/' path, a disk serial number or a role label.
+            A non-NVMe disk is refused instead of being reported with the generic
+            SMART report.
 
     Returns:
         NVMe SMART health data
     """
-    if not security.validate_device_name(device):
-        return f"❌ Invalid device name: {device}"
+    resolved = await _resolve_device_argument(device)
+    if resolved is None:
+        return _invalid_device_message(device)
+    device = resolved.kernel
 
     # Priority 1: try InfluxDB first, selecting the disk by its live serial.
-    live_devices = await _get_live_devices()
-    serial = _live_serial(device, live_devices)
+    live_devices = await _resolved_live_devices(resolved)
+    serial = resolved.serial or _live_serial(device, live_devices)
     influx_data = await _get_influxdb_latest_device(device, serial=serial)
     failed_polls = getattr(influx_data, "failed_polls", None)
+
+    # A SATA disk reported through the NVMe tool is a wrong answer, not a
+    # missing one: refuse it before rendering any health report. The protocol
+    # comes from lsblk, the stored sample's field set or smartctl, in that
+    # order, and never from opening the device with nvme-cli.
+    detected, source = _detect_device_type(device, live_devices, influx_data or None)
+    if detected and detected != "NVMe":
+        return _not_nvme_message(device, detected, source)
+
     if influx_data:
         return await _influxdb_health_tool_output(
             influx_data, device, live_devices=live_devices
@@ -1468,6 +1790,11 @@ async def get_nvme_health(device: str) -> str | ToolOutput:
             "❌ No data sources available.\n"
             "Enable at least one: host.enabled or influxdb.enabled in config.yaml."
         )
+
+    if not detected:
+        detected, source = await _smartctl_device_type(device)
+        if detected and detected != "NVMe":
+            return _not_nvme_message(device, detected, source)
 
     cmd = NVME_SMART_LOG.render(device=device)
     if not security.is_command_safe(cmd):
@@ -1499,7 +1826,9 @@ async def run_smart_test(device: str, test_type: str = "short") -> str | ToolOut
     - conveyance: For drives transported after purchase (~5 minutes).
 
     Args:
-        device: Block device name (e.g., 'sda', 'nvme0n1')
+        device: Disk to test. Accepted: a kernel name ('sda', 'nvme0n1'), a bare
+            NVMe controller ('nvme0'), '/dev/<name>', a '/dev/disk/by-id/' path, a
+            disk serial number or a role label ('Parity1', 'Cache1').
         test_type: Test type - short, long, or conveyance (default: short)
 
     Returns:
@@ -1511,8 +1840,10 @@ async def run_smart_test(device: str, test_type: str = "short") -> str | ToolOut
             "Set 'host.enabled: true' in config.yaml."
         )
 
-    if not security.validate_device_name(device):
-        return f"❌ Invalid device name: {device}"
+    resolved = await _resolve_device_argument(device)
+    if resolved is None:
+        return _invalid_device_message(device)
+    device = resolved.kernel
 
     if not security.validate_smart_test_type(test_type):
         return f"❌ Invalid test type: {test_type}. Use: short, long, conveyance"
@@ -2062,15 +2393,19 @@ async def get_full_disk_report(device: str | None = None) -> str | ToolOutput:
     This is the recommended tool for overall disk health assessment.
 
     Args:
-        device: Optional specific device name (e.g., 'sda')
+        device: Optional disk to inspect. Accepted: a kernel name ('sda',
+            'nvme0n1'), a bare NVMe controller ('nvme0'), '/dev/<name>', a
+            '/dev/disk/by-id/' path, a disk serial number or a role label
+            ('Parity1', 'Cache1'). Omit for the overview of every disk.
 
     Returns:
         Comprehensive disk health report
     """
     if device:
-        if not security.validate_device_name(device):
-            return f"❌ Invalid device name: {device}"
-        return await get_disk_health(device)
+        resolved = await _resolve_device_argument(device)
+        if resolved is None:
+            return _invalid_device_message(device)
+        return await get_disk_health(resolved.kernel)
 
     # Overview of all disks - try InfluxDB first
     lines = ["=== Disk Health Overview ===\n"]

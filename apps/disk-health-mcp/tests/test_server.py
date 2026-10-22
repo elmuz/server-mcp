@@ -7,6 +7,7 @@ the actual tool logic without a real host.
 
 import json
 from datetime import UTC, datetime, timedelta
+from typing import ClassVar
 
 import pytest
 
@@ -1161,10 +1162,15 @@ class TestInfluxFreshnessAndIdentity:
     ):
         from unittest.mock import AsyncMock, patch
 
+        # A sample for an NVMe disk must carry NVMe wear fields: a row with
+        # ATA-only ``exit_status`` is detected as SATA and refused by
+        # ``get_nvme_health`` before the identity check.
+        nvme_fields = {"percentage_used": 5, "available_spare": 100}
         row = self._row(
             device="nvme0" if live_name.startswith("nvme") else "sda",
             model="KINGSTON-SOMETHING",
             serial_no="KINGSTON-SERIAL",
+            **(nvme_fields if live_name.startswith("nvme") else {}),
         )
         live = {
             live_name: self._live(
@@ -1585,6 +1591,310 @@ class TestNvmeDeviceValidation:
 
         assert "Invalid device name" in result
         influx_lookup.assert_not_awaited()
+
+
+class TestDeviceVocabulary:
+    """T-11: every device spelling resolves to the same physical disk."""
+
+    LIVE: ClassVar[dict[str, dict]] = {
+        "sda": {
+            "name": "sda",
+            "model": "ST18000NT001-3NF101",
+            "serial": "ZVTFF3JB",
+            "tran": "sata",
+        },
+        "nvme0n1": {
+            "name": "nvme0n1",
+            "model": "CT1000P2SSD8",
+            "serial": "2146E5E54409",
+            "tran": "nvme",
+        },
+    }
+
+    @staticmethod
+    def _nvme_sample():
+        return {
+            "device": "Cache1",
+            "reset_status": 0,
+            "health_ok": True,
+            "model": "CT1000P2SSD8",
+            "serial_no": "2146E5E54409",
+            "percentage_used": 8,
+            "available_spare": 100,
+            "temp_c": 35,
+            "power_on_hours": 37429,
+            "time": datetime.now(UTC).isoformat(),
+        }
+
+    @pytest.mark.parametrize(
+        "spelling",
+        [
+            "nvme0n1",
+            "nvme0",
+            "/dev/nvme0n1",
+            "/dev/disk/by-id/nvme-CT1000P2SSD8_2146E5E54409",
+            "2146E5E54409",
+            "Cache1",
+        ],
+    )
+    async def test_every_spelling_resolves_to_the_nvme_disk(
+        self, mock_config, spelling
+    ):
+        from unittest.mock import AsyncMock, patch
+
+        with (
+            patch("disk_health_mcp.server.config", mock_config),
+            patch(
+                "disk_health_mcp.server._get_live_devices",
+                new=AsyncMock(return_value=self.LIVE),
+            ),
+            patch(
+                "disk_health_mcp.server._influxdb_identity_serial",
+                new=AsyncMock(return_value="2146E5E54409"),
+            ),
+        ):
+            resolved = await server._resolve_device_argument(spelling)
+
+        assert resolved is not None
+        assert resolved.kernel == "nvme0n1"
+        # A canonical name is canonical without a host round trip; the tool
+        # resolves its serial from lsblk. Every other spelling resolves it here.
+        assert resolved.serial in {"", "2146E5E54409"}
+
+    @pytest.mark.parametrize("spelling", ["nvme0n1", "nvme0"])
+    async def test_smart_attributes_returns_one_attribute_set(
+        self, mock_config, spelling
+    ):
+        from unittest.mock import AsyncMock, patch
+
+        attributes = [{"name": "Percentage_Used", "raw_value": 8}]
+        attr_lookup = AsyncMock(return_value=attributes)
+        with (
+            patch("disk_health_mcp.server.config", mock_config),
+            patch(
+                "disk_health_mcp.server._get_live_devices",
+                new=AsyncMock(return_value=self.LIVE),
+            ),
+            patch(
+                "disk_health_mcp.server._get_influxdb_latest_attributes",
+                attr_lookup,
+            ),
+            patch(
+                "disk_health_mcp.server._get_influxdb_latest_device",
+                new=AsyncMock(return_value=self._nvme_sample()),
+            ),
+        ):
+            result = await server.get_smart_attributes(spelling)
+
+        assert "SMART Attributes for nvme0n1" in result
+        assert attr_lookup.await_args.kwargs["serial"] == "2146E5E54409"
+        assert attr_lookup.await_args.args[0] == "nvme0n1"
+
+    async def test_smart_test_renders_the_resolved_kernel_name(self, mock_config):
+        from unittest.mock import AsyncMock, patch
+
+        executor = AsyncMock()
+        executor.execute_safe_command = AsyncMock(
+            return_value="SMART self-test started"
+        )
+        with (
+            patch("disk_health_mcp.server.config", mock_config),
+            patch("disk_health_mcp.server.executor", executor),
+            patch(
+                "disk_health_mcp.server._get_live_devices",
+                new=AsyncMock(return_value=self.LIVE),
+            ),
+        ):
+            await server.run_smart_test("nvme0", "short")
+
+        commands = [
+            call.args[0] for call in executor.execute_safe_command.await_args_list
+        ]
+        assert "/usr/sbin/smartctl -n standby -t short /dev/nvme0n1" in commands
+        assert all("/dev/nvme0 " not in command for command in commands)
+
+    async def test_label_resolves_through_influxdb_to_the_live_disk(self, mock_config):
+        from unittest.mock import AsyncMock, patch
+
+        client = AsyncMock()
+        client.query = AsyncMock(
+            return_value=('✅ Query successful\n\n[{"serial_no": "2146E5E54409"}]')
+        )
+        with (
+            patch("disk_health_mcp.server.config", mock_config),
+            patch(
+                "disk_health_mcp.server._get_live_devices",
+                new=AsyncMock(return_value=self.LIVE),
+            ),
+            patch(
+                "disk_health_mcp.server._get_influxdb_client",
+                new=lambda: client,
+            ),
+        ):
+            resolved = await server._resolve_device_argument("Cache1")
+
+        assert resolved is not None
+        assert resolved.kernel == "nvme0n1"
+        assert resolved.serial == "2146E5E54409"
+        query = client.query.await_args.args[0]
+        assert "device = 'Cache1'" in query
+
+    async def test_resolved_command_contains_only_the_kernel_name(self, patched_server):
+        from unittest.mock import AsyncMock, patch
+
+        from server_management_lib import SecurityValidator
+
+        patched_server["config"]["influxdb"]["enabled"] = False
+        executor = patched_server["executor"]
+        with patch(
+            "disk_health_mcp.server._get_live_devices",
+            new=AsyncMock(return_value=self.LIVE),
+        ):
+            await server.get_smart_attributes("2146E5E54409")
+
+        commands = [
+            call.args[0] for call in executor.execute_safe_command.await_args_list
+        ]
+        assert commands == ["/usr/sbin/smartctl -j -a /dev/nvme0n1"]
+        assert "2146E5E54409" not in commands[0]
+        assert SecurityValidator({}).is_command_safe(commands[0]) is True
+
+    @pytest.mark.parametrize("raw", ["sda;rm -rf /", "../../etc", "sda1", ""])
+    async def test_invalid_spelling_never_touches_a_data_source(self, mock_config, raw):
+        from unittest.mock import AsyncMock, patch
+
+        influx_lookup = AsyncMock(return_value=None)
+        with (
+            patch("disk_health_mcp.server.config", mock_config),
+            patch(
+                "disk_health_mcp.server._get_live_devices",
+                new=AsyncMock(return_value=self.LIVE),
+            ),
+            patch(
+                "disk_health_mcp.server._get_influxdb_latest_device",
+                influx_lookup,
+            ),
+        ):
+            result = await server.get_disk_health(raw)
+
+        assert "Invalid device name" in result
+        assert "Accepted forms" in result
+        influx_lookup.assert_not_awaited()
+
+
+def _nvme_tool():
+    """Return the structured ``get_nvme_health`` wrapper.
+
+    The module-level function is the text wrapper used by direct callers; the
+    registered tool returns the ``ToolResponse`` that carries structured data.
+    """
+    return server.mcp._tool_manager.get_tool("get_nvme_health").fn
+
+
+class TestNvmeDeviceTypeCheck:
+    """T-11: get_nvme_health must refuse a non-NVMe disk."""
+
+    @staticmethod
+    def _sata_row():
+        return {
+            "device": "Parity1",
+            "exit_status": 0,
+            "health_ok": True,
+            "model": "ST18000NT001-3NF101",
+            "serial_no": "ZVTFF3JB",
+            "temp_c": 30,
+            "power_on_hours": 14980,
+            "reallocated_sectors_count": 0,
+            "wwn": "5000c500e8e30d8b",
+            "time": datetime.now(UTC).isoformat(),
+        }
+
+    async def test_sata_disk_from_lsblk_is_refused(self, mock_config):
+        from unittest.mock import AsyncMock, patch
+
+        run_command = AsyncMock(return_value="should not run")
+        with (
+            patch("disk_health_mcp.server.config", mock_config),
+            patch(
+                "disk_health_mcp.server._get_live_devices",
+                new=AsyncMock(
+                    return_value={
+                        "sda": {
+                            "name": "sda",
+                            "model": "ST18000NT001-3NF101",
+                            "serial": "ZVTFF3JB",
+                            "tran": "sata",
+                        }
+                    }
+                ),
+            ),
+            patch(
+                "disk_health_mcp.server._get_influxdb_latest_device",
+                new=AsyncMock(return_value=None),
+            ),
+            patch("disk_health_mcp.server._run_command", run_command),
+        ):
+            result = await _nvme_tool()("sda")
+
+        assert result.ok is False
+        assert "SATA (ATA/SAT)" in result.text
+        assert "not NVMe" in result.text
+        assert result.data["detected_type"] == "SATA (ATA/SAT)"
+        assert result.data["detection_source"] == "lsblk"
+        run_command.assert_not_awaited()
+
+    async def test_influxdb_only_sata_sample_is_refused(self, mock_config):
+        from unittest.mock import AsyncMock, patch
+
+        config = dict(mock_config)
+        config["host"] = {"enabled": False}
+        run_command = AsyncMock(return_value="should not run")
+        with (
+            patch("disk_health_mcp.server.config", config),
+            patch(
+                "disk_health_mcp.server._get_live_devices",
+                new=AsyncMock(return_value=None),
+            ),
+            patch(
+                "disk_health_mcp.server._get_influxdb_latest_device",
+                new=AsyncMock(return_value=self._sata_row()),
+            ),
+            patch("disk_health_mcp.server._run_command", run_command),
+        ):
+            result = await _nvme_tool()("sda")
+
+        assert result.ok is False
+        assert "not NVMe" in result.text
+        assert result.data["detection_source"] == "influxdb"
+        run_command.assert_not_awaited()
+
+    @pytest.mark.parametrize("spelling", ["nvme0", "nvme0n1", "2146E5E54409"])
+    async def test_nvme_disk_is_not_refused(self, mock_config, spelling):
+        from unittest.mock import AsyncMock, patch
+
+        live = {
+            "nvme0n1": {
+                "name": "nvme0n1",
+                "model": "CT1000P2SSD8",
+                "serial": "2146E5E54409",
+                "tran": "nvme",
+            }
+        }
+        with (
+            patch("disk_health_mcp.server.config", mock_config),
+            patch(
+                "disk_health_mcp.server._get_live_devices",
+                new=AsyncMock(return_value=live),
+            ),
+            patch(
+                "disk_health_mcp.server._get_influxdb_latest_device",
+                new=AsyncMock(return_value=TestDeviceVocabulary._nvme_sample()),
+            ),
+        ):
+            result = await _nvme_tool()(spelling)
+
+        assert "not NVMe" not in result.text
+        assert result.data["device"] == "nvme0n1"
 
 
 class TestConfigBootstrap:

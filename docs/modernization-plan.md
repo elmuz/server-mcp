@@ -18,7 +18,8 @@ removed). Earlier snapshots remain in git history.
   `0.3.0`. The read-only smoke checks in 6.3 passed against both the workspace tree and the
   installed packages. The only open items are the catafalco prerequisites in 3.5 (outside
   this repository) and the deferred P2-15.
-- **Last updated:** 2026-10-22 (`0.3.0` tagged and published by CI; in-repo backlog closed)
+- **Last updated:** 2026-10-22 (`0.3.0` tagged and published; P1-20 device vocabulary
+  staged for `0.4.0`)
 - **Provenance:** every finding below was re-verified against `81733d2` before merging;
   findings already fixed are marked `[x]` and kept only as history.
 - **Target deployment:** `catafalco` (Ubuntu home server/NAS; Docker services under `/srv`)
@@ -614,6 +615,28 @@ rather than adding new surface.
       mismatch is reported without a `PASSED`/100 result.
 - **Docs:** `docs/tools.md` explains the `Data1 (/dev/sda)` rendering, the whole-disk rule
       and that a `devices` value can always be passed back to `get_disk_health`.
+
+#### P1-20 One canonical device vocabulary (`catafalco` T-11)
+
+- [x] **Fix and test.** `disk-health-mcp` accepted only canonical kernel names, so the
+      `nvmeX` spelling used by Telegraf/smartd/tool output, `/dev/<name>`, by-id paths,
+      serials and role labels were rejected even though the serial is the documented disk
+      identity. Every device-taking tool now uses `server_management_lib.normalize_device_name()`
+      plus a serial-first resolver, and only the resolved canonical name (still gated by
+      `DEVICE_NAME_PATTERN`/`validate_device_name`) is rendered into a command. This links
+      back to the `catafalco` backlog item T-11; check it off there after `0.4.0` is
+      deployed and the MCP process has been reloaded.
+- [x] `get_nvme_health` detects the protocol from `lsblk` `tran`, the stored sample's field
+      set or `smartctl -j`, and refuses a SATA disk (with the detected type named) instead
+      of returning the identical generic SMART report `get_disk_health` produces.
+- **Tests:** `normalize_device_name` accepts/rejects matrix in
+      `packages/server-management-lib/tests/test_security.py`; per-spelling resolution,
+      `nvme0`/`nvme0n1` attribute equivalence, the `run_smart_test` argv, and the
+      non-NVMe rejection paths (lsblk and InfluxDB-only) in
+      `apps/disk-health-mcp/tests/test_server.py`.
+- **Docs:** `docs/tools.md` (device vocabulary and NVMe protocol check),
+      `docs/security-model.md` (input vocabulary vs command boundary) and CHANGELOG
+      `0.4.0`.
 
 ### 3.3 P2 — modernization and polish
 
