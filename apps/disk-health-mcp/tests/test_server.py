@@ -1928,3 +1928,20 @@ class TestConfigBootstrap:
         assert resolved == config_file
         assert server.config["ssh"]["host"] == "diskhost.example.com"
         assert server.executor.services_base_path == "/data/srv"
+
+
+def test_failed_poll_summary_uses_readable_status_labels():
+    rows = [
+        {
+            "device": "Data1",
+            "exit_status": 2,
+            "time": "2026-10-22T20:00:00Z",
+        }
+        for _ in range(196)
+    ]
+
+    text = server._format_failed_polls(rows)
+
+    assert "latest status: exit_status=2 (standby/skipped)" in text
+    assert "seen: standby/skipped (196)" in text
+    assert "2 x196" not in text

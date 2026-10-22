@@ -6,8 +6,10 @@ at `output.max_bytes` (64 KiB by default).
 
 Every tool also returns MCP `structuredContent`: a `ToolResponse` object with `ok`, `tool`,
 `summary`, `text` and a `data` payload (container lists, query rows, file metadata and so
-on). Text-only clients keep receiving the same readable block as before. The config schema
-and the tool catalog are available as MCP resources; see [architecture.md](architecture.md).
+on). Error responses include `data.error` with `message` and `summary`, even when the tool
+returned only a readable error string. Text-only clients keep receiving the same readable
+block as before. The config schema and the tool catalog are available as MCP resources; see
+[architecture.md](architecture.md).
 
 ## remote-server-mcp
 

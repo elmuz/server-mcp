@@ -42,6 +42,10 @@ class TestBuildResponse:
 
         assert response.ok is False
         assert response.summary == "❌ failed"
+        assert response.data["error"] == {
+            "message": "❌ failed",
+            "summary": "❌ failed",
+        }
 
     def test_leading_whitespace_still_detects_error(self):
         assert build_response("tool", "\n  ❌ failed").ok is False
@@ -59,6 +63,18 @@ class TestBuildResponse:
         assert response.ok is True
         assert response.summary == "custom summary"
         assert response.data == {"count": 2}
+
+    def test_tool_output_error_keeps_its_data_and_adds_an_error_object(self):
+        result = ToolOutput(
+            "❌ device unavailable",
+            data={"device": "sda", "source": "smartctl"},
+        )
+
+        response = build_response("get_disk_health", result)
+
+        assert response.ok is False
+        assert response.data["device"] == "sda"
+        assert response.data["error"]["message"] == "❌ device unavailable"
 
     def test_tool_output_defaults_and_data_copy(self):
         data = {"items": [1]}

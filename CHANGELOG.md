@@ -35,10 +35,14 @@ versioning.
   `smartctl -l selftest` log. `start_service` now requires `confirm=true`, checks state
   first and reports already-running containers without calling `docker start`.
 - SnapRAID status is parsed into per-disk/total rows, sync state, scrub ages, errors and the
-  zero-timestamp count while keeping the raw text. `list_disks` returns a readable table,
-  `list_service_files` errors name the full path and base directory, `.env` redaction now
-  masks only credential keys (and lists them in `data.redacted_keys`), and NVMe
-  error-information counters are labelled as cumulative warnings rather than media errors.
+  zero-timestamp count while keeping the raw text; the redundant generic `fields` map is
+  gone. `list_disks` returns a readable table, `list_service_files` errors name the full path
+  and base directory, `.env` redaction now masks only credential keys (and lists them in
+  `data.redacted_keys`), and NVMe error-information counters are labelled as cumulative
+  warnings rather than media errors. Failed-poll summaries use readable status labels
+  (`standby/skipped (196)`) instead of `2 x196`.
+- Every error response now includes a structured `data.error` object (`message` and
+  `summary`), including tools that return only a readable error string.
 - Container tools point a host systemd unit at the host-service tools, file-logging services
   at their mounted log directory, and Compose tools refuse an Ansible-managed or
   file-less directory without invoking Docker. Host journals accept `since`, and

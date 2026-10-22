@@ -348,6 +348,15 @@ def _exit_status(value: object) -> int | None:
         return None
 
 
+def _exit_status_label(status: int | None) -> str:
+    """Return a readable label for a Telegraf ``exit_status`` value."""
+    if status is None:
+        return "unknown"
+    if status == 2:
+        return "standby/skipped"
+    return f"exit_status={status}"
+
+
 def _format_failed_polls(failed_polls: list[dict] | None, *, prefix: str = "  ") -> str:
     """Describe recent non-success polls instead of hiding them."""
     failures = [row for row in (failed_polls or []) if isinstance(row, dict)]
@@ -367,21 +376,28 @@ def _format_failed_polls(failed_polls: list[dict] | None, *, prefix: str = "  ")
     latest_age = _format_sample_age(latest) or "timestamp unavailable"
     count = len(failures)
     count_text = f"at least {count}" if count >= SMART_FAILURE_LIMIT else str(count)
-    suffix = " (standby/skipped)" if latest_status == 2 else ""
-    status_text = "unknown" if latest_status is None else str(latest_status)
+    if latest_status is None:
+        latest_label = "unknown"
+    elif latest_status == 2:
+        latest_label = "exit_status=2 (standby/skipped)"
+    else:
+        latest_label = f"exit_status={latest_status}"
     # Counted summary, not one token per row: the failure list can be long and
     # the output is returned to the model.
     counts: dict[int, int] = {}
     for status in seen_statuses:
         counts[status] = counts.get(status, 0) + 1
     statuses_text = (
-        ", ".join(f"{status} x{amount}" for status, amount in sorted(counts.items()))
+        ", ".join(
+            f"{_exit_status_label(status)} ({amount})"
+            for status, amount in sorted(counts.items())
+        )
         or "unknown"
     )
     return (
         f"{prefix}⚠️ Recent failed polls: {count_text} non-success SMART poll(s) "
-        f"in the last {SMART_LOOKBACK}; latest {latest_age} "
-        f"(exit_status={status_text}{suffix}; seen: {statuses_text})."
+        f"in the last {SMART_LOOKBACK}; latest {latest_age}; latest status: "
+        f"{latest_label}; seen: {statuses_text}."
     )
 
 
@@ -2283,7 +2299,6 @@ async def get_snapraid_status() -> str | ToolOutput:
         ok=not _command_failed(output),
         data={
             "status": output,
-            "fields": _parse_key_value_output(output),
             "parsed": _parse_snapraid_status(output),
         },
     )

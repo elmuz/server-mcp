@@ -72,7 +72,12 @@ def as_text(result: ToolResult) -> str:
 
 
 def build_response(tool: str, result: ToolResult) -> ToolResponse:
-    """Build the structured envelope for a tool result."""
+    """Build the structured envelope for a tool result.
+
+    An error response always carries a structured ``data.error`` object, even
+    when the tool returned only a readable string. A ``ToolOutput`` that
+    already publishes its own ``error`` key is left unchanged.
+    """
     if isinstance(result, ToolOutput):
         text = result.text
         ok = _ok_from_text(text) if result.ok is None else result.ok
@@ -83,6 +88,8 @@ def build_response(tool: str, result: ToolResult) -> ToolResponse:
         ok = _ok_from_text(text)
         summary = _first_line(text)
         data = {}
+    if not ok and "error" not in data:
+        data["error"] = {"message": text, "summary": summary}
     return ToolResponse(ok=ok, tool=tool, summary=summary, text=text, data=data)
 
 

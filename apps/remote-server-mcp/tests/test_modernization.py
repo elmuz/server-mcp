@@ -233,7 +233,7 @@ class TestStructuredOutput:
         response = asyncio.run(tool.fn(service="missing"))
 
         assert response.ok is False
-        assert response.data == {}
+        assert response.data["error"]["message"].startswith("❌")
 
 
 def _resource_json(uri: str) -> dict:

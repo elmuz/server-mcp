@@ -835,10 +835,12 @@ complete; the one host-side prerequisite remains in catafalco.
 - [x] **`start_service` checks state and requires confirmation.** Already-running containers
       are reported with `changed: false` and are not passed to `docker start`; unconfirmed
       calls return a preview only.
-- [x] **Output and parsing fixes.** SnapRAID structured parsing, a readable `list_disks`
-      table, full paths in `list_service_files` errors, key-aware `.env` redaction with
-      `redacted_keys`, NVMe error-information severity, and the InfluxDB v3 `GROUP BY`
-      projection advisory in both servers.
+- [x] **Output and parsing fixes.** SnapRAID structured parsing (the redundant legacy
+      `fields` map removed), a readable `list_disks` table, full paths in
+      `list_service_files` errors, key-aware `.env` redaction with `redacted_keys`, NVMe
+      error-information severity, and the InfluxDB v3 `GROUP BY` projection advisory in both
+      servers. Failed-poll summaries use readable status labels, and error responses carry a
+      structured `data.error` object.
 - [x] **Routing fixes.** Host-unit hints from the container tools, file-log hints for
       nginx/swag, Ansible-managed/absent-compose detection before Compose runs, host journal
       `since` support and a local `search_host_service_logs`. Journal relative durations are

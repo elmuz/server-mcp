@@ -240,7 +240,7 @@ class TestEveryToolHasStructuredData:
             ),
             ("get_zfs_status", {}, {"pool_status", "pool_list"}),
             ("get_raid_status", {}, {"mdstat", "mdadm_detail"}),
-            ("get_snapraid_status", {}, {"status", "fields"}),
+            ("get_snapraid_status", {}, {"status", "parsed"}),
             ("get_mount_status", {}, {"mounts", "mergerfs", "usage"}),
             ("get_io_stats", {}, {"iostat"}),
         ],
