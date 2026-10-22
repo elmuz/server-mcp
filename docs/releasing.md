@@ -81,7 +81,7 @@ some links. The new-repository path is cleaner.
 ## PyPI releases
 
 The three packages are published separately but share one version. **Publish the library
-first:** the apps depend on `server-management-lib>=0.3,<0.4`, so an app that is uploaded
+first:** the apps depend on `server-management-lib>=0.4,<0.5`, so an app that is uploaded
 before its library resolves to nothing and cannot be installed.
 
 | PyPI project | Source directory |

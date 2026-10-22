@@ -12,15 +12,14 @@ removed). Earlier snapshots remain in git history.
   the stale-SMART and short-credential-key fixes. `v0.2.1` was published by
   `.github/workflows/publish.yml` through PyPI trusted publishing with no stored token
   (run `39507146796`), so the steady-state release path is verified.
-  **Current release:** `v0.3.0` (signed, 2026-10-22) ships the serial-based disk identity
-  (P1-19), the stale-sample handling and the sample-age/`AUTH_*` fixes. Publish run
-  `39852335149` uploaded all three packages in library→apps order, and `uvx` resolves
-  `0.3.0`. The read-only smoke checks in 6.3 passed against both the workspace tree and the
-  installed packages. The remaining open items are the catafalco prerequisites in 3.5 and
-  the host-side self-test privilege in 3.6, both outside this repository. All in-repo
-  handover fixes from 2026-10-23 are recorded in 3.6.
-- **Last updated:** 2026-10-23 (handover fixes for self-tests, `start_service`, output
-  parsing, routing and host units; `0.4.0` still unreleased)
+  **Current release:** `v0.4.0` (signed, 2026-10-23) ships the serial-based disk identity
+  (P1-19), the live-operation handover fixes in 3.6, the journal-time normalization and the
+  structured error payloads. The tag push uses the same trusted-publishing workflow as
+  `v0.3.0` (run `39852335149`), uploading all three packages in library→apps order. The
+  remaining open items are the catafalco prerequisites in 3.5 and the host-side self-test
+  privilege in 3.6, both outside this repository.
+- **Last updated:** 2026-10-23 (`v0.4.0` release preparation; handover fixes for self-tests,
+  `start_service`, output parsing, routing, host units and structured errors)
 - **Provenance:** every finding below was re-verified against `81733d2` before merging;
   findings already fixed are marked `[x]` and kept only as history.
 - **Target deployment:** `catafalco` (Ubuntu home server/NAS; Docker services under `/srv`)
