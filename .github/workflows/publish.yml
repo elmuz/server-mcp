@@ -77,7 +77,7 @@ jobs:
       - name: Build
         run: uv build --all-packages
 
-      # Dependency order matters: the apps require server-management-lib>=0.2,<0.3.
+      # Dependency order matters: the apps require server-management-lib>=0.3,<0.4.
       # --check-url makes a re-run skip files that already uploaded.
       - name: Publish server-management-lib
         run: uv publish --trusted-publishing always --check-url https://pypi.org/simple/ "dist/server_management_lib-*"

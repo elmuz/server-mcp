@@ -4,7 +4,7 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses semantic
 versioning.
 
-## [Unreleased]
+## [0.3.0] - 2026-10-22
 
 ### Fixed
 
@@ -17,6 +17,10 @@ versioning.
   on the NVMe ones, so every NVMe attribute was discarded and the tool fell through to an
   unprivileged `smartctl` that cannot open the device. Standby rows carry no attribute rows
   at all, so no filter is needed.
+- Disk sample ages are pluralized (`1 minute ago`, not `1 minutes ago`).
+- `get_service_file` no longer masks benign diagnostics whose only sensitive word is
+  `auth`: `AUTH_TYPE`, `AUTH_USERNAME` and `AUTH_MODE` stay readable, while a bare `AUTH`,
+  `BASIC_AUTH`, `PROXY_AUTH`, `AUTH_TOKEN` and `AUTH_PASSWORD` are still masked.
 
 ### Changed
 

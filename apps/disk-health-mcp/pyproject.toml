@@ -1,13 +1,13 @@
 [project]
 name = "disk-health-mcp"
-version = "0.2.1"
+version = "0.3.0"
 description = "Disk health diagnostics MCP server: SMART, NVMe, ZFS, RAID and I/O metrics with manufacturer-aware severity."
 readme = "README.md"
 license = "MIT"
 requires-python = ">=3.11"
 dependencies = [
     "mcp>=2.3,<3",
-    "server-management-lib>=0.2,<0.3",
+    "server-management-lib>=0.3,<0.4",
 ]
 
 authors = [

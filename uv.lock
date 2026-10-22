@@ -597,7 +597,7 @@ wheels = [
 
 [[package]]
 name = "disk-health-mcp"
-version = "0.2.1"
+version = "0.3.0"
 source = { editable = "apps/disk-health-mcp" }
 dependencies = [
     { name = "mcp" },
@@ -1725,7 +1725,7 @@ wheels = [
 
 [[package]]
 name = "remote-server-mcp"
-version = "0.2.1"
+version = "0.3.0"
 source = { editable = "apps/remote-server-mcp" }
 dependencies = [
     { name = "mcp" },
@@ -1900,7 +1900,7 @@ wheels = [
 
 [[package]]
 name = "server-management-lib"
-version = "0.2.1"
+version = "0.3.0"
 source = { editable = "packages/server-management-lib" }
 dependencies = [
     { name = "aiohttp" },
@@ -1923,7 +1923,7 @@ requires-dist = [
 
 [[package]]
 name = "server-mcp-workspace"
-version = "0.2.1"
+version = "0.3.0"
 source = { virtual = "." }
 
 [package.dev-dependencies]

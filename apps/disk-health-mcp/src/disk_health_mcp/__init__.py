@@ -8,7 +8,7 @@ Uses server-management-lib for SSH management, security validation,
 and time-series database clients.
 """
 
-__version__ = "0.2.1"
+__version__ = "0.3.0"
 
 from .server import cli, main, mcp
 
