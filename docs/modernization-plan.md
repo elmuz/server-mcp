@@ -12,12 +12,13 @@ removed). Earlier snapshots remain in git history.
   the stale-SMART and short-credential-key fixes. `v0.2.1` was published by
   `.github/workflows/publish.yml` through PyPI trusted publishing with no stored token
   (run `39507146796`), so the steady-state release path is verified.
-  **Next release:** `0.3.0`, which ships the serial-based disk identity (P1-19) plus the
-  sample-age and benign-`AUTH_*` fixes. The read-only smoke checks in 6.3 passed on the
-  current tree on 2026-10-22. The only open items are the catafalco prerequisites in 3.5
-  (outside this repository) and the deferred P2-15.
-- **Last updated:** 2026-10-22 (in-repo backlog closed; P1-19 serial identity recorded;
-  P2-15 deferred; `0.3.0` prepared)
+  **Current release:** `v0.3.0` (signed, 2026-10-22) ships the serial-based disk identity
+  (P1-19), the stale-sample handling and the sample-age/`AUTH_*` fixes. Publish run
+  `39852335149` uploaded all three packages in library→apps order, and `uvx` resolves
+  `0.3.0`. The read-only smoke checks in 6.3 passed against both the workspace tree and the
+  installed packages. The only open items are the catafalco prerequisites in 3.5 (outside
+  this repository) and the deferred P2-15.
+- **Last updated:** 2026-10-22 (`0.3.0` tagged and published by CI; in-repo backlog closed)
 - **Provenance:** every finding below was re-verified against `81733d2` before merging;
   findings already fixed are marked `[x]` and kept only as history.
 - **Target deployment:** `catafalco` (Ubuntu home server/NAS; Docker services under `/srv`)
@@ -833,7 +834,11 @@ blocked the release.
       trusted publishing, so later releases store no token.
 - [x] **Archive the old repositories.** `remote-server-mcp`, `disk-health-mcp` and
       `server-management-lib` are archived on GitHub.
-- [x] **Make the CI badge live.** The README badge URL resolves and the workflow is green.
+- [x] **`v0.3.0`.** Signed annotated tag on `c688dea` (`chore(release): 0.3.0`) with the
+      serial-identity work (P1-19), the pluralized sample ages and the narrowed `AUTH_*`
+      redaction. Built from a clean `dist/`, published by the trusted-publishing workflow
+      (run `39852335149`) in library→apps order, and verified with `uvx` and installed-package
+      smoke calls.
 - **Prerequisite:** `gh` was missing during the migration and is now installed and
   authenticated (`gh auth status`), so `gh workflow run`, `gh run watch` and
   `gh api repos/elmuz/server-mcp/environments` are available for the release steps.
@@ -945,6 +950,7 @@ uv build --all-packages
 | Remote CI | green through the `0.2.1` release and the post-release commits, Python 3.11–3.14 |
 | `uv build --all-packages` | all three wheels/sdists build, `py.typed` included; `dist/` is always rebuilt from scratch |
 | Package version | `0.3.0` in the four `pyproject.toml` files, the three `__version__` values, `uv.lock` and the newest `CHANGELOG.md` section |
+| PyPI | `0.3.0` on all three projects (publish run `39852335149`); `uvx` resolves the installed wheels |
 
 ### 6.3 Live smoke checks (read-only)
 
@@ -983,8 +989,10 @@ no-data error; mount/mergerFS, SnapRAID and `iostat` reported real data; `immich
 resolved through its compose project; `deluge` was healthy with probe output; `vllm` was
 reported as unknown; `telegraf` logs and the `sshd` refusal worked; `.env` and `compose.yml`
 were redacted; the InfluxDB query returned rows and Prometheus reported "not enabled".
-These checks used the workspace, not the PyPI artifact; repeat the `uvx` variant after the
-`0.3.0` upload.
+These checks used the workspace. The installed `0.3.0` artifacts were then exercised through
+the MCP client (`uvx --from …==0.3.0`): `get_disk_health("sda")` returned `ok:true`,
+`get_disk_health("vda")` and `get_host_service_status("sshd")` returned `ok:false`, and
+`get_service_status("immich-server")` returned `ok:true`.
 
 Additional checks after the review fixes:
 
