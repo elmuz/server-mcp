@@ -14,10 +14,10 @@ removed). Earlier snapshots remain in git history.
   (run `39507146796`), so the steady-state release path is verified.
   **Current release:** `v0.4.0` (signed, 2026-10-23) ships the serial-based disk identity
   (P1-19), the live-operation handover fixes in 3.6, the journal-time normalization and the
-  structured error payloads. The tag push uses the same trusted-publishing workflow as
-  `v0.3.0` (run `39852335149`), uploading all three packages in library→apps order. The
-  remaining open items are the catafalco prerequisites in 3.5 and the host-side self-test
-  privilege in 3.6, both outside this repository.
+  structured error payloads. Publish run `39869621919` uploaded all three packages in
+  library→apps order, and `uvx --no-cache` resolves `0.4.0`. The remaining open items are
+  the catafalco prerequisites in 3.5 and the host-side self-test privilege in 3.6, both
+  outside this repository.
 - **Last updated:** 2026-10-23 (`v0.4.0` release preparation; handover fixes for self-tests,
   `start_service`, output parsing, routing, host units and structured errors)
 - **Provenance:** every finding below was re-verified against `81733d2` before merging;
@@ -896,6 +896,12 @@ complete; the one host-side prerequisite remains in catafalco.
       redaction. Built from a clean `dist/`, published by the trusted-publishing workflow
       (run `39852335149`) in library→apps order, and verified with `uvx` and installed-package
       smoke calls.
+- [x] **`v0.4.0`.** Signed annotated tag on `37ae9dc` with the live-operation handover fixes,
+      journal-time normalization, structured errors and the corrected host-unit defaults.
+      The trusted-publishing workflow (run `39869621919`) uploaded all three packages in
+      library→apps order; `uvx --no-cache` resolves `0.4.0`. A first tag push failed before
+      publishing because one test depended on the developer's local host config; the test was
+      fixed, the unpublished tag was recreated on the corrected commit, and the rerun passed.
 - **Prerequisite:** `gh` was missing during the migration and is now installed and
   authenticated (`gh auth status`), so `gh workflow run`, `gh run watch` and
   `gh api repos/elmuz/server-mcp/environments` are available for the release steps.
