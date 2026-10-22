@@ -126,6 +126,13 @@ class TestRedactSecrets:
 
         assert result == "postgres://user:***@db/app"
 
+    def test_auth_prefixed_diagnostics_stay_readable(self):
+        from server_management_lib.redaction import redact_secrets
+
+        text = "AUTH_TYPE: basic\nAUTH_USERNAME: bob\nAUTH_MODE: ldap\n"
+
+        assert redact_secrets(text) == text
+
     def test_comments_and_unrelated_keys_are_preserved(self):
         from server_management_lib.redaction import redact_secrets
 
@@ -164,6 +171,9 @@ class TestRedactSecrets:
             "apiKey",
             "auth_token",
             "authToken",
+            "auth",
+            "basic_auth",
+            "proxy_auth",
             "secret_key",
             "client_secret",
             "credentials",
@@ -179,7 +189,19 @@ class TestRedactSecrets:
 
     @pytest.mark.parametrize(
         "key",
-        ["user", "username", "host", "port", "tokenizer", "keyboard", "mode"],
+        [
+            "user",
+            "username",
+            "host",
+            "port",
+            "tokenizer",
+            "keyboard",
+            "mode",
+            "auth_type",
+            "AUTH_TYPE",
+            "AUTH_USERNAME",
+            "auth_mode",
+        ],
     )
     def test_non_credential_keys_stay_readable(self, key):
         from server_management_lib.redaction import redact_secrets

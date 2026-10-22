@@ -74,7 +74,6 @@ def redact_env_content(text: str) -> str:
 # are not. The trade-off is deliberate: ``bypass`` is masked too, because a
 # spurious mask is harmless and a missed credential is not.
 _SENSITIVE_KEY_WORDS: tuple[str, ...] = (
-    "auth",
     "authorization",
     "credential",
     "credentials",
@@ -145,7 +144,15 @@ def _is_sensitive_key(key: str) -> bool:
     cleaned = key.strip().strip("\"'").lstrip("-").strip()
     if not cleaned:
         return False
-    return any(word.endswith(_SENSITIVE_KEY_WORDS) for word in _key_words(cleaned))
+    words = _key_words(cleaned)
+    if not words:
+        return False
+    # ``AUTH_TYPE`` and ``AUTH_USERNAME`` are diagnostics, not credentials. A
+    # bare ``AUTH`` or a key whose last word is ``auth`` (``BASIC_AUTH``,
+    # ``PROXY_AUTH``) still names a credential and is masked.
+    if words[-1] == "auth":
+        return True
+    return any(word.endswith(_SENSITIVE_KEY_WORDS) for word in words)
 
 
 def _redact_line(line: str) -> str:
