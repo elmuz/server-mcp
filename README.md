@@ -120,19 +120,19 @@ elsewhere. Disk diagnostics work the same way with `disk-health-mcp` and
 
 ## What the agents can do
 
-`remote-server-mcp` (21 tools):
+`remote-server-mcp` (22 tools):
 
 | Tool | Access |
 |---|---|
 | `list_services`, `list_containers` | read-only |
 | `get_service_logs`, `search_service_logs` | read-only |
 | `get_service_status`, `get_container_health` | read-only |
-| `get_host_service_status`, `get_host_service_logs` | read-only, systemd units from an allowlist |
-| `get_service_file`, `list_service_files` | read-only, confined to the service directory; `.env` values and secrets in compose/config files are masked, and key/credential files are refused |
+| `get_host_service_status`, `get_host_service_logs`, `search_host_service_logs` | read-only, systemd units from an allowlist |
+| `get_service_file`, `list_service_files` | read-only, confined to the service directory; credential values in `.env` and compose/config files are masked, and key/credential files are refused |
 | `get_server_health` | read-only |
 | `query_influxdb`, `query_prometheus`, `get_prometheus_targets` | read-only |
 | `compose_ps` | read-only, scoped to `services_path/<service>` |
-| `start_service` | write |
+| `start_service` | write, requires `confirm=true` |
 | `compose_pull`, `compose_up` | write, require `confirm=true` |
 | `restart_service`, `stop_service`, `compose_down` | destructive, require `confirm=true` |
 
@@ -144,15 +144,17 @@ tools always include Docker timestamps, accept optional `since`/`until` windows 
 `container` filter, and search for the exact literal pattern.
 
 State-changing tools require an explicit `confirm=true` argument: without it they return
-the rendered command as a dry-run preview and execute nothing. A sliding-window rate limit
-(`rate_limit`, default 10 actions per minute) bounds repeated state-changing calls (including
-`start_service` and `disk-health-mcp`'s `run_smart_test`) per server
-process.
+the rendered command as a dry-run preview and execute nothing. This includes
+`start_service`, which reports containers that are already running without restarting them.
+A sliding-window rate limit (`rate_limit`, default 10 actions per minute) bounds repeated
+state-changing calls (including `start_service` and `disk-health-mcp`'s `run_smart_test`)
+per server process.
 
 Host infrastructure services are not Docker containers. `get_host_service_status` and
 `get_host_service_logs` read systemd units through `systemctl`/`journalctl`, but only units
-listed in `security.host_units` (default: `telegraf`, `smartd`, `docker`, `snapraid`,
-`mergerfs`, `smbd`). Arbitrary unit names are rejected before any command runs.
+listed in `security.host_units` (default: `telegraf`, `smartmontools`, `docker`, `smbd`).
+Arbitrary unit names are rejected before any command runs. Journal reads accept a `since`
+window, and `search_host_service_logs` filters the journal for a literal pattern.
 
 `disk-health-mcp` (13 tools): disk listing, full health report, SMART attributes, NVMe
 health, SMART self-tests, ZFS/RAID/SnapRAID status, mergerFS and mount summaries, I/O
@@ -160,7 +162,8 @@ statistics and read-only InfluxDB/Prometheus queries. SnapRAID and mergerFS tool
 mergerFS + SnapRAID hosts; `get_zfs_status` and `get_raid_status` cover ZFS and mdadm
 stacks. SMART reports use the last successful InfluxDB sample in the last 24 hours and
 report its age, so a sleeping disk no longer appears as `Unknown` / `0°C`. `run_smart_test`
-pre-flights `smartctl` and skips a sleeping disk instead of spinning it up. Full tables are
+pre-flights `smartctl`, reports permission/standby/unsupported failures explicitly and omits
+the standby skip flag for NVMe (which has no standby state). Full tables are
 in [docs/tools.md](docs/tools.md).
 
 ## How it is put together

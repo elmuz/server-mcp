@@ -571,3 +571,29 @@ class TestSmartctlFixtures:
             raw_value=0,
         )
         assert assess_attribute_severity(attr, False) == "ok"
+
+
+def test_nvme_error_information_log_is_a_warning_not_a_media_error():
+    attr = SmartAttribute(
+        attr_id=0,
+        name="Error_Information_Log_Entries",
+        raw_value=685,
+        value=100,
+        worst=100,
+        thresh=0,
+    )
+
+    assert assess_attribute_severity(attr, False) == "warning"
+
+
+def test_nvme_media_integrity_errors_are_critical():
+    attr = SmartAttribute(
+        attr_id=0,
+        name="Media_and_Data_Integrity_Errors",
+        raw_value=1,
+        value=100,
+        worst=100,
+        thresh=0,
+    )
+
+    assert assess_attribute_severity(attr, False) == "critical"

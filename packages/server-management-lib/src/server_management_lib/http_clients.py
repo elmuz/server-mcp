@@ -33,6 +33,56 @@ INFLUXDB_ALLOWED_ENDPOINTS: frozenset[str] = frozenset(
 )
 
 
+_SELECT_LIST_PATTERN = re.compile(
+    r"^\s*SELECT\s+(?P<columns>.*?)\s+FROM\b", re.IGNORECASE | re.DOTALL
+)
+_GROUP_BY_PATTERN = re.compile(
+    r"\bGROUP\s+BY\s+(?P<columns>.*?)"
+    r"(?:\bORDER\s+BY\b|\bLIMIT\b|\bHAVING\b|;|$)",
+    re.IGNORECASE | re.DOTALL,
+)
+_GROUP_COLUMN_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_.]*$")
+_IDENTIFIER_PATTERN = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+_SELECT_STAR_PATTERN = re.compile(r"(^|,)\s*\*\s*(,|$)")
+
+
+def influxdb_group_by_advisory(sql_query: str) -> str | None:
+    """Warn when a ``GROUP BY`` key is not projected by the ``SELECT`` list.
+
+    InfluxDB v3 SQL does not return grouping keys unless they are also selected.
+    A query such as ``SELECT count(*) FROM logs GROUP BY host`` therefore yields
+    unattributed rows. The check is deliberately cheap and only handles plain
+    column names; it never rewrites the query.
+    """
+    select_match = _SELECT_LIST_PATTERN.search(sql_query)
+    group_match = _GROUP_BY_PATTERN.search(sql_query)
+    if select_match is None or group_match is None:
+        return None
+
+    selected = select_match.group("columns")
+    if _SELECT_STAR_PATTERN.search(selected):
+        return None
+
+    group_columns = []
+    for raw_column in group_match.group("columns").split(","):
+        column = raw_column.strip()
+        if not _GROUP_COLUMN_PATTERN.match(column):
+            continue
+        group_columns.append(column.rsplit(".", 1)[-1])
+    if not group_columns:
+        return None
+
+    selected_names = set(_IDENTIFIER_PATTERN.findall(selected))
+    missing = [column for column in group_columns if column not in selected_names]
+    if not missing:
+        return None
+    columns = ", ".join(missing)
+    return (
+        "InfluxDB v3 SQL does not return GROUP BY keys unless they are projected; "
+        f"add {columns} to the SELECT list."
+    )
+
+
 class InfluxDBClient:
     """Client for InfluxDB v3 HTTP API (read-only)."""
 

@@ -132,6 +132,15 @@ def assess_attribute_severity(attr: SmartAttribute, is_seagate: bool) -> str:
 
     Returns: "ok", "warning", or "critical"
     """
+    # NVMe attribute names carry their own meaning. The error-information log
+    # is a cumulative event counter (corrected/recovered events included), not
+    # a media-error count, so it is a warning at most. Media/data-integrity
+    # errors are the actual defect signal.
+    if "Media_and_Data_Integrity_Errors" in attr.name:
+        return "critical" if attr.raw_value > 0 else "ok"
+    if "Error_Information_Log_Entries" in attr.name:
+        return "warning" if attr.raw_value > 0 else "ok"
+
     # Check if it's a critical attribute
     if attr.attr_id in CRITICAL_ATTR_IDS:
         raw = attr.raw_value

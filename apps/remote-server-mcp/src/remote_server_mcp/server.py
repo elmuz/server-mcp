@@ -16,6 +16,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 from pathlib import Path
 
 from mcp.server.mcpserver import MCPServer
@@ -35,11 +36,11 @@ from server_management_lib import (
     create_audit_logger,
     create_executor,
     create_rate_limiter,
+    influxdb_group_by_advisory,
     load_config,
     make_structured_tool,
     open_metric_tunnels,
     parse_duration,
-    redact_env_content,
     redact_secrets,
     resolve_config_path,
     run_streamable_http,
@@ -50,11 +51,11 @@ from .operations import (
     DISK_USAGE,
     ECHO_CONNECTION,
     FREE_MEMORY,
-    JOURNALCTL_UNIT,
     LS_SERVICES,
     SYSTEMCTL_STATUS,
     UPTIME,
     build_container_catalog,
+    journalctl_unit_operation,
 )
 from .resolution import (
     Resolution,
@@ -106,6 +107,32 @@ DESTRUCTIVE_ACTION = ToolAnnotations(
     idempotent_hint=False,
     open_world_hint=False,
 )
+
+# Compose projects have one of these files at their project root. Its absence
+# (together with a missing compose project label) identifies an
+# Ansible-managed service that must be changed through its role, not Compose.
+COMPOSE_FILE_NAMES = frozenset(
+    {
+        "compose.yaml",
+        "compose.yml",
+        "docker-compose.yaml",
+        "docker-compose.yml",
+    }
+)
+
+# Services that write their logs to files instead of stdout/stderr. Docker
+# logs are empty for these, so a "no matches" result needs a pointer to the
+# mounted log directory.
+FILE_LOG_SERVICES = frozenset({"nginx", "swag"})
+
+_ENV_ASSIGNMENT_PATTERN = re.compile(
+    r"^\s*(?:export\s+)?(?P<key>[A-Za-z_][A-Za-z0-9_.-]*)\s*="
+)
+
+# Docker accepts a bare Go duration (``2h``, ``1h30m``); journalctl wants the
+# same duration with a leading minus. RFC3339 timestamps and dates are passed
+# through unchanged.
+_JOURNAL_DURATION_PATTERN = re.compile(r"^(?:\d+(?:\.\d+)?(?:ns|us|µs|ms|s|m|h)){1,4}$")
 
 
 def _max_output_bytes() -> int:
@@ -222,6 +249,36 @@ async def _resolve_service(service: str) -> Resolution:
     return await resolve_service_target(executor, security, service, catalog)
 
 
+def _not_compose_message(service: str, reason: str) -> str:
+    """Explain why a service directory cannot be managed with Compose."""
+    return (
+        f"❌ '{service}' is not a compose project. {reason}\n"
+        "Use start_service/restart_service/stop_service for its containers, "
+        "or re-run the Ansible role that manages it. No Compose command was run."
+    )
+
+
+async def _compose_management(directory: str) -> str | None:
+    """Return a reason when a directory is not a Compose project, else ``None``.
+
+    The compose file at the project root is the signal. This check uses the
+    existing directory listing, not Docker, so a directory managed by Ansible's
+    ``docker_container`` module is refused without first producing Docker's raw
+    "no configuration file provided" error.
+    """
+    try:
+        entries = await executor.list_remote_dir(directory, allowed_base=directory)
+    except Exception:
+        entries = []
+    if any(entry.name in COMPOSE_FILE_NAMES for entry in entries):
+        return None
+    return (
+        "No compose.yaml, compose.yml, docker-compose.yaml or "
+        "docker-compose.yml was found. A directory managed by Ansible's "
+        "docker_container module has no Compose project file."
+    )
+
+
 async def _compose_directory(service: str) -> str:
     """Return the compose project directory for a service, or raise."""
     if not security.validate_service_name(service):
@@ -232,7 +289,11 @@ async def _compose_directory(service: str) -> str:
             f"{security.services_base_path}/\n"
             "Compose operations require a service directory below services_path."
         )
-    return f"{security.services_base_path.rstrip('/')}/{service}"
+    directory = f"{security.services_base_path.rstrip('/')}/{service}"
+    reason = await _compose_management(directory)
+    if reason is not None:
+        raise ResolutionError(_not_compose_message(service, reason))
+    return directory
 
 
 def _container_block(resolution: Resolution, container: str, body: str) -> str:
@@ -275,6 +336,86 @@ def _log_time_error(field: str, value: str | None) -> str | None:
     )
 
 
+def _journal_time_error(field: str, value: str | None) -> str | None:
+    """Return an error for an invalid journalctl ``--since`` value."""
+    if value is None:
+        return None
+    candidate = value[1:] if value.startswith("-") else value
+    if security.validate_log_time(candidate, field):
+        return None
+    return (
+        f"❌ Invalid {field} time: {value}\n"
+        "Use an RFC3339 timestamp (e.g. 2026-10-18T21:00:00Z), a date "
+        "(2026-10-18) or a relative duration (e.g. 2h, -2h, 1h30m)."
+    )
+
+
+def _journal_since(value: str | None) -> str | None:
+    """Return a journalctl-compatible ``--since`` value."""
+    if value is None or value.startswith("-"):
+        return value
+    if _JOURNAL_DURATION_PATTERN.match(value):
+        return f"-{value}"
+    return value
+
+
+def _resolution_error_text(error: ResolutionError, target: str) -> str:
+    """Add a host-unit hint when a container tool was given a systemd unit."""
+    text = str(error)
+    if security.validate_host_unit(target):
+        text += (
+            f"\n\n💡 '{target}' is a host systemd unit, not a container — "
+            f"use get_host_service_logs('{target}') or "
+            f"get_host_service_status('{target}')."
+        )
+    return text
+
+
+def _file_logs_hint(service: str | None) -> str:
+    """Explain that a service writes logs to files instead of Docker stdout."""
+    if not service or service not in FILE_LOG_SERVICES:
+        return ""
+    return (
+        f"\n\n💡 '{service}' writes its logs to files, not to container stdout. "
+        "nginx/swag keep them under `/config/log/nginx/` inside the container; "
+        "if that directory is mounted into the service, use "
+        f"list_service_files('{service}', 'config/log/nginx') and then "
+        f"get_service_file('{service}', 'config/log/nginx/error.log')."
+    )
+
+
+def _redact_env_file(content: str) -> tuple[str, list[str]]:
+    """Mask credential values in a dotenv file and keep benign keys readable.
+
+    :func:`redact_secrets` understands key names such as ``DB_PASSWORD``,
+    ``JWT_SECRET`` and ``API_KEY`` while leaving ordinary configuration
+    (``DB_HOST``, ``TZ``) visible. A non-assignment line is still masked, so a
+    quoted multi-line secret cannot leak through a continuation line.
+    """
+    lines: list[str] = []
+    redacted_keys: list[str] = []
+    for line in content.splitlines():
+        stripped = line.lstrip()
+        if not stripped or stripped.startswith("#"):
+            lines.append(line)
+            continue
+
+        match = _ENV_ASSIGNMENT_PATTERN.match(line)
+        if match is None:
+            lines.append("***")
+            continue
+
+        redacted = redact_secrets(line)
+        if redacted != line:
+            redacted_keys.append(match.group("key"))
+        lines.append(redacted)
+
+    redacted = "\n".join(lines)
+    if content.endswith("\n"):
+        redacted += "\n"
+    return redacted, redacted_keys
+
+
 def _render_logs_command(
     container: str,
     lines: int,
@@ -297,6 +438,27 @@ def _container_running(inspect_output: str) -> bool | None:
         if line.startswith("Running:"):
             return line.split(":", 1)[1].strip().lower() == "true"
     return None
+
+
+def _inspect_fields(container: str, inspect_output: str) -> dict[str, object]:
+    """Parse the catalog's ``docker inspect`` format into structured fields."""
+    fields: dict[str, object] = {"container": container}
+    for line in inspect_output.splitlines():
+        if ":" not in line:
+            continue
+        key, value = line.split(":", 1)
+        value = value.strip()
+        key = key.strip()
+        if key == "Running":
+            fields["running"] = value.lower() == "true"
+        elif key in {"FailingStreak", "RestartCount", "ExitCode"}:
+            try:
+                fields[key.lower()] = int(value)
+            except ValueError:
+                fields[key.lower()] = value
+        elif key:
+            fields[key.lower()] = value
+    return fields
 
 
 def _resource_usage(inspect_output: str, stats_output: str) -> str:
@@ -474,11 +636,11 @@ async def list_containers() -> str | ToolOutput:
 
 
 @structured_tool(READ_ONLY)
-async def get_host_service_status(unit: str) -> str:
+async def get_host_service_status(unit: str) -> str | ToolOutput:
     """Get the systemd status of an allowlisted host infrastructure service.
 
-    Host services such as telegraf, smartd or docker are systemd units, not
-    Docker containers, so they are not reachable through get_service_status.
+    Host services such as telegraf, smartmontools or docker are systemd units,
+    not Docker containers, so they are not reachable through get_service_status.
     Only units listed in security.host_units may be inspected.
 
     Args:
@@ -493,22 +655,45 @@ async def get_host_service_status(unit: str) -> str:
 
     try:
         output = await executor.execute_safe_command(SYSTEMCTL_STATUS.render(unit=unit))
-        return _cap_composite(f"=== Host Service: {unit} ===\n{redact_secrets(output)}")
+        status = redact_secrets(output)
+        text = _cap_composite(f"=== Host Service: {unit} ===\n{status}")
+        return ToolOutput(
+            text,
+            data={
+                "unit": unit,
+                "source": "systemctl",
+                "status": status,
+                "entries": status.splitlines(),
+            },
+        )
     except Exception as e:
         return f"❌ Error getting host service status: {e}"
 
 
+def _render_host_logs(unit: str, lines: int, since: str | None) -> str:
+    """Render ``journalctl`` for one allowlisted unit."""
+    normalized_since = _journal_since(since)
+    operation = journalctl_unit_operation(since=normalized_since)
+    params: dict[str, str | int] = {"unit": unit, "lines": lines}
+    if normalized_since:
+        params["since"] = normalized_since
+    return operation.render(**params)
+
+
 @structured_tool(READ_ONLY)
-async def get_host_service_logs(unit: str, lines: int = 100) -> str:
+async def get_host_service_logs(
+    unit: str, lines: int = 100, since: str | None = None
+) -> str | ToolOutput:
     """Get recent journal entries for an allowlisted host service.
 
-    Host infrastructure services such as telegraf, smartd or docker write to
-    the systemd journal instead of a Docker log. Only units listed in
+    Host infrastructure services such as telegraf, smartmontools or docker write
+    to the systemd journal instead of a Docker log. Only units listed in
     security.host_units may be read.
 
     Args:
         unit: Host service unit name (e.g. 'telegraf', 'docker')
-        lines: Number of journal lines (default: 100, max: 1000)
+        lines: Number of journal lines (default: 100, max: 5000)
+        since: Only entries newer than this time (RFC3339, date or `-30m`)
 
     Returns:
         Recent journal entries with ISO timestamps
@@ -517,16 +702,97 @@ async def get_host_service_logs(unit: str, lines: int = 100) -> str:
         _audit("host_unit_blocked", unit=unit, tool="get_host_service_logs")
         return _host_unit_error(unit)
 
-    lines = max(1, min(lines, 1000))
+    error = _journal_time_error("since", since)
+    if error is not None:
+        return error
+
+    lines = max(1, min(lines, 5000))
     try:
         output = await executor.execute_safe_command(
-            JOURNALCTL_UNIT.render(unit=unit, lines=lines)
+            _render_host_logs(unit, lines, since)
         )
-        return _cap_composite(
-            f"=== Journal: {unit} (last {lines} lines) ===\n{redact_secrets(output)}"
+        entries = redact_secrets(output).splitlines()
+        window = f", since {since}" if since else ""
+        text = _cap_composite(
+            f"=== Journal: {unit} (last {lines} lines{window}) ===\n"
+            + "\n".join(entries)
+        )
+        return ToolOutput(
+            text,
+            data={
+                "unit": unit,
+                "lines": lines,
+                "since": since,
+                "source": "journalctl",
+                "entries": entries,
+            },
         )
     except Exception as e:
         return f"❌ Error getting host service logs: {e}"
+
+
+@structured_tool(READ_ONLY)
+async def search_host_service_logs(
+    unit: str, pattern: str, lines: int = 1000, since: str | None = None
+) -> str | ToolOutput:
+    """Search an allowlisted host service's journal for a literal pattern.
+
+    Args:
+        unit: Host service unit name (e.g. 'telegraf', 'docker')
+        pattern: Literal text to search for (no regex; punctuation is preserved)
+        lines: Number of journal lines to search (default: 1000, max: 5000)
+        since: Only entries newer than this time (RFC3339, date or `-30m`)
+
+    Returns:
+        Matching journal lines with ISO timestamps
+    """
+    if not security.validate_host_unit(unit):
+        _audit("host_unit_blocked", unit=unit, tool="search_host_service_logs")
+        return _host_unit_error(unit)
+
+    try:
+        exact_pattern = security.validate_search_pattern(pattern)
+    except ValueError as e:
+        return f"❌ Invalid search pattern: {e}"
+
+    error = _journal_time_error("since", since)
+    if error is not None:
+        return error
+
+    lines = max(1, min(lines, 5000))
+    try:
+        output = await executor.execute_safe_command(
+            _render_host_logs(unit, lines, since)
+        )
+        entries = [
+            line
+            for line in redact_secrets(output).splitlines()
+            if exact_pattern in line
+        ]
+        if not entries:
+            return ToolOutput(
+                f"No matches found for '{exact_pattern}' in last {lines} journal "
+                f"lines for {unit}",
+                data={
+                    "unit": unit,
+                    "pattern": exact_pattern,
+                    "lines": lines,
+                    "since": since,
+                    "matches": [],
+                },
+            )
+        return ToolOutput(
+            _cap_composite("\n".join(entries)),
+            data={
+                "unit": unit,
+                "pattern": exact_pattern,
+                "lines": lines,
+                "since": since,
+                "matches": entries,
+            },
+        )
+    except Exception as e:
+        return f"❌ Error searching host service logs: {e}"
 
 
 @structured_tool(READ_ONLY)
@@ -558,7 +824,7 @@ async def get_service_logs(
         resolution = await _resolve_service(service)
         containers = _select_containers(resolution, container)
     except ResolutionError as e:
-        return str(e)
+        return _resolution_error_text(e, service)
 
     # Limit lines to prevent abuse
     lines = max(1, min(lines, 1000))
@@ -600,14 +866,16 @@ async def get_service_status(service: str) -> str | ToolOutput:
     try:
         resolution = await _resolve_service(service)
     except ResolutionError as e:
-        return str(e)
+        return _resolution_error_text(e, service)
 
     try:
         blocks = []
+        container_data: list[dict] = []
         for container in resolution.containers:
             inspect_output = await executor.execute_safe_command(
                 catalog.inspect.render(service=container)
             )
+            container_data.append(_inspect_fields(container, inspect_output))
             status = f"=== Docker Status ===\n{inspect_output}"
 
             # ``docker stats`` waits 1-2 seconds per container and ``docker
@@ -643,6 +911,7 @@ async def get_service_status(service: str) -> str | ToolOutput:
                 "service": resolution.service,
                 "source": resolution.source,
                 "containers": list(resolution.containers),
+                "container_details": container_data,
             },
         )
     except Exception as e:
@@ -700,7 +969,7 @@ async def get_container_health(service: str, entries: int = 5) -> str | ToolOutp
     try:
         resolution = await _resolve_service(service)
     except ResolutionError as e:
-        return str(e)
+        return _resolution_error_text(e, service)
 
     entries = max(1, min(entries, 20))
     try:
@@ -741,7 +1010,7 @@ async def restart_service(service: str, confirm: bool = False) -> str | ToolOutp
     try:
         resolution = await _resolve_service(service)
     except ResolutionError as e:
-        return str(e)
+        return _resolution_error_text(e, service)
 
     if not confirm:
         return _confirmation_required(
@@ -763,11 +1032,16 @@ async def restart_service(service: str, confirm: bool = False) -> str | ToolOutp
 
 
 @structured_tool(WRITE_ACTION)
-async def start_service(service: str) -> str | ToolOutput:
+async def start_service(service: str, confirm: bool = False) -> str | ToolOutput:
     """Start a stopped service directory or container.
+
+    Containers that are already running are reported as such and are not
+    passed to ``docker start``. State-changing by definition when a container
+    is stopped, so ``confirm`` must be true.
 
     Args:
         service: Service directory or container name
+        confirm: Must be true to execute; false returns a dry-run preview
 
     Returns:
         Start result per resolved container
@@ -775,15 +1049,73 @@ async def start_service(service: str) -> str | ToolOutput:
     try:
         resolution = await _resolve_service(service)
     except ResolutionError as e:
-        return str(e)
+        return _resolution_error_text(e, service)
 
+    if not confirm:
+        return _confirmation_required(
+            "start",
+            resolution.target,
+            " ".join(
+                catalog.start.render(service=name) for name in resolution.containers
+            ),
+        )
     limited = _rate_limited("start_service")
     if limited is not None:
         return limited
 
     try:
-        # Use '--' to prevent Docker option injection (defense in depth)
-        return await _run_on_containers(resolution, catalog.start, "started")
+        blocks: list[str] = []
+        already_running: list[str] = []
+        started: list[str] = []
+        failed: list[str] = []
+        for container in resolution.containers:
+            inspect_output = await executor.execute_safe_command(
+                catalog.inspect.render(service=container)
+            )
+            if _container_running(inspect_output) is True:
+                already_running.append(container)
+                blocks.append(
+                    _container_block(
+                        resolution,
+                        container,
+                        f"✅ {container} is already running; no action taken.",
+                    )
+                )
+                continue
+
+            output = await executor.execute_safe_command(
+                catalog.start.render(service=container)
+            )
+            if command_failure(output) is not None:
+                failed.append(container)
+            else:
+                started.append(container)
+            blocks.append(_container_block(resolution, container, output))
+
+        if failed:
+            message = (
+                f"⚠️ Service '{resolution.target}' started with failures: "
+                f"{', '.join(failed)}"
+            )
+        elif started:
+            message = f"✅ Service '{resolution.target}' started"
+        else:
+            message = f"✅ Service '{resolution.target}' was already running"
+        text = _cap_composite(f"{message}\n" + "\n\n".join(blocks))
+        return ToolOutput(
+            text,
+            ok=not failed,
+            data={
+                "target": resolution.target,
+                "service": resolution.service,
+                "action": "started",
+                "containers": list(resolution.containers),
+                "already_running": already_running,
+                "started": started,
+                "failed": failed,
+                "changed": bool(started),
+            },
+        )
     except Exception as e:
         return f"❌ Error starting service: {e}"
 
@@ -804,7 +1136,7 @@ async def stop_service(service: str, confirm: bool = False) -> str | ToolOutput:
     try:
         resolution = await _resolve_service(service)
     except ResolutionError as e:
-        return str(e)
+        return _resolution_error_text(e, service)
 
     if not confirm:
         return _confirmation_required(
@@ -842,7 +1174,7 @@ async def compose_ps(service: str) -> str | ToolOutput:
     try:
         directory = await _compose_directory(service)
     except ResolutionError as e:
-        return str(e)
+        return _resolution_error_text(e, service)
 
     try:
         output = await executor.execute_safe_command(
@@ -869,7 +1201,7 @@ async def _run_compose_action(
     try:
         directory = await _compose_directory(service)
     except ResolutionError as e:
-        return str(e)
+        return _resolution_error_text(e, service)
 
     command = operation.render(directory=directory)
     if not confirm:
@@ -992,11 +1324,14 @@ async def get_service_file(service: str, file_path: str) -> str | ToolOutput:
     except Exception as e:
         return f"❌ Error reading file: {e}"
 
+    redacted_keys: list[str] = []
     if check.access is FileAccess.REDACT:
-        redacted = True
+        redacted_text, redacted_keys = _redact_env_file(content)
+        redacted = redacted_text != content
         text = _cap_composite(
-            f"{redact_env_content(content)}\n\n"
-            "(Environment values are masked by the sensitive-file policy.)"
+            f"{redacted_text}\n\n"
+            "(Credential values are masked by key name; non-assignment lines "
+            "are masked too.)"
         )
     else:
         redacted_content = redact_secrets(content)
@@ -1010,6 +1345,7 @@ async def get_service_file(service: str, file_path: str) -> str | ToolOutput:
             "service": service,
             "path": check.path,
             "redacted": redacted,
+            "redacted_keys": redacted_keys,
         },
     )
 
@@ -1064,7 +1400,12 @@ async def list_service_files(service: str, subdirectory: str = "") -> str | Tool
     try:
         entries = await executor.list_remote_dir(full_path, allowed_base=service_base)
     except Exception as e:
-        return f"❌ Error listing files: {e}"
+        return (
+            f"❌ Error listing files in {full_path}: {e}\n"
+            f"The path must be inside {service_base}/; the directory may not "
+            "exist. Call list_service_files without a subdirectory to list "
+            "the service root."
+        )
 
     if not entries:
         return ToolOutput(
@@ -1118,7 +1459,7 @@ async def search_service_logs(
         resolution = await _resolve_service(service)
         containers = _select_containers(resolution, container)
     except ResolutionError as e:
-        return str(e)
+        return _resolution_error_text(e, service)
 
     # Limit lines
     lines = max(1, min(lines, 5000))
@@ -1139,8 +1480,9 @@ async def search_service_logs(
                 matches.extend(container_matches)
 
         if not matches:
+            hint = _file_logs_hint(resolution.service or resolution.target)
             return ToolOutput(
-                f"No matches found for '{exact_pattern}' in last {lines} lines",
+                f"No matches found for '{exact_pattern}' in last {lines} lines{hint}",
                 data={
                     "target": resolution.target,
                     "pattern": exact_pattern,
@@ -1186,6 +1528,11 @@ async def query_influxdb(query: str, database: str | None = None) -> str | ToolO
     Executes a SELECT query against the InfluxDB v3 HTTP API.
     Requires influxdb to be enabled in config.yaml.
 
+    InfluxDB v3 SQL does not return ``GROUP BY`` keys unless they are also
+    projected by the ``SELECT`` list. Write ``SELECT host, count(*) ... GROUP BY
+    host`` rather than ``SELECT count(*) ... GROUP BY host`` or the rows have no
+    ``host`` column.
+
     Args:
         query: SQL query (must start with SELECT)
         database: Database name (overrides config default)
@@ -1220,10 +1567,12 @@ async def query_influxdb(query: str, database: str | None = None) -> str | ToolO
 
     client = _get_influxdb_client()
     result = await client.query(validated_query, database=db)
-    return ToolOutput(
-        result,
-        data={"database": db, **_query_data(result)},
-    )
+    advisory = influxdb_group_by_advisory(validated_query)
+    text = result if advisory is None else f"{result}\n\n💡 {advisory}"
+    data: dict = {"database": db, **_query_data(result)}
+    if advisory is not None:
+        data["advisory"] = advisory
+    return ToolOutput(text, data=data)
 
 
 @structured_tool(READ_ONLY)
@@ -1443,11 +1792,11 @@ async def main(
     logger.info(
         "Available tools: list_services, list_containers, get_service_logs, "
         "get_service_status, get_container_health, get_host_service_status, "
-        "get_host_service_logs, restart_service, start_service, stop_service, "
-        "compose_ps, compose_pull, compose_up, compose_down, "
-        "get_service_file, list_service_files, search_service_logs, "
-        "get_server_health, query_influxdb, query_prometheus, "
-        "get_prometheus_targets"
+        "get_host_service_logs, search_host_service_logs, restart_service, "
+        "start_service, stop_service, compose_ps, compose_pull, compose_up, "
+        "compose_down, get_service_file, list_service_files, "
+        "search_service_logs, get_server_health, query_influxdb, "
+        "query_prometheus, get_prometheus_targets"
     )
 
     transport_config = config.get("transport", {}) or {}

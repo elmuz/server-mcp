@@ -216,9 +216,9 @@ class TestToolRegistration:
         assert "get_prometheus_targets" in tools
 
     def test_total_tool_count(self):
-        """We expect 21 tools (14 SSH/host + 3 database + 4 compose)."""
+        """We expect 22 tools (15 SSH/host + 3 database + 4 compose)."""
         tools = list(mcp_server.mcp._tool_manager._tools.keys())
-        assert len(tools) == 21, f"Expected 21 tools, got {len(tools)}: {tools}"
+        assert len(tools) == 22, f"Expected 22 tools, got {len(tools)}: {tools}"
 
     def test_only_safe_tools_registered(self):
         """Verify no unexpected/generic command tools exist."""
@@ -232,6 +232,7 @@ class TestToolRegistration:
             "get_container_health",
             "get_host_service_status",
             "get_host_service_logs",
+            "search_host_service_logs",
             "restart_service",
             "start_service",
             "stop_service",
@@ -716,3 +717,26 @@ class TestProxyErrorPages:
 
         assert response.ok is False
         assert "Received an HTML page" in response.text
+
+
+def test_query_influxdb_explains_missing_group_by_projection():
+    from unittest.mock import AsyncMock
+
+    client = AsyncMock()
+    client.query = AsyncMock(return_value='✅ Query successful\n\n[{"count": 3}]')
+    config = {"influxdb": {"enabled": True, "database": "testdb"}}
+    tool = mcp_server.mcp._tool_manager.get_tool("query_influxdb")
+
+    async def run_test():
+        with (
+            patch.object(mcp_server, "config", config),
+            patch.object(mcp_server, "_get_influxdb_client", return_value=client),
+        ):
+            return await tool.fn(
+                query="SELECT count(*) FROM smart_device GROUP BY device"
+            )
+
+    response = asyncio.run(run_test())
+
+    assert "add device to the SELECT list" in response.text
+    assert response.data["advisory"]

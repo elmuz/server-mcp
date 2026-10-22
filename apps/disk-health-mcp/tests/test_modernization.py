@@ -106,8 +106,8 @@ class TestOperationalHardening:
         executor = patched_server["executor"]
 
         async def fake_command(command: str) -> str:
-            if command.endswith("--version"):
-                return "smartctl 7.4"
+            if "lsblk" in command:
+                return "{}"
             return "SMART self-test started"
 
         executor.execute_safe_command.side_effect = fake_command
@@ -118,7 +118,7 @@ class TestOperationalHardening:
         assert "started" in first
         assert "Rate limit exceeded" in second
         commands = _commands(executor)
-        assert len([c for c in commands if c.endswith("--version")]) == 1
+        assert len([c for c in commands if " -i " in c]) == 1
         assert len([c for c in commands if " -t " in c]) == 1
 
     def test_influx_query_uses_the_validated_text(self, patched_server, monkeypatch):

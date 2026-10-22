@@ -81,7 +81,7 @@ and must resolve inside the service directory. Sensitive names are handled by th
 in section 4.
 
 Host service units must be well formed and listed in `security.host_units` (default:
-`telegraf`, `smartd`, `docker`, `snapraid`, `mergerfs`, `smbd`). This allowlist is the
+`telegraf`, `smartmontools`, `docker`, `smbd`). This allowlist is the
 control that keeps `systemctl`/`journalctl` from becoming a general host reader.
 
 `docker logs --since/--until` accept only an RFC3339 timestamp, a `YYYY-MM-DD` date or a
@@ -101,8 +101,10 @@ that is distinct from the invalid-path error.
 
 Dotenv files (`.env`, `.env.local`, `.env.production`, `*.env`) are readable because they
 are the primary way to debug a compose stack whose `compose.yml` only contains `${VARS}`.
-Their values are masked (`KEY=***`) before the contents reach the model; keys, comments
-and blank lines are preserved.
+Credential values are masked by key name (for example `DB_PASSWORD=***`,
+`JWT_SECRET=***`, `API_KEY=***`) while benign settings such as `TZ` and `DB_HOST` stay
+readable; non-assignment lines are still masked and `data.redacted_keys` lists the keys
+that changed. Keys, comments and blank lines are preserved.
 
 Redaction does not stop at dotenv files. Other readable service files pass through a
 general key/value redactor before they are returned: YAML, JSON, INI and command-line
@@ -198,9 +200,10 @@ as structured content, so a client can act on `ok` or `data` without parsing the
 
 ### 11. State-changing actions
 
-`restart_service`, `stop_service`, `compose_pull`, `compose_up` and `compose_down` require
-`confirm=true`. Without it they return the rendered command as a dry-run preview and execute
-nothing. State-changing calls pass through a per-process sliding-window rate limit
+`start_service`, `restart_service`, `stop_service`, `compose_pull`, `compose_up` and
+`compose_down` require `confirm=true`. Without it they return the rendered command as a
+dry-run preview and execute nothing. `start_service` also inspects running state first and
+reports an already-running container without calling `docker start`. State-changing calls pass through a per-process sliding-window rate limit
 (`rate_limit`, default 10 calls per minute): `start_service`, `restart_service`,
 `stop_service`, the compose actions and `disk-health-mcp`'s `run_smart_test`. This prevents
 a retry loop from repeatedly restarting a service or starting self-tests. Compose actions
@@ -235,10 +238,11 @@ model cannot choose the transport or the token.
   sleeping disk without `health_ok` or temperature. The disk-health tools only use
   `exit_status = 0` samples from the last 24 hours and report the sample age, instead of
   presenting missing fields as `Unknown` or zero.
-- **SMART self-tests skip sleeping disks.** `run_smart_test` pre-flights `smartctl --version`
-  and then runs the test with `-n standby`. A disk in standby is not spun up; the tool
-  reports that no test was started. Wake the disk explicitly and retry if the test is
-  required.
+- **SMART self-tests skip sleeping ATA disks.** `run_smart_test` first runs a read-only
+  `smartctl -i` probe (`-n standby` for ATA) and then runs the ATA test with `-n standby`.
+  A sleeping disk is not spun up and the tool reports that no test was started. NVMe tests
+  omit the flag because NVMe has no standby state. Permission, standby, unsupported and
+  generic failures are reported distinctly, with the raw output and exit status.
 - **The local executor runs as the MCP user.** If that user can run `docker` and `smartctl`,
   so can the tools. Do not run the MCP as root unless the target tools require it.
 - **InfluxDB/Prometheus tokens are as powerful as their scope.** Use read-only tokens.

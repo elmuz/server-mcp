@@ -143,7 +143,7 @@ class TestServicePathConsistency:
 
         assert "hunter2" not in result
         assert "DB_PASSWORD=***" in result
-        assert "DB_HOST=***" in result
+        assert "DB_HOST=db" in result
         assert "masked" in result
 
     def test_sensitive_file_reports_the_policy_not_an_invalid_path(self, patched):
@@ -574,7 +574,7 @@ class TestServiceResolution:
         patched.check_service_exists.side_effect = [False, True, False, True]
         patched.execute_safe_command.side_effect = _dispatch(MULTI_CONTAINER_LISTING)
 
-        asyncio.run(server.start_service("immich-server"))
+        asyncio.run(server.start_service("immich-server", confirm=True))
         asyncio.run(server.stop_service("immich-postgres", confirm=True))
 
         commands = _commands(patched)
@@ -697,6 +697,7 @@ class TestToolAnnotations:
             "get_container_health",
             "get_host_service_status",
             "get_host_service_logs",
+            "search_host_service_logs",
         ):
             assert tools[name].annotations.read_only_hint is True
             assert tools[name].annotations.destructive_hint is False
@@ -726,7 +727,7 @@ class TestHostServices:
     def test_lines_are_clamped(self, patched):
         asyncio.run(server.get_host_service_logs("docker", lines=100000))
 
-        assert "-n 1000 " in _commands(patched)[0]
+        assert "-n 5000 " in _commands(patched)[0]
 
     def test_arbitrary_units_are_rejected(self, patched):
         for unit in (
@@ -806,3 +807,13 @@ class TestConfigBootstrap:
         server.apply_config(config_file)
 
         assert isinstance(server.executor, LocalExecutor)
+
+
+def test_list_service_files_error_names_the_path_and_base(patched):
+    patched.list_remote_dir.side_effect = Exception("No such file")
+
+    result = asyncio.run(server.list_service_files("app", "logs"))
+
+    assert "/opt/services/app/logs" in result
+    assert "/opt/services/app/" in result
+    assert "directory may not exist" in result

@@ -35,10 +35,8 @@ class TestDefaultConfiguration:
         assert DEFAULT_CONFIG["security"]["allow_generic_commands"] is False
         assert DEFAULT_CONFIG["security"]["host_units"] == [
             "telegraf",
-            "smartd",
+            "smartmontools",
             "docker",
-            "snapraid",
-            "mergerfs",
             "smbd",
         ]
 

@@ -16,10 +16,11 @@ removed). Earlier snapshots remain in git history.
   (P1-19), the stale-sample handling and the sample-age/`AUTH_*` fixes. Publish run
   `39852335149` uploaded all three packages in library→apps order, and `uvx` resolves
   `0.3.0`. The read-only smoke checks in 6.3 passed against both the workspace tree and the
-  installed packages. The only open items are the catafalco prerequisites in 3.5 (outside
-  this repository) and the deferred P2-15.
-- **Last updated:** 2026-10-22 (`0.3.0` tagged and published; P1-20 device vocabulary
-  staged for `0.4.0`)
+  installed packages. The remaining open items are the catafalco prerequisites in 3.5 and
+  the host-side self-test privilege in 3.6, both outside this repository. All in-repo
+  handover fixes from 2026-10-23 are recorded in 3.6.
+- **Last updated:** 2026-10-23 (handover fixes for self-tests, `start_service`, output
+  parsing, routing and host units; `0.4.0` still unreleased)
 - **Provenance:** every finding below was re-verified against `81733d2` before merging;
   findings already fixed are marked `[x]` and kept only as history.
 - **Target deployment:** `catafalco` (Ubuntu home server/NAS; Docker services under `/srv`)
@@ -485,6 +486,9 @@ rather than adding new surface.
   smartctl skips a sleeping disk (exit status 2) instead of waking it; the tool reports that
   no self-test was started and asks the operator to wake the disk explicitly and retry.
   Tests cover both the missing-tool and standby paths.
+- **Superseded by 3.6:** the version-only probe could not distinguish a permission failure
+  from standby, because smartctl exits 2 for both. The probe is now `smartctl -i`
+  (`-n standby` for ATA), NVMe omits the flag, and the failure reason is published.
 
 #### P1-12 InfluxDB LIMIT handling and query pass-through are bypassable
 
@@ -803,17 +807,46 @@ blocked the release.
 
 #### P2-15 Structured output depth (deferred)
 
-- [ ] `remote-server-mcp` still returns bare strings for `get_host_service_status` and
-      `get_host_service_logs`, so `ToolResponse.data` is `{}`; `get_service_status` only
-      adds target/container metadata instead of the state, health and resource fields it
-      prints. Populate them the same way `disk-health-mcp` did in P2-13.
-- [ ] `get_snapraid_status` (and partially `get_zfs_status`) feeds human-readable tables to
-      the generic `_parse_key_value_output()`, which yields `{"SnapRAID status report": ""}`
-      rather than parity age, sync state or error counts. Research whether SnapRAID exposes
-      machine-readable output before writing a parser; until then the raw text is the only
-      reliable payload.
-- **Why deferred:** both are typed-payload improvements, not correctness issues, and the
-      SnapRAID part needs a format decision. Track them here rather than in a side document.
+- [x] `remote-server-mcp` now publishes structured data for `get_host_service_status`
+      (unit, status and entries), `get_host_service_logs` (unit, window, source and redacted
+      entries) and `search_host_service_logs` (matches). `get_service_status` also carries
+      `container_details` parsed from inspect (state, running, health, failing streak,
+      restart count, exit code and start time).
+- [x] `get_snapraid_status` keeps the raw text and adds `data.parsed`: per-disk and total
+      rows, sync state, scrub ages, not-scrubbed percentage, errors and zero-timestamp file
+      count. SnapRAID has no JSON output, so the parser reads its stable report lines and
+      keeps `data.status` as the authoritative raw payload.
+- **Status:** both typed-payload improvements landed in the 0.4.0 tree (see 3.6).
+
+### 3.6 Handover remediation (2026-10-23)
+
+These findings came from an agent operating the live MCP servers. The in-repo fixes are
+complete; the one host-side prerequisite remains in catafalco.
+
+- [x] **`run_smart_test` no longer infers standby from an exit code.** A read-only
+      `smartctl -i` probe runs first (`-n standby` for ATA), and failures are classified as
+      `permission`, `standby`, `unsupported` or `error`. NVMe tests omit `-n standby`, and
+      every result publishes the raw output, parsed `exit_status` and the
+      `smartctl -l selftest` command that shows the result.
+- [!] **Host-side self-test privilege (catafalco, outside this repository).** If tests must
+      actually start under the MCP user, add a scoped `smart-selftest` sudo wrapper plus a
+      `SMART_SELFTEST_SUDO_ARGV` catalog entry. Until then a permission failure is reported
+      as such instead of as "standby".
+- [x] **`start_service` checks state and requires confirmation.** Already-running containers
+      are reported with `changed: false` and are not passed to `docker start`; unconfirmed
+      calls return a preview only.
+- [x] **Output and parsing fixes.** SnapRAID structured parsing, a readable `list_disks`
+      table, full paths in `list_service_files` errors, key-aware `.env` redaction with
+      `redacted_keys`, NVMe error-information severity, and the InfluxDB v3 `GROUP BY`
+      projection advisory in both servers.
+- [x] **Routing fixes.** Host-unit hints from the container tools, file-log hints for
+      nginx/swag, Ansible-managed/absent-compose detection before Compose runs, host journal
+      `since` support and a local `search_host_service_logs`. Journal relative durations are
+      normalized to the `-2h` form journalctl accepts; RFC3339 timestamps and dates are
+      passed through unchanged.
+- [x] **Host unit defaults.** `smartmontools` replaces the `smartd` alias; the non-existent
+      `snapraid` and `mergerfs` units are gone. The defaults are now `telegraf`,
+      `smartmontools`, `docker` and `smbd`.
 
 ### 3.4 Release and migration
 
@@ -939,7 +972,8 @@ longer tracked here.
    signed tag, trusted-publishing workflow, then the live smoke checks in 6.3 with the
    installed packages.
 3. **Remaining work is outside this repository:** the catafalco prerequisites in 3.5.
-4. **Deferred:** P2-15 (structured output depth and SnapRAID machine-readable format).
+4. **P2-15 is complete** (structured host/status data and SnapRAID parsing). The remaining
+   open work is the catafalco host-side self-test privilege wrapper in 3.6.
 
 There is no pending PR split; the branch history is linear on `main`.
 

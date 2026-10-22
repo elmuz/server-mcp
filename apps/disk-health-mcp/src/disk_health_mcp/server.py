@@ -40,6 +40,7 @@ from server_management_lib import (
     create_audit_logger,
     create_executor,
     create_rate_limiter,
+    influxdb_group_by_advisory,
     load_config,
     make_structured_tool,
     normalize_device_name,
@@ -64,10 +65,13 @@ from .operations import (
     MDADM_DETAIL,
     NVME_CLI_PATH,
     NVME_SMART_LOG,
+    SMART_INFO,
+    SMART_INFO_STANDBY,
     SMART_JSON,
+    SMART_SELFTEST_LOG,
     SMART_TEST,
+    SMART_TEST_NVME,
     SMART_TEXT,
-    SMART_VERSION,
     SMARTCTL_PATH,
     SNAPRAID_STATUS,
     ZPOOL_LIST,
@@ -170,6 +174,130 @@ def _parse_key_value_output(text: str) -> dict[str, str | int]:
         except ValueError:
             parsed[name] = raw
     return parsed
+
+
+_SNAPRAID_ROW = re.compile(
+    r"^\s*(?P<files>\d+)\s+(?P<fragmented>\d+)\s+(?P<excess>\d+)\s+"
+    r"(?P<wasted>[\d.]+|-)\s+(?P<used>\d+)\s+(?P<free>\d+)\s+"
+    r"(?P<use_pct>\d+)%\s*(?P<name>\S+)?\s*$"
+)
+_SNAPRAID_SCRUB = re.compile(
+    r"The oldest block was scrubbed\s+(?P<oldest>\d+)\s+days ago,\s+"
+    r"the median\s+(?P<median>\d+),\s+the newest\s+(?P<newest>\d+)\."
+)
+_SNAPRAID_NOT_SCRUBBED = re.compile(r"(?P<percent>\d+)% of the array is not scrubbed")
+_SNAPRAID_ZERO_TIMESTAMPS = re.compile(
+    r"You have\s+(?P<count>\d+)\s+files? with a zero sub-second timestamp"
+)
+
+
+def _snapraid_row(match: re.Match[str]) -> dict[str, object]:
+    wasted = match.group("wasted")
+    return {
+        "files": int(match.group("files")),
+        "fragmented_files": int(match.group("fragmented")),
+        "excess_fragments": int(match.group("excess")),
+        "wasted_gb": None if wasted == "-" else float(wasted),
+        "used_gb": int(match.group("used")),
+        "free_gb": int(match.group("free")),
+        "use_pct": int(match.group("use_pct")),
+    }
+
+
+def _parse_snapraid_status(output: str) -> dict[str, object]:
+    """Parse the stable lines of ``snapraid status`` into structured data.
+
+    SnapRAID has no JSON output. The per-disk table, totals row, sync state,
+    scrub ages, error summary and zero-timestamp count are stable enough to
+    parse; the raw text is still returned alongside them.
+    """
+    disks: list[dict[str, object]] = []
+    totals: dict[str, object] | None = None
+    for line in output.splitlines():
+        match = _SNAPRAID_ROW.match(line)
+        if match is None:
+            continue
+        row = _snapraid_row(match)
+        name = match.group("name")
+        if name:
+            row["name"] = name
+            disks.append(row)
+        else:
+            totals = row
+
+    lower = output.lower()
+    sync_in_progress = (
+        "sync is in progress" in lower or "the sync is in progress" in lower
+    )
+    if "no sync is in progress" in lower:
+        sync_in_progress = False
+
+    scrub: dict[str, int | None] = {
+        "oldest_days": None,
+        "median_days": None,
+        "newest_days": None,
+        "not_scrubbed_pct": None,
+    }
+    scrub_match = _SNAPRAID_SCRUB.search(output)
+    if scrub_match:
+        scrub.update(
+            {
+                "oldest_days": int(scrub_match.group("oldest")),
+                "median_days": int(scrub_match.group("median")),
+                "newest_days": int(scrub_match.group("newest")),
+            }
+        )
+    not_scrubbed = _SNAPRAID_NOT_SCRUBBED.search(output)
+    if not_scrubbed:
+        scrub["not_scrubbed_pct"] = int(not_scrubbed.group("percent"))
+
+    zero_match = _SNAPRAID_ZERO_TIMESTAMPS.search(output)
+    zero_timestamp_files = int(zero_match.group("count")) if zero_match else 0
+
+    if "no error detected" in lower:
+        errors = "none"
+    else:
+        error_lines = [
+            line.strip()
+            for line in output.splitlines()
+            if any(
+                word in line.lower()
+                for word in ("error", "failed", "corrupt", "unrecoverable", "missing")
+            )
+            and "no error" not in line.lower()
+            and "error log" not in line.lower()
+        ]
+        errors = "; ".join(error_lines) if error_lines else "unknown"
+
+    return {
+        "disks": disks,
+        "totals": totals,
+        "sync_in_progress": sync_in_progress,
+        "scrub": scrub,
+        "errors": errors,
+        "zero_timestamp_files": zero_timestamp_files,
+    }
+
+
+def _format_disk_table(devices: list[dict]) -> str:
+    """Render ``lsblk`` devices as a readable table."""
+    rows = [("NAME", "MODEL", "SERIAL", "SIZE", "TYPE", "TRAN")]
+    for device in sorted(devices, key=lambda item: str(item.get("name", ""))):
+        rows.append(
+            (
+                str(device.get("name") or "-"),
+                str(device.get("model") or "-").strip(),
+                str(device.get("serial") or "-").strip(),
+                str(device.get("size") or "-"),
+                str(device.get("type") or "-"),
+                str(device.get("tran") or "-"),
+            )
+        )
+    widths = [max(len(row[index]) for row in rows) for index in range(5)]
+    return "\n".join(
+        "  ".join(row[index].ljust(widths[index]) for index in range(5)) + f"  {row[5]}"
+        for row in rows
+    )
 
 
 def _format_sample_age(row: dict) -> str | None:
@@ -1342,8 +1470,17 @@ def _render_influxdb_health(
         lines.append(f"  ⚠️  NVMe Critical Warning: {row['critical_warning']}")
     if "media_errors" in row and row["media_errors"] != 0:
         lines.append(f"  ⚠️  Media Errors: {row['media_errors']}")
-    if "error_log_entries" in row and row["error_log_entries"] != 0:
-        lines.append(f"  Error Log Entries: {row['error_log_entries']}")
+    error_entries = row.get(
+        "error_log_entries", row.get("error_information_log_entries")
+    )
+    if error_entries:
+        media_errors = row.get("media_errors", 0)
+        icon = "⚠️" if media_errors else "ℹ️"  # noqa: RUF001
+        lines.append(
+            f"  {icon}  NVMe Error Information Log Entries: {error_entries} "
+            "(cumulative counter, not media errors; "
+            f"Media_and_Data_Integrity_Errors: {media_errors})"
+        )
     if "available_spare" in row:
         lines.append(f"  Available Spare: {row['available_spare']}%")
     if "unsafe_shutdowns" in row:
@@ -1406,15 +1543,34 @@ def _format_influxdb_device_health(
     return text
 
 
+async def _read_disk_devices() -> tuple[list[dict], str]:
+    """Run ``lsblk`` once and return (devices, raw output)."""
+    cmd = LIST_DISKS.render()
+    if not security.is_command_safe(cmd):
+        return [], "❌ Command not in safe whitelist"
+    output = _cap_composite(await _run_command(cmd))
+    if _command_failed(output):
+        return [], output
+    try:
+        payload = json.loads(output)
+    except (json.JSONDecodeError, TypeError):
+        return [], output
+    devices = payload.get("blockdevices", []) if isinstance(payload, dict) else []
+    if not isinstance(devices, list):
+        devices = []
+    return devices, output
+
+
 @structured_tool(READ_ONLY)
 async def list_disks() -> str | ToolOutput:
     """List all storage devices on the host.
 
-    Returns device names, models, serials, sizes, and types.
+    Returns device names, models, serials, sizes, transport and types as a
+    table, with the raw ``lsblk`` records in ``data.devices``.
     Requires host data source to be enabled in config.yaml.
 
     Returns:
-        List of storage devices in JSON format
+        Readable storage-device table
     """
     if not config.get("host", {}).get("enabled", False):
         return (
@@ -1422,21 +1578,17 @@ async def list_disks() -> str | ToolOutput:
             "Set 'host.enabled: true' in config.yaml."
         )
 
-    cmd = LIST_DISKS.render()
-    if not security.is_command_safe(cmd):
-        return "❌ Command not in safe whitelist"
-    output = _cap_composite(await _run_command(cmd))
-    devices: list = []
-    if not _command_failed(output):
-        try:
-            payload = json.loads(output)
-            if isinstance(payload, dict):
-                devices = payload.get("blockdevices", []) or []
-        except (json.JSONDecodeError, TypeError):
-            devices = []
+    devices, output = await _read_disk_devices()
+    if _command_failed(output):
+        return ToolOutput(
+            output,
+            ok=False,
+            data={"devices": devices, "count": len(devices)},
+        )
+    table = _format_disk_table(devices) if devices else "No storage devices found."
     return ToolOutput(
-        output,
-        ok=not _command_failed(output),
+        _cap_composite(f"=== Storage Devices ({len(devices)}) ===\n{table}"),
+        ok=True,
         data={"devices": devices, "count": len(devices)},
     )
 
@@ -1662,6 +1814,14 @@ async def get_smart_attributes(device: str) -> str | ToolOutput:
             elif "Spin_Retry" in name and raw_val > 0:
                 severity = "warning"
                 icon = "🟡"
+            elif "Media_and_Data_Integrity_Errors" in name and raw_val > 0:
+                severity = "critical"
+                icon = "🔴"
+            elif "Error_Information_Log_Entries" in name and raw_val > 0:
+                # The NVMe error-information counter is cumulative and includes
+                # corrected/recovered events; it is not a media-error count.
+                severity = "warning"
+                icon = "ℹ️"  # noqa: RUF001
 
             # Add scale context for SSD wear attributes
             note = ""
@@ -1673,6 +1833,16 @@ async def get_smart_attributes(device: str) -> str | ToolOutput:
                 note = "(SSD wear)"
             elif name == "Available_Reservd_Space":
                 note = "(spare blocks)"
+            elif "Error_Information_Log_Entries" in name:
+                media_errors = (
+                    influx_device.get("media_errors", 0) if influx_device else 0
+                )
+                note = (
+                    f"(cumulative info log, not media errors; media errors: "
+                    f"{media_errors})"
+                )
+            elif "Media_and_Data_Integrity_Errors" in name:
+                note = "(NVMe media/data integrity errors)"
 
             lines.append(f"{name:<30} {raw_val:>15} {note:<35} {icon} {severity:<8}")
         return ToolOutput(
@@ -1813,12 +1983,78 @@ async def get_nvme_health(device: str) -> str | ToolOutput:
     )
 
 
+def _smart_exit_status(output: str) -> int | None:
+    """Return the parsed executor exit status, or 0 when none was reported."""
+    match = EXIT_CODE_PATTERN.search(output)
+    if match is None:
+        return 0
+    return int(match.group(1))
+
+
+def _smart_failure_reason(output: str) -> str:
+    """Classify a failed smartctl result without assuming it is standby."""
+    lower = output.lower()
+    if "standby" in lower or "sleep" in lower:
+        return "standby"
+    if any(
+        marker in lower
+        for marker in (
+            "permission denied",
+            "cannot open",
+            "unable to open",
+            "access denied",
+            "operation not permitted",
+            "eacces",
+        )
+    ):
+        return "permission"
+    if any(
+        marker in lower
+        for marker in (
+            "unsupported",
+            "unknown device",
+            "unknown usb",
+            "no such device",
+            "unable to detect device type",
+            "smart support is: unavailable",
+        )
+    ):
+        return "unsupported"
+    return "error"
+
+
+def _smart_test_evidence(
+    device: str,
+    test_type: str,
+    *,
+    started: bool,
+    reason: str | None,
+    raw: str,
+    exit_status: int | None,
+) -> dict[str, object]:
+    """Return the machine-readable evidence for a self-test attempt."""
+    return {
+        "device": device,
+        "test_type": test_type,
+        "started": started,
+        "reason": reason,
+        "raw": raw,
+        "exit_status": exit_status,
+        "selftest_log": SMART_SELFTEST_LOG.render(device=device),
+    }
+
+
 @structured_tool(WRITE_ACTION)
 async def run_smart_test(device: str, test_type: str = "short") -> str | ToolOutput:
     """Run a SMART self-test on a disk.
 
     Self-tests are safe - they don't modify data on the drive.
     Results appear in the SMART self-test log after completion.
+
+    A read-only ``smartctl -i`` probe runs first, so a permission or device
+    error is reported as such instead of being guessed as "standby". The
+    standby skip flag is omitted for NVMe, which never spins up and whose
+    power-state check can otherwise skip a test on an idle SSD.
 
     Test types:
     - short: Quick test (~2 minutes). Checks electrical/mechanical + short scan.
@@ -1832,7 +2068,7 @@ async def run_smart_test(device: str, test_type: str = "short") -> str | ToolOut
         test_type: Test type - short, long, or conveyance (default: short)
 
     Returns:
-        Test initiation status
+        Test initiation status with the reason, raw output and exit status
     """
     if not config.get("host", {}).get("enabled", False):
         return (
@@ -1852,63 +2088,94 @@ async def run_smart_test(device: str, test_type: str = "short") -> str | ToolOut
     if limited is not None:
         return limited
 
-    # Pre-flight only asks smartctl for its version, so it never opens the
-    # device and never spins up a sleeping disk. A missing or non-executable
-    # smartctl must be reported before the write operation is attempted.
-    preflight = await _run_command(SMART_VERSION.render())
+    test_type = test_type.lower()
+    live_devices = await _resolved_live_devices(resolved)
+    detected, _ = _detect_device_type(device, live_devices)
+    nvme = detected == "NVMe"
+
+    # Pre-flight only asks smartctl for identity: it never starts a test. For
+    # ATA the probe uses ``-n standby`` so a sleeping disk is reported without
+    # being spun up. NVMe has no standby state and uses the plain probe.
+    info_operation = SMART_INFO if nvme else SMART_INFO_STANDBY
+    preflight = await _run_command(info_operation.render(device=device))
+    preflight_status = _smart_exit_status(preflight)
     if _command_failed(preflight):
+        reason = _smart_failure_reason(preflight)
+        evidence = _smart_test_evidence(
+            device,
+            test_type,
+            started=False,
+            reason=reason,
+            raw=preflight,
+            exit_status=preflight_status,
+        )
+        if reason == "standby":
+            return ToolOutput(
+                f"⚠️ No self-test started: /dev/{device} is in standby mode.\n"
+                "The probe uses smartctl's `-n standby`, so it will not spin "
+                "the disk up. Wake the disk explicitly and call run_smart_test "
+                "again.",
+                data=evidence,
+            )
         return ToolOutput(
             _enrich_error_output(
-                "❌ SMART self-tests unavailable: "
-                f"{SMARTCTL_PATH} is missing or not executable by the executor "
-                "user. No test was started.\n\n" + preflight,
+                f"❌ SMART self-test pre-flight failed for /dev/{device} "
+                f"(reason: {reason}). No test was started.\n\n{preflight}",
                 device,
             ),
             ok=False,
-            data={
-                "device": device,
-                "test_type": test_type.lower(),
-                "started": False,
-            },
+            data=evidence,
         )
 
-    cmd = SMART_TEST.render(device=device, test_type=test_type.lower())
+    operation = SMART_TEST_NVME if nvme else SMART_TEST
+    cmd = operation.render(device=device, test_type=test_type)
     if not security.is_command_safe(cmd):
         return "❌ Command not in safe whitelist"
 
     result = await _run_command(cmd)
-    exit_match = EXIT_CODE_PATTERN.search(result)
-    if exit_match and int(exit_match.group(1)) == 2:
-        return ToolOutput(
-            f"⚠️ No self-test started: /dev/{device} is in standby mode.\n"
-            "The test command uses smartctl's `-n standby`, so it will not spin "
-            "the disk up. Wake the disk explicitly (for example by reading from "
-            "it) and call run_smart_test again.",
-            data={
-                "device": device,
-                "test_type": test_type.lower(),
-                "started": False,
-                "reason": "standby",
-            },
+    exit_status = _smart_exit_status(result)
+    if exit_status not in (0, None) or _command_failed(result):
+        reason = _smart_failure_reason(result)
+        evidence = _smart_test_evidence(
+            device,
+            test_type,
+            started=False,
+            reason=reason,
+            raw=result,
+            exit_status=exit_status,
         )
-    if _command_failed(result):
+        if reason == "standby":
+            return ToolOutput(
+                f"⚠️ No self-test started: /dev/{device} is in standby mode.\n"
+                f"The test command used `-n standby`, so it did not spin the "
+                "disk up. Wake the disk explicitly and call run_smart_test again.",
+                data=evidence,
+            )
         return ToolOutput(
-            _enrich_error_output(result, device),
+            _enrich_error_output(
+                f"❌ SMART self-test failed to start for /dev/{device} "
+                f"(reason: {reason}).\n\n{result}",
+                device,
+            ),
             ok=False,
-            data={
-                "device": device,
-                "test_type": test_type.lower(),
-                "started": False,
-            },
+            data=evidence,
         )
+
+    evidence = _smart_test_evidence(
+        device,
+        test_type,
+        started=True,
+        reason=None,
+        raw=result,
+        exit_status=exit_status,
+    )
+    log_command = SMART_SELFTEST_LOG.render(device=device)
     return ToolOutput(
-        _cap_composite(result),
-        data={
-            "device": device,
-            "test_type": test_type.lower(),
-            "started": True,
-            "output": result,
-        },
+        _cap_composite(
+            f"✅ SMART {test_type} self-test started on /dev/{device}.\n"
+            f"Read the result later with: {log_command}\n\n{result}"
+        ),
+        data=evidence,
     )
 
 
@@ -2013,7 +2280,12 @@ async def get_snapraid_status() -> str | ToolOutput:
     output = await _run_command(cmd)
     return ToolOutput(
         _cap_composite(output),
-        data={"status": output, "fields": _parse_key_value_output(output)},
+        ok=not _command_failed(output),
+        data={
+            "status": output,
+            "fields": _parse_key_value_output(output),
+            "parsed": _parse_snapraid_status(output),
+        },
     )
 
 
@@ -2224,6 +2496,11 @@ async def query_influxdb_disk(
     Useful for trend analysis: has SMART data been degrading over time?
     Telegraf's smart plugin collects SMART attributes as InfluxDB measurements.
 
+    InfluxDB v3 SQL does not return ``GROUP BY`` keys unless they are also
+    projected by the ``SELECT`` list. Write ``SELECT device, count(*) ... GROUP
+    BY device`` rather than ``SELECT count(*) ... GROUP BY device`` or the rows
+    have no ``device`` column.
+
     Args:
         query: SQL query (must start with SELECT)
         database: Database name (overrides config default)
@@ -2256,10 +2533,12 @@ async def query_influxdb_disk(
 
     client = _get_influxdb_client()
     result = await client.query(validated, database=db)
-    return ToolOutput(
-        result,
-        data={"database": db, **_query_data(result)},
-    )
+    advisory = influxdb_group_by_advisory(validated)
+    text = result if advisory is None else f"{result}\n\n💡 {advisory}"
+    data: dict = {"database": db, **_query_data(result)}
+    if advisory is not None:
+        data["advisory"] = advisory
+    return ToolOutput(text, data=data)
 
 
 # ============================================================================
@@ -2542,70 +2821,59 @@ async def _get_full_report_via_ssh() -> str:
 
     lines = ["=== Disk Health Overview ===\n"]
 
-    disk_list = await list_disks()
+    devices, disk_list = await _read_disk_devices()
     if _command_failed(disk_list):
         lines.append(f"Disk list unavailable:\n{disk_list[:500]}")
         return _cap_composite("\n".join(lines))
 
-    try:
-        data = json.loads(disk_list)
-        blockdevs = _disk_devices(data.get("blockdevices", []))
-        lines.append(f"Found {len(blockdevs)} whole disks:\n")
-        for dev in blockdevs:
-            name = dev.get("name", "")
-            model = dev.get("model", "")
-            size = dev.get("size", "")
-            lines.append(f"  • /dev/{name} - {model} ({size})")
-    except (json.JSONDecodeError, KeyError):
-        lines.append(f"Disk list: {disk_list[:500]}")
+    blockdevs = _disk_devices(devices)
+    lines.append(f"Found {len(blockdevs)} whole disks:\n")
+    for dev in blockdevs:
+        name = dev.get("name", "")
+        model = dev.get("model", "")
+        size = dev.get("size", "")
+        lines.append(f"  • /dev/{name} - {model} ({size})")
 
     lines.append("\n=== Individual Health Checks ===\n")
 
-    try:
-        data = json.loads(disk_list)
-        blockdevs = _disk_devices(data.get("blockdevices", []))
-        for dev in blockdevs:
-            name = dev.get("name", "")
-            lines.append(f"\n--- /dev/{name} ---")
-            cmd = SMART_JSON.render(device=name)
-            if not security.is_command_safe(cmd):
-                lines.append("  ❌ Command blocked by security")
-                continue
+    for dev in blockdevs:
+        name = dev.get("name", "")
+        lines.append(f"\n--- /dev/{name} ---")
+        cmd = SMART_JSON.render(device=name)
+        if not security.is_command_safe(cmd):
+            lines.append("  ❌ Command blocked by security")
+            continue
 
-            health = await _run_command(cmd)
-            if _command_failed(health):
-                enriched = _enrich_error_output(health, name)
-                lines.append(f"  {enriched.replace(chr(10), chr(10) + '  ')}")
-                continue
+        health = await _run_command(cmd)
+        if _command_failed(health):
+            enriched = _enrich_error_output(health, name)
+            lines.append(f"  {enriched.replace(chr(10), chr(10) + '  ')}")
+            continue
 
-            try:
-                smart_data = json.loads(health)
-                smart_device = parse_smart_json(smart_data)
-                if not has_usable_smart_data(smart_device):
-                    lines.append("  ❌ No usable SMART data in the response")
-                    continue
-                health_emoji = (
-                    "🔴"
-                    if smart_device.health_score < 50
-                    else "🟡"
-                    if smart_device.health_score < 80
-                    else "✅"
-                )
-                lines.append(
-                    f"  {health_emoji} Health: {smart_device.health_score}/100"
-                )
-                lines.append(f"  Model: {smart_device.model}")
-                lines.append(f"  SMART: {smart_device.overall_health}")
-                if smart_device.temperature > 0:
-                    temp_warn = " 🔥" if smart_device.temperature > 55 else ""
-                    lines.append(f"  Temp: {smart_device.temperature}°C{temp_warn}")
-                if smart_device.warnings:
-                    for w in smart_device.warnings[:3]:
-                        lines.append(f"  ⚠️  {w}")
-            except (json.JSONDecodeError, KeyError, TypeError) as e:
-                lines.append(f"  ⚠️  Parse error: {e}")
-    except (json.JSONDecodeError, KeyError):
-        lines.append("Could not parse disk list for health checks")
+        try:
+            smart_data = json.loads(health)
+            smart_device = parse_smart_json(smart_data)
+            if not has_usable_smart_data(smart_device):
+                lines.append("  ❌ No usable SMART data in the response")
+                continue
+            health_emoji = (
+                "🔴"
+                if smart_device.health_score < 50
+                else "🟡"
+                if smart_device.health_score < 80
+                else "✅"
+            )
+            lines.append(f"  {health_emoji} Health: {smart_device.health_score}/100")
+            lines.append(f"  Model: {smart_device.model}")
+            lines.append(f"  SMART: {smart_device.overall_health}")
+            if smart_device.temperature > 0:
+                temp_warn = " 🔥" if smart_device.temperature > 55 else ""
+                lines.append(f"  Temp: {smart_device.temperature}°C{temp_warn}")
+            if smart_device.warnings:
+                for w in smart_device.warnings[:3]:
+                    lines.append(f"  ⚠️  {w}")
+        except (json.JSONDecodeError, KeyError, TypeError) as e:
+            lines.append(f"  ⚠️  Parse error: {e}")
 
     return _cap_composite("\n".join(lines))
 

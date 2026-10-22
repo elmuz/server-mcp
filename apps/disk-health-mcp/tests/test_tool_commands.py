@@ -5,6 +5,8 @@ The executor is mocked; these tests assert the argv vectors produced by the
 operation catalog and that the catalog is accepted by the shared command policy.
 """
 
+import asyncio
+
 import pytest
 
 from disk_health_mcp import operations, server
@@ -148,26 +150,25 @@ class TestSmartTestPreflight:
         executor = patched_server["executor"]
 
         async def fake_command(command: str) -> str:
-            if command.endswith("--version"):
+            if "smartctl" in command:
                 return "❌ Command not found: /usr/sbin/smartctl"
-            return "test should not run"
+            return "{}"
 
         executor.execute_safe_command.side_effect = fake_command
 
         result = await server.run_smart_test("sda")
 
-        assert "SMART self-tests unavailable" in result
+        assert "pre-flight failed" in result
         assert "No test was started" in result
         commands = _commands(executor)
-        assert commands == ["/usr/sbin/smartctl --version"]
         assert not any(" -t " in command for command in commands)
 
     async def test_standby_disk_does_not_start_a_test(self, patched_server):
         executor = patched_server["executor"]
 
         async def fake_command(command: str) -> str:
-            if command.endswith("--version"):
-                return "smartctl 7.4 2023-08-01"
+            if "lsblk" in command:
+                return "{}"
             return "Device is in STANDBY mode\n\n⚠️ Exit code: 2"
 
         executor.execute_safe_command.side_effect = fake_command
@@ -177,6 +178,7 @@ class TestSmartTestPreflight:
         assert "No self-test started" in result
         assert "standby" in result.lower()
         assert any("-n standby" in command for command in _commands(executor))
+        assert not any(" -t " in command for command in _commands(executor))
 
 
 @pytest.mark.parametrize("test_type", ["short", "long", "conveyance"])
@@ -184,6 +186,93 @@ async def test_smart_test_uses_catalog(patched_server, test_type):
     await server.run_smart_test("sda", test_type)
 
     assert _commands(patched_server["executor"]) == [
-        "/usr/sbin/smartctl --version",
+        "lsblk -d -o NAME,MODEL,SERIAL,SIZE,TYPE,TRAN --json",
+        "/usr/sbin/smartctl -n standby -i /dev/sda",
         f"/usr/sbin/smartctl -n standby -t {test_type} /dev/sda",
     ]
+
+
+SNAPRAID_SAMPLE = """Loading state from /var/local/snapraid/snapraid.content...
+Loaded state in 1 seconds
+Using 923 MiB of memory for the file-system.
+SnapRAID status report:
+
+   Files Fragmented Excess  Wasted  Used    Free  Use Name
+            Files  Fragments  GB      GB      GB
+  195156    1721   11216    65.3    4903   12983  27% d1
+  198870     804    7188    82.4    4915   12970  27% d2
+ --------------------------------------------------------------------------
+  394026    2525   18404   147.7    9819   25954  27%
+
+
+ 12%|                         o     o     o      o                        o
+    |      o     o            *     *     *      *                        *
+  0%|*_____*_____*_____*______*_____*_____*______*_____o_____o______o_____*
+    79                    days ago of the last scrub/sync                 2
+
+The oldest block was scrubbed 79 days ago, the median 44, the newest 2.
+
+No sync is in progress.
+11% of the array is not scrubbed.
+You have 47513 files with a zero sub-second timestamp.
+Run 'snapraid touch' to set their sub-second timestamps to a non-zero value.
+No rehash is in progress or needed.
+No error detected.
+"""
+
+
+def test_snapraid_status_parses_the_report():
+    sample = SNAPRAID_SAMPLE
+
+    async def run():
+        from unittest.mock import AsyncMock, patch
+
+        executor = AsyncMock()
+        executor.execute_safe_command = AsyncMock(return_value=sample)
+        tool = server.mcp._tool_manager.get_tool("get_snapraid_status")
+        with patch("disk_health_mcp.server.executor", executor):
+            return await tool.fn()
+
+    response = asyncio.run(run())
+    parsed = response.data["parsed"]
+
+    assert parsed["disks"][0] == {
+        "files": 195156,
+        "fragmented_files": 1721,
+        "excess_fragments": 11216,
+        "wasted_gb": 65.3,
+        "used_gb": 4903,
+        "free_gb": 12983,
+        "use_pct": 27,
+        "name": "d1",
+    }
+    assert parsed["totals"]["files"] == 394026
+    assert parsed["sync_in_progress"] is False
+    assert parsed["scrub"] == {
+        "oldest_days": 79,
+        "median_days": 44,
+        "newest_days": 2,
+        "not_scrubbed_pct": 11,
+    }
+    assert parsed["errors"] == "none"
+    assert parsed["zero_timestamp_files"] == 47513
+
+
+def test_smart_test_permission_failure_is_not_reported_as_standby(
+    patched_server,
+):
+    executor = patched_server["executor"]
+
+    async def fake_command(command: str) -> str:
+        if "lsblk" in command:
+            return "{}"
+        return "/dev/sda: Permission denied\n\n⚠️ Exit code: 2"
+
+    executor.execute_safe_command.side_effect = fake_command
+
+    result = asyncio.run(server.run_smart_test("sda"))
+
+    assert "standby" not in result.lower()
+    assert "permission" in result.lower()
+    assert "No test was started" in result
+    assert not any(" -t " in command for command in _commands(executor))

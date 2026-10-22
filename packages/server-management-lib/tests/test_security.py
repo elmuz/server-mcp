@@ -283,12 +283,13 @@ class TestHostUnits:
 
         assert {
             "telegraf",
-            "smartd",
+            "smartmontools",
             "docker",
-            "snapraid",
-            "mergerfs",
             "smbd",
         } <= allowed
+        assert "smartd" not in allowed
+        assert "snapraid" not in allowed
+        assert "mergerfs" not in allowed
 
     def test_allowlisted_unit_is_accepted(self):
         security = SecurityValidator({})
@@ -1055,6 +1056,8 @@ class TestCommandArgumentShape:
             "systemctl status --no-pager --full --lines=100 telegraf",
             "journalctl -u telegraf -n 100 --no-pager",
             "journalctl -u sshd -n 100 --no-pager --output short-iso",
+            "journalctl -u telegraf -n 100 --no-pager --output short-iso --since forever",
+            "journalctl -u telegraf -n 100 --no-pager --output short-iso --since -2026-10-18",
             "docker logs --tail 0 -- app",
             "docker logs --tail 10 --until forever -- app",
             "docker restart -- app other",
@@ -1078,6 +1081,9 @@ class TestCommandArgumentShape:
             "test -d /srv/app",
             "systemctl status --no-pager --full telegraf",
             "journalctl -u telegraf -n 200 --no-pager --output short-iso",
+            "journalctl -u telegraf -n 200 --no-pager --output short-iso --since 1h",
+            "journalctl -u telegraf -n 200 --no-pager --output short-iso --since -1h",
+            "journalctl -u telegraf -n 200 --no-pager --output short-iso --since -1h30m",
             "/usr/sbin/smartctl -a /dev/sdaa",
         ],
     )

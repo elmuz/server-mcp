@@ -27,7 +27,12 @@ from .config import (
     resolve_config_path,
 )
 from .executor import Executor, create_executor
-from .http_clients import InfluxDBClient, PrometheusClient, parse_duration
+from .http_clients import (
+    InfluxDBClient,
+    PrometheusClient,
+    influxdb_group_by_advisory,
+    parse_duration,
+)
 from .local_executor import LocalExecutor
 from .operations import Operation
 from .output import DEFAULT_MAX_OUTPUT_BYTES, sanitize_output, strip_ansi
@@ -107,6 +112,7 @@ __all__ = [
     "create_audit_logger",
     "create_executor",
     "create_rate_limiter",
+    "influxdb_group_by_advisory",
     "is_loopback_host",
     "load_config",
     "make_structured_tool",

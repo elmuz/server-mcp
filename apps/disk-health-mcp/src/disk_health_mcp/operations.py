@@ -19,6 +19,11 @@ LIST_DISKS = Operation(
 
 SMART_JSON = Operation((SMARTCTL_PATH, "-j", "-a", "/dev/$device"))
 SMART_TEXT = Operation((SMARTCTL_PATH, "-a", "/dev/$device"))
+# A read-only identity probe. For an ATA disk it uses ``-n standby`` so it can
+# report a sleeping disk without spinning it up; NVMe has no standby state and
+# uses the plain probe.
+SMART_INFO = Operation((SMARTCTL_PATH, "-i", "/dev/$device"))
+SMART_INFO_STANDBY = Operation((SMARTCTL_PATH, "-n", "standby", "-i", "/dev/$device"))
 NVME_SMART_LOG = Operation((NVME_CLI_PATH, "smart-log", "/dev/$device"))
 
 # Pre-flight that only reports the smartctl version: it never opens a block
@@ -32,6 +37,15 @@ SMART_TEST = Operation(
     (SMARTCTL_PATH, "-n", "standby", "-t", "$test_type", "/dev/$device"),
     read_only=False,
 )
+# NVMe never spins up, and smartctl's power-state check can skip a test on an
+# idle SSD, so the NVMe command omits ``-n standby``.
+SMART_TEST_NVME = Operation(
+    (SMARTCTL_PATH, "-t", "$test_type", "/dev/$device"),
+    read_only=False,
+)
+# Read-only location of the self-test log, reported as evidence without running
+# another command after the test has been started.
+SMART_SELFTEST_LOG = Operation((SMARTCTL_PATH, "-l", "selftest", "/dev/$device"))
 
 # ``snapraid status`` has to run as root: SnapRAID creates the content file and
 # its ``<content>.lock`` as ``root:root 0600``, which the unprivileged executor

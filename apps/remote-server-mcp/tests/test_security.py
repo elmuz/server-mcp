@@ -338,6 +338,7 @@ class TestToolSecurity:
             "get_container_health",
             "get_host_service_status",
             "get_host_service_logs",
+            "search_host_service_logs",
             "restart_service",
             "start_service",
             "stop_service",

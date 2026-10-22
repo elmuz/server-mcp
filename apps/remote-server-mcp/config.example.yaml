@@ -37,10 +37,12 @@ security:
   allowed_containers: []
   # allowed_containers: ["watchtower", "wud"]
 
-  # Host systemd units that get_host_service_status/get_host_service_logs may
-  # inspect. These are host infrastructure services, not Docker containers.
-  # Arbitrary unit names are rejected; set an empty list to disable them.
-  host_units: ["telegraf", "smartd", "docker", "snapraid", "mergerfs", "smbd"]
+  # Host systemd units that get_host_service_status/get_host_service_logs and
+  # search_host_service_logs may inspect. These are host infrastructure
+  # services, not Docker containers. smartmontools is the real unit; smartd is
+  # an alias that journalctl -u does not follow. Arbitrary unit names are
+  # rejected; set an empty list to disable the host tools.
+  host_units: ["telegraf", "smartmontools", "docker", "smbd"]
 
   # Generic command execution is never implemented and the allowlist cannot be
   # extended from configuration. This legacy key has no effect.

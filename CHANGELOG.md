@@ -22,9 +22,30 @@ versioning.
   (`percentage_used`/`available_spare`/... for NVMe,
   `reallocated_sectors_count`/`wwn`/... for ATA) or `smartctl -j`, and a mismatch returns
   the detected type, the detection source and no `nvme-cli` command.
+- The default host-unit allowlist is now `telegraf`, `smartmontools`, `docker` and `smbd`.
+  `smartmontools` is the real unit (`smartd` is an alias that `journalctl -u` does not
+  follow), and SnapRAID/mergerFS have no service to inspect. Host status and logs also
+  publish structured entries.
 
 ### Fixed
 
+- `run_smart_test` no longer reports "standby" for every exit status 2. A read-only
+  `smartctl -i` probe classifies permission, standby, unsupported and generic errors,
+  reports the raw output and exit status, omits `-n standby` for NVMe and points at the
+  `smartctl -l selftest` log. `start_service` now requires `confirm=true`, checks state
+  first and reports already-running containers without calling `docker start`.
+- SnapRAID status is parsed into per-disk/total rows, sync state, scrub ages, errors and the
+  zero-timestamp count while keeping the raw text. `list_disks` returns a readable table,
+  `list_service_files` errors name the full path and base directory, `.env` redaction now
+  masks only credential keys (and lists them in `data.redacted_keys`), and NVMe
+  error-information counters are labelled as cumulative warnings rather than media errors.
+- Container tools point a host systemd unit at the host-service tools, file-logging services
+  at their mounted log directory, and Compose tools refuse an Ansible-managed or
+  file-less directory without invoking Docker. Host journals accept `since`, and
+  `search_host_service_logs` filters them locally. A bare relative duration is normalized
+  to journalctl's `-2h` form (`2h` and `-2h` both work), while RFC3339 timestamps and dates
+  are passed through unchanged. InfluxDB queries warn when a `GROUP BY` key is missing from
+  the `SELECT` list.
 - `get_nvme_health("sda")` used to return the same green generic SMART report as
   `get_disk_health` with no NVMe metrics, and a by-id path, serial or role label was
   rejected even though the serial is the documented disk identity. A non-NVMe request is

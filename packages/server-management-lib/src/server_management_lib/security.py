@@ -135,10 +135,8 @@ HOST_UNIT_PATTERN = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_.@:-]{0,99}$")
 # explicit allowlist. Override with security.host_units in config.yaml.
 DEFAULT_HOST_UNITS: tuple[str, ...] = (
     "telegraf",
-    "smartd",
+    "smartmontools",
     "docker",
-    "snapraid",
-    "mergerfs",
     "smbd",
 )
 
@@ -1500,14 +1498,30 @@ class SecurityValidator:
                 and self.validate_host_unit(argv[4])
             )
         if executable == "journalctl":
-            return (
-                len(argv) == 8
+            if not (
+                len(argv) >= 8
                 and argv[1] == "-u"
                 and self.validate_host_unit(argv[2])
                 and argv[3] == "-n"
-                and self._positive_integer(argv[4], 1000)
-                and argv[5:] == ["--no-pager", "--output", "short-iso"]
-            )
+                and self._positive_integer(argv[4], 5000)
+                and argv[5:8] == ["--no-pager", "--output", "short-iso"]
+            ):
+                return False
+            rest = argv[8:]
+            if not rest:
+                return True
+            if len(rest) != 2 or rest[0] != "--since":
+                return False
+            value = rest[1]
+            if value.startswith("-"):
+                # journalctl expresses a relative window as ``-2h``; Docker
+                # uses ``2h``. Only a bare relative duration may carry the
+                # leading sign, so ``-2026-10-18`` is still rejected.
+                value = value[1:]
+                return bool(LOG_TIME_PATTERN.match(value)) and not bool(
+                    LOG_DATE_PATTERN.match(value)
+                )
+            return self.validate_log_time(value, "since")
         if executable == "lsblk":
             if len(argv) < 2 or argv[1] != "-d":
                 return False

@@ -19,13 +19,17 @@ _ASSIGNMENT_PATTERN = re.compile(
 
 
 def redact_env_content(text: str) -> str:
-    """Mask the values of dotenv assignments, preserving the file structure.
+    """Mask every assignment value in a dotenv file (strict variant).
 
     Comments and blank lines are kept unchanged. Recognized assignments keep
     their key and separator (``KEY=***``). Any other non-empty line is treated
     as a value or a continuation of one (for example a multi-line quoted
     secret) and is masked entirely, so no value text can leak. A trailing
     newline in the input is preserved.
+
+    This is the stricter whole-file variant. The MCP server uses
+    :func:`redact_secrets` for ``.env`` reads so benign keys stay readable;
+    this function remains public for callers that want every value masked.
 
     Args:
         text: Raw file contents.

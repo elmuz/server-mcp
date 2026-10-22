@@ -334,8 +334,8 @@ class TestOperationalHardening:
     def test_start_service_is_rate_limited(self, patched, monkeypatch):
         monkeypatch.setattr(server, "rate_limiter", RateLimiter(1, 60))
 
-        first = asyncio.run(server.start_service("app"))
-        second = asyncio.run(server.start_service("app"))
+        first = asyncio.run(server.start_service("app", confirm=True))
+        second = asyncio.run(server.start_service("app", confirm=True))
 
         assert "started" in first
         assert "Rate limit exceeded" in second
@@ -382,8 +382,8 @@ class TestOperationalHardening:
         server.config["audit"] = {"enabled": True, "path": str(log_path)}
         monkeypatch.setattr(server, "rate_limiter", RateLimiter(1, 60))
 
-        asyncio.run(server.start_service("app"))
-        asyncio.run(server.start_service("app"))
+        asyncio.run(server.start_service("app", confirm=True))
+        asyncio.run(server.start_service("app", confirm=True))
 
         records = self._audit_records(log_path)
         assert records[-1]["event"] == "rate_limited"
@@ -438,3 +438,157 @@ class TestOperationalHardening:
 
         assert "Bearer ***" in result
         assert "abc.def.ghi" not in result
+
+
+class TestHandoverRoutingAndActions:
+    """Regressions for start_service, routing hints and host journal search."""
+
+    def test_start_preview_requires_confirmation(self, patched):
+        result = asyncio.run(server.start_service("app"))
+
+        assert "Confirmation required" in result
+        assert not [c for c in _commands(patched) if c.startswith("docker start")]
+
+    def test_start_reports_already_running_without_calling_start(self, patched):
+        def run(command: str) -> str:
+            if command.startswith("docker inspect"):
+                return "Name: app\nRunning: true\nState: running"
+            return "ok"
+
+        patched.execute_safe_command.side_effect = run
+
+        tool = server.mcp._tool_manager.get_tool("start_service")
+        result = asyncio.run(tool.fn(service="app", confirm=True))
+
+        assert "already running" in result.text
+        assert not [c for c in _commands(patched) if c.startswith("docker start")]
+        assert result.data["already_running"] == ["app"]
+        assert result.data["changed"] is False
+
+    def test_start_runs_only_stopped_containers(self, patched):
+        def run(command: str) -> str:
+            if command.startswith("docker inspect"):
+                if command.endswith(" -- app"):
+                    return "Name: app\nRunning: false\nState: exited"
+                return "Name: db\nRunning: true\nState: running"
+            return "ok"
+
+        patched.check_service_exists.return_value = True
+        patched.execute_safe_command.side_effect = lambda command: (
+            "app\tapp\tUp\ndb\tapp\tUp\n"
+            if command.startswith("docker ps -a")
+            else run(command)
+        )
+
+        tool = server.mcp._tool_manager.get_tool("start_service")
+        result = asyncio.run(tool.fn(service="app", confirm=True))
+
+        assert _commands(patched).count("docker start -- app") == 1
+        assert "docker start -- db" not in _commands(patched)
+        assert result.data["started"] == ["app"]
+        assert result.data["already_running"] == ["db"]
+
+    def test_host_unit_target_gets_a_routing_hint(self, patched):
+        patched.check_service_exists.return_value = False
+
+        result = asyncio.run(server.get_service_logs("telegraf"))
+
+        assert "host systemd unit" in result
+        assert "get_host_service_logs('telegraf')" in result
+
+    def test_file_logging_service_gets_a_no_match_hint(self, patched):
+        patched.execute_safe_command.return_value = "ordinary log line\n"
+
+        result = asyncio.run(server.search_service_logs("swag", "error"))
+
+        assert "No matches" in result
+        assert "writes its logs to files" in result
+        assert "config/log/nginx" in result
+
+    def test_non_compose_directory_is_refused_without_running_compose(self, patched):
+        patched.list_remote_dir.return_value = []
+        patched.execute_safe_command.return_value = "grafana\t\tUp\n"
+
+        result = asyncio.run(server.compose_up("grafana", confirm=True))
+
+        assert "not a compose project" in result
+        assert "Ansible" in result
+        assert not [c for c in _commands(patched) if " compose " in c]
+
+    def test_host_logs_accept_since_and_publish_entries(self, patched):
+        patched.execute_safe_command.return_value = (
+            "2026-10-22T20:00:00+0200 host app: started\n"
+        )
+
+        tool = server.mcp._tool_manager.get_tool("get_host_service_logs")
+        result = asyncio.run(tool.fn(unit="telegraf", lines=10, since="1h"))
+
+        assert _commands(patched) == [
+            "journalctl -u telegraf -n 10 --no-pager --output short-iso --since -1h"
+        ]
+        assert result.data["since"] == "1h"
+        assert result.data["entries"] == ["2026-10-22T20:00:00+0200 host app: started"]
+
+    def test_search_host_logs_filters_locally(self, patched):
+        patched.execute_safe_command.return_value = (
+            "line one\nits fine here\nit's fine here\n"
+        )
+
+        result = asyncio.run(
+            server.search_host_service_logs("telegraf", "it's fine", lines=10)
+        )
+
+        assert result == "it's fine here"
+        assert all("grep" not in command for command in _commands(patched))
+
+    def test_env_redaction_keeps_benign_keys_and_lists_secrets(self, patched):
+        patched.read_remote_file.return_value = (
+            "TZ=Europe/Rome\nDB_HOST=db\nDB_PASSWORD=hunter2\n"
+            "JWT_SECRET=topsecret\nAPI_KEY=abc123\n"
+        )
+        tool = server.mcp._tool_manager.get_tool("get_service_file")
+
+        response = asyncio.run(tool.fn(service="app", file_path=".env"))
+
+        assert "TZ=Europe/Rome" in response.text
+        assert "DB_HOST=db" in response.text
+        assert "hunter2" not in response.text
+        assert "topsecret" not in response.text
+        assert "abc123" not in response.text
+        assert response.data["redacted_keys"] == [
+            "DB_PASSWORD",
+            "JWT_SECRET",
+            "API_KEY",
+        ]
+
+
+class TestJournalTimeNormalization:
+    """journalctl wants relative windows with a leading minus."""
+
+    def test_bare_duration_gets_a_minus(self, patched):
+        asyncio.run(server.get_host_service_logs("telegraf", since="1h30m"))
+
+        assert _commands(patched)[0].endswith("--since -1h30m")
+
+    def test_already_negative_duration_is_kept(self, patched):
+        asyncio.run(server.get_host_service_logs("telegraf", since="-2h"))
+
+        assert _commands(patched)[0].endswith("--since -2h")
+
+    def test_date_and_rfc3339_are_unchanged(self, patched):
+        asyncio.run(server.get_host_service_logs("telegraf", since="2026-10-18"))
+        asyncio.run(
+            server.get_host_service_logs("telegraf", since="2026-10-18T21:00:00Z")
+        )
+
+        commands = _commands(patched)
+        assert commands[0].endswith("--since 2026-10-18")
+        assert commands[1].endswith("--since 2026-10-18T21:00:00Z")
+
+    def test_restart_also_hints_at_host_units(self, patched):
+        patched.check_service_exists.return_value = False
+
+        result = asyncio.run(server.restart_service("telegraf"))
+
+        assert "host systemd unit" in result
+        assert "get_host_service_status('telegraf')" in result

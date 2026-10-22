@@ -15,7 +15,11 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import aiohttp
 import pytest
 
-from server_management_lib.http_clients import InfluxDBClient, PrometheusClient
+from server_management_lib.http_clients import (
+    InfluxDBClient,
+    PrometheusClient,
+    influxdb_group_by_advisory,
+)
 
 # ============================================================================
 # InfluxDBClient Tests
@@ -51,6 +55,40 @@ class TestInfluxDBClientBasic:
     def test_with_token_auth(self):
         client = InfluxDBClient(host="localhost", database="testdb", token="test-token")
         assert client.token == "test-token"
+
+
+class TestInfluxDBGroupByAdvisory:
+    """InfluxDB v3 SQL drops GROUP BY keys that are not projected."""
+
+    def test_missing_group_key_is_reported(self):
+        advisory = influxdb_group_by_advisory(
+            "SELECT count(*) FROM smart_device GROUP BY device"
+        )
+
+        assert advisory is not None
+        assert "device" in advisory
+        assert "add" in advisory
+
+    def test_projected_group_key_is_not_reported(self):
+        assert (
+            influxdb_group_by_advisory(
+                "SELECT device, count(*) FROM smart_device GROUP BY device"
+            )
+            is None
+        )
+
+    def test_star_and_non_sql_queries_are_ignored(self):
+        assert influxdb_group_by_advisory("SELECT * FROM cpu GROUP BY host") is None
+        assert influxdb_group_by_advisory("SELECT count(*) FROM cpu") is None
+        assert influxdb_group_by_advisory("not sql") is None
+
+    def test_multiple_columns_and_limit(self):
+        advisory = influxdb_group_by_advisory(
+            "SELECT count(*) FROM cpu GROUP BY host, region LIMIT 10"
+        )
+
+        assert advisory is not None
+        assert "host, region" in advisory
 
 
 class TestInfluxDBClientQueries:

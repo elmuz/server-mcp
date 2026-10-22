@@ -196,7 +196,9 @@ class TestInfluxDBHealthFormatting:
         }
         result = _format_influxdb_device_health(row)
         assert "NVMe Life Used: 7%" in result
-        assert "Error Log Entries: 556" in result
+        assert "Error Information Log Entries: 556" in result
+        assert "not media errors" in result
+        assert "Media_and_Data_Integrity_Errors: 0" in result
         assert "near end of life" not in result
 
     def test_nvme_near_end_of_life(self):
@@ -1449,7 +1451,8 @@ class TestAbsoluteHostToolPaths:
             call.args[0] for call in executor.execute_safe_command.await_args_list
         ]
         assert commands == [
-            "/usr/sbin/smartctl --version",
+            "lsblk -d -o NAME,MODEL,SERIAL,SIZE,TYPE,TRAN --json",
+            "/usr/sbin/smartctl -n standby -i /dev/sda",
             "/usr/sbin/smartctl -n standby -t short /dev/sda",
         ]
 
@@ -1457,12 +1460,16 @@ class TestAbsoluteHostToolPaths:
 class TestListDisks:
     """Test list_disks with mocked backend."""
 
-    async def test_returns_json(self, patched_server):
-        """Should return disk list as JSON."""
-        from disk_health_mcp.server import list_disks
+    async def test_returns_a_readable_table(self, patched_server):
+        """The text form is a table; the raw records stay in data.devices."""
+        from disk_health_mcp.server import mcp
 
-        result = await list_disks()
-        assert "blockdevices" in result
+        tool = mcp._tool_manager.get_tool("list_disks")
+        response = await tool.fn()
+        assert "Storage Devices (1)" in response.text
+        assert "NAME" in response.text
+        assert "ST18000NT001" in response.text
+        assert response.data["devices"][0]["name"] == "sda"
 
 
 # ============================================================================
@@ -1710,7 +1717,11 @@ class TestDeviceVocabulary:
         commands = [
             call.args[0] for call in executor.execute_safe_command.await_args_list
         ]
-        assert "/usr/sbin/smartctl -n standby -t short /dev/nvme0n1" in commands
+        assert "/usr/sbin/smartctl -i /dev/nvme0n1" in commands
+        assert "/usr/sbin/smartctl -t short /dev/nvme0n1" in commands
+        assert all(
+            "-n standby" not in command for command in commands if "nvme" in command
+        )
         assert all("/dev/nvme0 " not in command for command in commands)
 
     async def test_label_resolves_through_influxdb_to_the_live_disk(self, mock_config):

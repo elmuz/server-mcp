@@ -9,7 +9,7 @@ health without exposing credentials or allowing arbitrary commands.
 This is a **uv workspace monorepo**:
 
 ```text
-apps/remote-server-mcp/          MCP server: Docker/SSH and host-service operations (21 tools)
+apps/remote-server-mcp/          MCP server: Docker/SSH and host-service operations (22 tools)
 apps/disk-health-mcp/            MCP server: SMART/NVMe/ZFS/mdadm/SnapRAID diagnostics (13 tools)
 packages/server-management-lib/  Security policy, executors, config, HTTP clients
 ```

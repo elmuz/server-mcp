@@ -20,15 +20,16 @@ and the tool catalog are available as MCP resources; see [architecture.md](archi
 | `get_service_status` | `service` | read-only | `docker inspect` (state, health, failing streak, exit code), `docker stats` and exposed ports for every resolved container; stopped containers report that resource usage is unavailable instead of `0B / 0B` |
 | `get_container_health` | `service`, `entries` (1–20) | read-only | Healthcheck status and recent probe output for every resolved container |
 | `get_host_service_status` | `unit` | read-only | `systemctl status` for a unit in `security.host_units` |
-| `get_host_service_logs` | `unit`, `lines` (1–1000) | read-only | `journalctl -u` for a unit in `security.host_units` |
-| `get_service_file` | `service`, `file_path` | read-only | Reads a file inside the service directory over SFTP; `.env` values and recognized secrets in compose/config files are masked, and key/credential files are refused |
+| `get_host_service_logs` | `unit`, `lines` (1–5000), `since` | read-only | `journalctl -u` for a unit in `security.host_units`, with an optional time window |
+| `search_host_service_logs` | `unit`, `pattern`, `lines` (1–5000), `since` | read-only | Filters journal lines for an exact literal string (no regex) |
+| `get_service_file` | `service`, `file_path` | read-only | Reads a file inside the service directory over SFTP; credential values in `.env` and compose/config files are masked, and key/credential files are refused |
 | `list_service_files` | `service`, `subdirectory` | read-only | Lists files inside the service directory |
 | `get_server_health` | — | read-only | Uptime, memory, disk usage for every `health.disk_paths` mount, running containers and unhealthy containers |
 | `query_influxdb` | `query`, `database` | read-only | Single `SELECT` against InfluxDB v3 |
 | `query_prometheus` | `query`, `time` | read-only | Instant PromQL query (Prometheus is optional) |
 | `get_prometheus_targets` | — | read-only | Prometheus scrape targets and health (optional) |
 | `compose_ps` | `service` | read-only | `docker compose --project-directory <service> ps` |
-| `start_service` | `service` | write | `docker start` |
+| `start_service` | `service`, `confirm` | write | `docker start` after confirmation; already-running containers are reported without a call |
 | `compose_pull` | `service`, `confirm` | write | `docker compose ... pull` after confirmation |
 | `compose_up` | `service`, `confirm` | write | `docker compose ... up -d --remove-orphans` after confirmation |
 | `restart_service` | `service`, `confirm` | destructive | `docker restart` after confirmation |
@@ -56,9 +57,10 @@ compose_up("immich", confirm=True)
 compose_down("immich", confirm=True)
 restart_service("immich", confirm=True)
 get_host_service_status("telegraf")   # systemd unit, not a container
-get_host_service_logs("telegraf", lines=200)
+get_host_service_logs("telegraf", lines=200, since="-2h")
+search_host_service_logs("telegraf", "error", since="-30m")
 get_service_file("grafana", "provisioning/datasources/influxdb.yml")
-get_service_file("cypht", ".env")       # values masked as KEY=***
+get_service_file("cypht", ".env")       # credential values masked; benign keys visible
 get_service_file("cypht", "compose.yml") # inline passwords/tokens masked
 query_prometheus('up{job="node"} > 0')  # optional; any Prometheus target
 query_influxdb("SELECT * FROM smart_device WHERE time > now() - INTERVAL '1 hour' LIMIT 100")
@@ -68,19 +70,19 @@ query_influxdb("SELECT * FROM smart_device WHERE time > now() - INTERVAL '1 hour
 
 | Tool | Arguments | Access | What it does |
 |---|---|---|---|
-| `list_disks` | — | read-only | `lsblk` JSON: names, models, serials, sizes |
+| `list_disks` | — | read-only | Readable `lsblk` table (name, model, serial, size, type, transport); raw records stay in `data.devices` |
 | `get_disk_health` | `device` | read-only | Full health report from the latest valid InfluxDB sample (successful rows in the last 24 hours), selected by the live serial, with freshness, serial/live-device identity and failed-poll evidence, or `smartctl` |
 | `get_smart_attributes` | `device` | read-only | SMART attribute table with severity notes, ignoring standby rows |
 | `get_nvme_health` | `device` | read-only | NVMe SMART log (latest valid InfluxDB sample first, then `nvme-cli`) with the same freshness and identity checks; a SATA disk is refused |
 | `get_full_disk_report` | `device` (optional) | read-only | Overview of all disks (one line per serial) with sample age, freshness, identity and failed polls, or a detailed report |
 | `get_zfs_status` | — | read-only | ZFS pool status, capacity and scrub state |
 | `get_raid_status` | — | read-only | `/proc/mdstat` and `mdadm --detail` |
-| `get_snapraid_status` | — | read-only | `snapraid status`: parity age, sync state and disk errors |
+| `get_snapraid_status` | — | read-only | `snapraid status`: raw text plus parsed per-disk/total rows, sync state, scrub ages, errors and zero-timestamp count |
 | `get_mount_status` | — | read-only | `findmnt` mounts, mergerFS pools and `df` usage |
 | `get_io_stats` | — | read-only | `iostat -x` |
 | `query_influxdb_disk` | `query`, `database` | read-only | Historical disk metrics as SQL |
 | `query_prometheus_disk` | `query` | read-only | Disk metrics as PromQL (optional; see note) |
-| `run_smart_test` | `device`, `test_type` | write | Starts a short/long/conveyance self-test after a `smartctl` pre-flight; skips a sleeping disk |
+| `run_smart_test` | `device`, `test_type` | write | Starts a short/long/conveyance self-test after a read-only identity probe; reports `permission`, `standby`, `unsupported` or `error` with raw output and exit status |
 
 ### Examples
 
@@ -139,12 +141,23 @@ Search patterns are matched locally in Python. They are **not** rewritten: quote
 (over 200 characters) or control-character patterns are rejected. No shell or `grep` is
 involved, so a pattern that looks like shell syntax is just text.
 
+When a container target is actually a host systemd unit, the container log/status tools
+append a hint pointing at `get_host_service_logs`/`get_host_service_status`. A no-match
+result for a file-logging service such as nginx or swag points at
+`list_service_files`/`get_service_file` on its mounted log directory. Compose tools check for
+a compose file before running Docker: an Ansible-managed `docker_container` directory is
+refused with a pointer to `start_service`/`restart_service` or the Ansible role instead of
+a raw `no configuration file provided` error. A missing
+subdirectory in `list_service_files` reports the full path and base directory.
+
 ## Confirmation and rate limiting
 
-`restart_service`, `stop_service`, `compose_pull`, `compose_up` and `compose_down` accept a
-`confirm` argument that defaults to `false`. Without it, the tool returns the exact command
-it would run and executes nothing. Call the tool again with `confirm=true` after checking
-the target. `start_service` and `compose_ps` do not need confirmation.
+`start_service`, `restart_service`, `stop_service`, `compose_pull`, `compose_up` and
+`compose_down` accept a `confirm` argument that defaults to `false`. Without it, the tool
+returns the exact command it would run and executes nothing. Call the tool again with
+`confirm=true` after checking the target. `compose_ps` remains read-only. A confirmed
+`start_service` checks each container first: an already-running container is reported as
+such and is not passed to `docker start`.
 
 State-changing calls pass through a sliding-window limiter (`rate_limit` in the config:
 `enabled`, `max_calls`, `window_seconds`; default 10 calls per 60 seconds). That includes
@@ -163,17 +176,22 @@ complete response. A response is truncated at most once with the standard marker
 
 ## Host service units
 
-`get_host_service_status` and `get_host_service_logs` accept only units listed in
-`security.host_units` (default: `telegraf`, `smartd`, `docker`, `snapraid`, `mergerfs`,
-`smbd`). Pass the base unit name (`telegraf`), not `telegraf.service` or a path. An empty
-allowlist disables both tools. The command policy additionally checks the complete argument
-shape (`systemctl status --no-pager --full <unit>` and
-`journalctl -u <unit> -n <int> --no-pager --output short-iso`), so extra flags or targets
-are rejected before execution.
+`get_host_service_status`, `get_host_service_logs` and `search_host_service_logs` accept only
+units listed in `security.host_units` (default: `telegraf`, `smartmontools`, `docker`,
+`smbd`). These are real units: `smartd` is an alias that `journalctl -u smartd` does not
+follow on the reference host, while SnapRAID and mergerFS are timer/cron or FUSE driven and
+have no service to inspect. Pass the base unit name (`telegraf`), not `telegraf.service` or
+a path. An empty allowlist disables the host tools. The command policy additionally checks
+the complete argument shape (`systemctl status --no-pager --full <unit>` and
+`journalctl -u <unit> -n <int> --no-pager --output short-iso [--since <time>]`), so extra
+flags or targets are rejected before execution.
 
 The executor user must be able to read the journal (`systemd-journal` or `adm` group).
 Without that, `journalctl` exits 0 with "No entries" and a permission hint on stderr, so
-`get_host_service_logs` looks empty rather than failing.
+`get_host_service_logs` looks empty rather than failing. `search_host_service_logs` filters
+the same journal output locally, so punctuation in the pattern is literal and no shell pipe
+is used. Journal time filters accept an RFC3339 timestamp, a date or a relative duration;
+a bare `2h` is normalized to journalctl's `-2h`, and `-2h`/`-1h30m` are accepted directly.
 
 ## SnapRAID privileges
 
@@ -301,6 +319,10 @@ directory or add its name to `security.allowed_containers`.
 
 - InfluxDB 3 Core has a file-scan limit. Queries without a `WHERE time` clause may fail with
   HTTP 500; add `WHERE time > now() - INTERVAL '1 hour'`.
+- InfluxDB v3 SQL does not return `GROUP BY` keys unless they are projected by the
+  `SELECT` list. Write `SELECT device, count(*) FROM smart_device GROUP BY device`, not
+  `SELECT count(*) FROM smart_device GROUP BY device`; otherwise the rows have no `device`
+  column. Both InfluxDB query tools append this advisory when they detect the mistake.
 - InfluxDB and Prometheus may be reached through an HTTPS reverse proxy or a loopback SSH
   tunnel. For a loopback-only service, use `ssh_tunnel` in the database section (the MCP
   opens it at startup) or keep `ssh -N -L` running yourself; see
@@ -311,16 +333,21 @@ directory or add its name to `security.allowed_containers`.
   deliberately does not run commands through `sudo`; use InfluxDB as the preferred source
   when the executor has no device access.
 - `run_smart_test` is a write operation and therefore needs real device access. It first
-  runs `/usr/sbin/smartctl --version` (which never opens a block device) and returns a clear
-  "no test was started" error when smartctl is unavailable. The test itself uses
-  `-n standby`, so a sleeping disk is skipped instead of being spun up; wake the disk
-  explicitly and retry if the test is required. Other failures return a permission/device
-  error rather than claiming the test started.
+  runs a read-only `smartctl -i` identity probe (with `-n standby` for ATA, so a sleeping
+  disk is not spun up) and returns a clear "no test was started" error when smartctl is
+  missing or the device cannot be opened. The ATA test uses `-n standby`; the NVMe test
+  omits it because NVMe has no standby state and the power-state check can skip an idle
+  SSD. A permission failure is reported as `permission`, never as `standby`. Success and
+  failure publish `started`, `reason`, `raw`, `exit_status` and the `smartctl -l selftest`
+  command that shows the result.
 - The disk-health tools that touch the host require `host.enabled: true`; InfluxDB-only
   diagnostics work with it disabled.
-- `get_service_file` masks the values of `.env` files (`KEY=***`) and refuses private keys,
-  credential stores and secret-named paths with a specific sensitive-file error. Matching
-  is per path component and extension, so `monkey.txt` and `tokenizer.json` are readable.
+- `get_service_file` redacts credential values in `.env` files by key name (for example
+  `DB_PASSWORD=***`, `JWT_SECRET=***`, `API_KEY=***`) while benign settings such as `TZ` and
+  `DB_HOST` stay readable; non-assignment lines are still masked and `data.redacted_keys`
+  lists the keys that were changed. Private keys, credential stores and secret-named paths
+  are refused with a specific sensitive-file error. Matching is per path component and
+  extension, so `monkey.txt` and `tokenizer.json` are readable.
   Other readable config files (YAML/JSON/INI/command-line shapes) are passed through a
   secret redactor: password/secret/token/API-key/authorization values (including short
   spellings such as `pass`, `pw`, `passphrase` and `db_pass`), bearer headers, JWTs and

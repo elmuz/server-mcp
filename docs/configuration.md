@@ -34,10 +34,8 @@ security:
   allowed_containers: []      # containers manageable without a service directory
   host_units:                # systemd units get_host_service_* may inspect
     - telegraf
-    - smartd
+    - smartmontools
     - docker
-    - snapraid
-    - mergerfs
     - smbd
 
 host:
@@ -139,8 +137,9 @@ genuinely cannot launch a process.
 `rate_limit` bounds state-changing tool calls per server process with a sliding window:
 `start_service`, `restart_service`, `stop_service`, `compose_pull`, `compose_up` and
 `compose_down` in `remote-server-mcp`, and `run_smart_test` in `disk-health-mcp`.
-Destructive and compose tools also require `confirm=true`; without it they return a dry-run
-preview. Set `enabled: false` for unattended automation or raise `max_calls`.
+All mutating tools (`start_service`, `restart_service`, `stop_service`, `compose_pull`,
+`compose_up` and `compose_down`) also require `confirm=true`; without it they return a
+dry-run preview. Set `enabled: false` for unattended automation or raise `max_calls`.
 
 ## SSH
 
@@ -179,10 +178,12 @@ entries are ignored, and `["/"]` is used when no valid path remains. This settin
 effect on `disk-health-mcp`.
 
 `security.host_units` is the allowlist for `get_host_service_status` and
-`get_host_service_logs`. The default is `telegraf`, `smartd`, `docker`, `snapraid`,
-`mergerfs` and `smbd`. The tools build `systemctl status` and `journalctl -u` argv vectors
-only for names in this list; arbitrary units are rejected. Set an empty list (or `null`) to
-disable host-service inspection entirely.
+`get_host_service_logs` and `search_host_service_logs`. The default is `telegraf`,
+`smartmontools`, `docker` and `smbd`. These are real systemd units on the reference host:
+`smartd` is an alias that `journalctl -u smartd` does not follow, and SnapRAID/mergerFS are
+timer/cron or FUSE driven rather than services. The tools build `systemctl status` and
+`journalctl -u` argv vectors only for names in this list; arbitrary units are rejected. Set
+an empty list (or `null`) to disable host-service inspection entirely.
 
 The command allowlist is built into the library and cannot be extended from configuration.
 `security.allow_generic_commands` is accepted for backwards compatibility but has no

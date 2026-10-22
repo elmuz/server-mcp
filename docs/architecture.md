@@ -90,16 +90,16 @@ listens on the target's loopback interface. The server rewrites the database sec
 
 ## Host infrastructure services
 
-Not every service is a Docker container. The monitoring collector (`telegraf`), `smartd`,
-`docker`, `snapraid`, `mergerfs` and `smbd` run as systemd units on the host and write to
-the journal. `remote-server-mcp` exposes `get_host_service_status` and
-`get_host_service_logs`, which build `systemctl status` / `journalctl -u` argv vectors from
-the operation catalog.
+Not every service is a Docker container. The monitoring collector (`telegraf`),
+`smartmontools` (`smartd`), `docker` and `smbd` run as systemd units on the host and write
+to the journal. `remote-server-mcp` exposes `get_host_service_status`,
+`get_host_service_logs` and `search_host_service_logs`, which build `systemctl status` /
+`journalctl -u` argv vectors from the operation catalog.
 
 The unit name is validated twice: `SecurityValidator.validate_host_unit()` requires a
 well-formed systemd unit name and membership in `security.host_units` (default:
-`telegraf`, `smartd`, `docker`, `snapraid`, `mergerfs`, `smbd`), then the rendered command
-passes the shared argv allowlist. An arbitrary unit is rejected before the executor runs
+`telegraf`, `smartmontools`, `docker`, `smbd`), then the rendered command passes the shared
+argv allowlist. Journal reads may add a validated `--since` window. An arbitrary unit is rejected before the executor runs
 anything, so host infrastructure services are in scope only through the explicit allowlist.
 
 ## Service and container resolution

@@ -219,8 +219,16 @@ DISK_USAGE = Operation(("df", "-h", "$path"))
 # Host infrastructure services are systemd units, not Docker containers. The
 # unit name is validated against security.host_units before rendering.
 SYSTEMCTL_STATUS = Operation(("systemctl", "status", "--no-pager", "--full", "$unit"))
-JOURNALCTL_UNIT = Operation(
-    (
+
+
+def journalctl_unit_operation(*, since: str | None = None) -> Operation:
+    """Build ``journalctl -u`` for one unit with an optional time window.
+
+    ``--since`` is appended after the fixed arguments so the command policy can
+    validate one complete shape. The value is checked by
+    :meth:`SecurityValidator.validate_log_time` before it is rendered.
+    """
+    argv = [
         "journalctl",
         "-u",
         "$unit",
@@ -229,8 +237,13 @@ JOURNALCTL_UNIT = Operation(
         "--no-pager",
         "--output",
         "short-iso",
-    )
-)
+    ]
+    if since:
+        argv.extend(("--since", "$since"))
+    return Operation(tuple(argv))
+
+
+JOURNALCTL_UNIT = journalctl_unit_operation()
 
 
 # Backwards-compatible alias used by the server and its tests.
