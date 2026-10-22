@@ -8,13 +8,16 @@ removed). Earlier snapshots remain in git history.
 - **Status:** the releases are out. `v0.2.0` (signed, on `9901974`) and `v0.2.1` (signed, on
   `2a5de15`) are tags pushed to `origin`, and all three packages are published on PyPI at
   both versions; `uvx remote-server-mcp` and `uvx disk-health-mcp` install from the index.
-  `0.2.0` folded the pre-release remediation into the first published version; `0.2.1` ships
+  `0.2.0` folded the pre-release remediation into the first published version; `0.2.1` shipped
   the stale-SMART and short-credential-key fixes. `v0.2.1` was published by
   `.github/workflows/publish.yml` through PyPI trusted publishing with no stored token
-  (run `39507146796`), so the steady-state release path is verified. Remaining: re-run the
-  live smoke checks in 6.3 against the installed packages.
-- **Last updated:** 2026-10-21 (`0.2.1` published to PyPI by CI, trusted publishing verified;
-  P1-18/T-20 fixed)
+  (run `39507146796`), so the steady-state release path is verified.
+  **Next release:** `0.3.0`, which ships the serial-based disk identity (P1-19) plus the
+  sample-age and benign-`AUTH_*` fixes. The read-only smoke checks in 6.3 passed on the
+  current tree on 2026-10-22. The only open items are the catafalco prerequisites in 3.5
+  (outside this repository) and the deferred P2-15.
+- **Last updated:** 2026-10-22 (in-repo backlog closed; P1-19 serial identity recorded;
+  P2-15 deferred; `0.3.0` prepared)
 - **Provenance:** every finding below was re-verified against `81733d2` before merging;
   findings already fixed are marked `[x]` and kept only as history.
 - **Target deployment:** `catafalco` (Ubuntu home server/NAS; Docker services under `/srv`)
@@ -136,7 +139,7 @@ not polish.
   - Prefer InfluxDB; only fall back to `smartctl` when a usable response is parsed.
 - **Tests:** add cases for exit-code text, empty text, and JSON parse failure asserting an
   error string and the absence of `100/100` / `No issues detected`.
-- **Done (unreleased):** command failures are detected before parsing;
+- **Done:** command failures are detected before parsing;
   `parse_smart_text()` returns `None` for unusable text; `format_smart_summary()` refuses
   empty devices; regression tests cover the error paths.
 
@@ -156,9 +159,12 @@ not polish.
       `get_disk_health` and `get_smart_attributes`.
 - **Docs:** update the device-name section and the `get_smart_attributes("nvme0n1")` example
       in `docs/tools.md`.
-- **Done (unreleased):** both InfluxDB lookups normalize `nvmeXnY` to `nvmeX`; live
+- **Done:** both InfluxDB lookups normalize `nvmeXnY` to `nvmeX`; live
   `get_disk_health("nvme0n1")`, `get_smart_attributes("nvme0n1")` and
   `get_nvme_health("nvme0n1")` now return real InfluxDB data.
+- **Superseded by P1-19:** the label normalization is now only the fallback. Samples are
+  selected by `serial_no` first, because the Telegraf deployment publishes a static role
+  label (`Cache1`, `Parity1`, ...) in the `device` tag instead of a kernel name.
 
 #### P0-3 SMART fallback cannot work on a standard Ubuntu host
 
@@ -174,7 +180,7 @@ not polish.
       policy.
 - **Acceptance:** `get_smart_attributes("sda")` either returns data or a clear
       permission/availability error, never a command-not-found.
-- **Done (unreleased):** absolute paths are used for every host-tool fallback. Live
+- **Done:** absolute paths are used for every host-tool fallback. Live
   verification reaches `/usr/sbin/smartctl` and `/usr/sbin/nvme`, but the executor user
   currently gets `Permission denied`; the tools now report that clearly instead of
   fabricating health data or claiming the command is missing.
@@ -191,7 +197,7 @@ not polish.
       section.
 - **Acceptance:** `get_service_status("deluge")` shows `Health: unhealthy`; the failing
   probe output is retrievable.
-- **Done (unreleased):** `get_service_status` reports the health fields and
+- **Done:** `get_service_status` reports the health fields and
   `get_container_health` returns the last N probe results. Tests cover health, no-healthcheck,
   Docker-error and entry-clamping paths.
 
@@ -207,7 +213,7 @@ not polish.
   - Or make the policy explicitly allowlist-based for every executable.
 - [x] Add tests that unknown commands are rejected and that
       `security.allow_generic_commands` cannot enable arbitrary execution.
-- **Done (unreleased):** `disk-health-mcp` now uses `operations.py` with the shared
+- **Done:** `disk-health-mcp` now uses `operations.py` with the shared
   `Operation` template, and `is_command_safe()` rejects anything outside an exact argv
   allowlist. Shell syntax, unknown executables and `docker run`/`docker exec` are rejected;
   `allow_generic_commands` has no effect. Tests assert both catalogs pass the policy and that
@@ -293,7 +299,7 @@ rather than adding new surface.
 - **Tests:** resolve `immich` → its containers; reject `../../etc`; parse `docker ps -a`.
 - **Docs:** replace the "container is assumed to have the same name" statement in
   `docs/tools.md` with the real resolution rules.
-- **Done (unreleased):** `resolution.py` resolves directories through the compose project
+- **Done:** `resolution.py` resolves directories through the compose project
   label (with a same-name fallback for legacy deployments) and accepts container names
   that map to a service directory or are allowlisted. `list_containers` reports stopped and
   crashed containers, and the container tools label multi-container output per container.
@@ -330,7 +336,7 @@ rather than adding new surface.
       matching `token`); match path components / extensions instead.
 - **Tests:** `.env` read returns redacted output; `../../etc/shadow` is still blocked; add a
   regression test for the misleading message.
-- **Done (unreleased):** the substring list is replaced by `BLOCKED_PATH_COMPONENTS`,
+- **Done:** the substring list is replaced by `BLOCKED_PATH_COMPONENTS`,
   `BLOCKED_PATH_SUFFIXES` and the `REDACTED_PATH_*` sets, matched per path component and
   extension. `SecurityValidator.check_service_file_path()` returns a `ServiceFilePath` with
   `ALLOW`, `REDACT`, `BLOCKED_INVALID` or `BLOCKED_SENSITIVE`, so `get_service_file` can
@@ -347,7 +353,7 @@ rather than adding new surface.
 - [x] Add configurable `health.disk_paths` (default `["/"]`) or report all local mounts and
       deduplicate. Include unhealthy containers in the summary.
 - **Acceptance:** the tool reports the mergerFS pool and root usage separately.
-- **Done (unreleased):** `SecurityValidator.health_disk_paths` reads
+- **Done:** `SecurityValidator.health_disk_paths` reads
   `health.disk_paths`, validates each entry as a shell-safe absolute path, normalises it
   with `PurePosixPath` and deduplicates without reordering. `get_server_health` renders
   one `df -h <path>` block per mount (default `["/"]`), so `/` and `/mnt/storage` are
@@ -367,7 +373,7 @@ rather than adding new surface.
       exact pattern (matching happens locally, so no shell escaping is needed) and validate
       length/control characters only.
 - [x] Show `docker stats` as "not running" instead of `0B / 0B` for stopped containers.
-- **Done (unreleased):** `docker logs` always renders `--timestamps`; both log tools accept
+- **Done:** `docker logs` always renders `--timestamps`; both log tools accept
   optional `since`/`until` and `container` arguments. `SecurityValidator.validate_log_time()`
   accepts only RFC3339 timestamps, dates or relative durations, so a value cannot become a
   Docker option. `sanitize_search_pattern()` is replaced by `validate_search_pattern()`,
@@ -386,7 +392,7 @@ rather than adding new surface.
       sleeping disks.
 - **Tests:** a standby-only series returns an explicit "no recent valid sample" message, not
   zeroed health fields.
-- **Done (unreleased):** `smart_device` and `smart_attribute` lookups require
+- **Done:** `smart_device` and `smart_attribute` lookups require
   `exit_status = 0` and use a 24-hour lookback. Health reports and the disk overview show the
   sample timestamp and age, and missing fields are omitted instead of rendered as zero. With
   InfluxDB only and a standby-only series, `get_disk_health` returns an explicit no-valid-
@@ -411,7 +417,7 @@ rather than adding new surface.
 - [x] Clarify that `query_prometheus_disk`'s `smartmon_*` examples require
       `node_exporter` (smartmon collector). Prometheus is optional and is not a
       prerequisite for disk health; Telegraf -> InfluxDB remains the SMART source.
-- **Done (unreleased):** `.env.example` files, both `config.example.yaml` files,
+- **Done:** `.env.example` files, both `config.example.yaml` files,
   `README.md`, the app READMEs, `docs/configuration.md`, `docs/tools.md`,
   `docs/architecture.md`, `docs/security-model.md` and `CHANGELOG.md` describe the two
   endpoint modes. Unit tests cover tunnel validation, startup/open failure cleanup and
@@ -430,7 +436,7 @@ rather than adding new surface.
       lexically with `PurePosixPath` and resolution is left to the executor.
 - **Tests:** the returned path is lexical (a symlink below `services_path` on the MCP host is
   not followed) and traversal is still rejected.
-- **Done (unreleased):** `check_service_file_path()` joins the service base and the relative
+- **Done:** `check_service_file_path()` joins the service base and the relative
   path with `PurePosixPath`, checks the lexical result is still below the base, and no longer
   imports or calls `Path.resolve()`. The SSH executor still verifies the remote `realpath`
   before reading; the local executor does the equivalent on the target filesystem.
@@ -443,7 +449,7 @@ rather than adding new surface.
 - [x] Apply a final `sanitize_output` cap to the complete tool response.
 - **Tests:** a composite response larger than `output.max_bytes` is truncated exactly once
   with the standard marker.
-- **Done (unreleased):** both MCP servers apply a final `sanitize_output` cap (`tool output`)
+- **Done:** both MCP servers apply a final `sanitize_output` cap (`tool output`)
   to composite and listing responses, including service files, server health, host-service
   logs, ZFS/RAID/SnapRAID/mount summaries and the full disk report. `sanitize_output()` is
   idempotent at the same limit, so a nested cap cannot append a second truncation marker.
@@ -457,7 +463,7 @@ rather than adding new surface.
       duration) without storing query text that may contain secrets.
 - **Tests:** enabled audit log records an InfluxDB and a Prometheus query with redacted
   metadata.
-- **Done (unreleased):** `create_audit_logger()` builds the logger from the shared `audit`
+- **Done:** `create_audit_logger()` builds the logger from the shared `audit`
   config section. Both servers pass it to their HTTP clients. `influxdb_query` and
   `prometheus_query` records contain `query_length`, `query_sha256`, `status`,
   `duration_ms` and (for InfluxDB) `database`; connection errors and timeouts are recorded
@@ -470,7 +476,7 @@ rather than adding new surface.
 - [x] Do not run tests on disks that may be spun down without an explicit user action.
 - **Tests:** mock an unavailable `smartctl` and assert the error, with no write operation
   attempted.
-- **Done (unreleased):** `run_smart_test` runs `/usr/sbin/smartctl --version` first. That
+- **Done:** `run_smart_test` runs `/usr/sbin/smartctl --version` first. That
   pre-flight never opens a block device, so it cannot spin up a sleeping disk. If the
   version check fails, the tool returns "SMART self-tests unavailable ... No test was
   started" and never renders the write command. The test itself uses `-n standby`, so
@@ -486,7 +492,7 @@ rather than adding new surface.
       or `/*` comments although the tool error text claimed it did. Both
       `query_influxdb_disk` and `query_prometheus_disk` validated into `validated` but passed
       the original `query` to the client.
-- **Done (unreleased):** `_ensure_limit()` walks the top-level `sqlparse` tokens, ignores a
+- **Done:** `_ensure_limit()` walks the top-level `sqlparse` tokens, ignores a
       `LIMIT` inside a string literal, identifier or nested subquery, clamps an outermost
       numeric `LIMIT` to `query_limit` and appends one when it is missing.
       `validate_influxdb_query()` rejects SQL comments. Both disk-health query tools pass
@@ -500,7 +506,7 @@ rather than adding new surface.
       `ls -1 /etc/ssl/private` or `/usr/sbin/smartctl -s off /dev/sda` passed the policy.
       `SHELL_METACHARACTERS` also did not reject `\x00`–`\x1f` or `\x7f` inside a quoted
       token.
-- **Done (unreleased):** every token is rejected if it contains a control character, and
+- **Done:** every token is rejected if it contains a control character, and
       `_argument_shape_safe()` validates the complete vector for the container runtimes,
       `systemctl`, `journalctl`, `smartctl`, `nvme`, `ls`, `test`, `df`, `lsblk`, `zpool`,
       `zfs`, `mdadm`, `cat`, `snapraid` and `findmnt`. Docker inspect/stats formats that
@@ -517,7 +523,7 @@ rather than adding new surface.
       prefix.
 - [x] Widen `DEVICE_NAME_PATTERN` to `sd[a-z]{1,2}` so `sdaa`..`sdzz` work on hosts with
       more than 26 SATA/SAS disks, and document partition versus whole-disk handling.
-- **Done (unreleased):** `_disk_devices()` keeps only `type: disk` rows whose name passes
+- **Done:** `_disk_devices()` keeps only `type: disk` rows whose name passes
       `validate_device_name()`; the overview and health loop both use it. The device pattern
       now accepts two-letter SATA/SAS names. Tests feed `loop0`, `sr0`, `sdaa`, `zram0`, a
       partition and a traversal-shaped name, and assert that only `/dev/sdaa` reaches
@@ -530,7 +536,7 @@ rather than adding new surface.
       a write action without `_rate_limited("start_service")`. `BearerTokenMiddleware`
       compared the raw `Authorization` value, so lowercase `bearer <token>` was rejected
       even though RFC 9110 auth schemes are case-insensitive.
-- **Done (unreleased):** `disk-health-mcp` creates the limiter at import and in
+- **Done:** `disk-health-mcp` creates the limiter at import and in
       `apply_config()`, and `run_smart_test` checks it before the pre-flight.
       `start_service` is guarded. The bearer middleware splits the scheme and credential,
       compares the scheme case-insensitively and keeps `hmac.compare_digest` on the token.
@@ -543,7 +549,7 @@ rather than adding new surface.
       `audit.jsonl` as `0o644` instead of `0o700`/`0o600`. `PrometheusClient.get_targets()`
       did not audit, unlike `query()`. Policy refusals that happened before the executor
       (sensitive file, host unit, query, rate limit) were never logged.
-- **Done (unreleased):** new audit directories are created with mode `0700` and the log
+- **Done:** new audit directories are created with mode `0700` and the log
       file is `0600`; an existing file is tightened on the next write. `get_targets()`
       emits `prometheus_targets`, and both servers log `file_blocked_sensitive`,
       `host_unit_blocked`, `query_blocked` and `rate_limited`. Tests assert POSIX modes,
@@ -556,14 +562,14 @@ rather than adding new surface.
       `*.yml`/`*.json`/`*.toml`/`*.ini`/`*.conf` service files were returned verbatim;
       `systemctl status --full` could also print tokens in command lines and journal tails.
       `test_security_bypass.py` documented this gap.
-- **Done (unreleased):** `redact_secrets()` masks YAML/JSON/INI/dotenv assignments,
+- **Done:** `redact_secrets()` masks YAML/JSON/INI/dotenv assignments,
       inline `KEY=value`, CLI flags, bearer headers, JWT shapes and URL passwords while
       preserving keys, comments and structure. `get_service_file` applies it to non-`.env`
       service files, and `get_host_service_status`/`get_host_service_logs` apply it to host
       output. The `BLOCKED_*` policy still refuses real credential stores. Tests cover a
       compose password, JSON token field, bearer/JWT values, `systemctl` command lines and
       URL credentials.
-- **Live finding (fixed, unreleased):** the key matcher was a substring search over a
+- **Live finding (fixed):** the key matcher was a substring search over a
       fixed word list, so short spellings leaked. An INI file such as
       `[section]` / `pass = XXXX` was returned verbatim, and so were `db_pass`, `pw`,
       `passphrase` and `credential`-only keys. Keys are now normalized and split on
@@ -580,12 +586,33 @@ rather than adding new surface.
       `device` tag. After a label rewrite, failures written under the old label were no
       longer attached to the disk's newest valid sample (keyed by serial), so a sleeping
       disk could lose the explanation for its stale sample.
-- **Done (unreleased):** `_influxdb_recent_failures_by_disk()` returns a `_FailedPolls`
+- **Done:** `_influxdb_recent_failures_by_disk()` returns a `_FailedPolls`
       index: rows with `serial_no` are keyed by serial, and only rows without one fall back
       to the label. `_influxdb_latest_device_rows()` attaches evidence with
       `for_disk(serial, label)`, and the no-valid-sample path groups by label for display.
       Tests cover a standby row written under the old label, a legacy row without a serial
       and the label fallback in the index.
+
+#### P1-19 Disks are identified by serial, not by the mutable `device` tag
+
+- [x] **Fix and test.** The Telegraf deployment changed the `device` tag from a kernel name
+      (`sda`) to a role label (`Parity1`) and later rewrote that label, so a disk report
+      keyed by the tag could follow the wrong row or lose its history. `get_disk_health`,
+      `get_smart_attributes`, `get_nvme_health` and `get_full_disk_report` now resolve the
+      live device with `lsblk` and query `serial_no = '<serial>'`; the label is only a
+      fallback when no live serial can be resolved.
+- [x] Stored serial/model/time and the live `lsblk` identity are echoed when available. A
+      serial mismatch names both disks and refuses to call the requested device healthy;
+      a sample older than two 5-minute poll intervals is marked stale instead of green.
+- [x] The overview partitions by `serial_no`, so one physical disk stays one line across a
+      tag rewrite or a reboot that re-enumerates controllers. Failed polls are keyed by
+      serial (P1-18) with the label as a fallback for legacy rows. Structured output adds
+      `devices`, `labels` and `serials`, aligned by index.
+- **Tests:** the InfluxDB query selects by serial, a label-only legacy row still works, a
+      rewritten label keeps one line per disk, a stale sample is not healthy, and a serial
+      mismatch is reported without a `PASSED`/100 result.
+- **Docs:** `docs/tools.md` explains the `Data1 (/dev/sda)` rendering, the whole-disk rule
+      and that a `devices` value can always be passed back to `get_disk_health`.
 
 ### 3.3 P2 — modernization and polish
 
@@ -597,7 +624,7 @@ blocked the release.
 - [x] **Fix.** Tools return formatted strings; clients cannot consume typed results. Return
       pydantic models/dicts (and keep a readable text fallback) using `MCPServer` structured
       output.
-- **Done (unreleased):** `server-management-lib.responses` defines the `ToolResponse`
+- **Done:** `server-management-lib.responses` defines the `ToolResponse`
   pydantic envelope (`ok`, `tool`, `summary`, `text`, `data`) and a `make_structured_tool()`
   wrapper. Both servers register an MCP-facing wrapper with a `ToolResponse` output schema
   while the implementation functions keep returning readable strings for direct use and
@@ -609,7 +636,7 @@ blocked the release.
 
 - [x] **Fix.** Only stdio is implemented. Add an opt-in `--transport streamable-http` path
       (loopback/token protected) for clients that cannot launch a process.
-- **Done (unreleased):** `transport.py` serves the Streamable HTTP app (default `/mcp`) and
+- **Done:** `transport.py` serves the Streamable HTTP app (default `/mcp`) and
   enforces two rules: a non-loopback bind requires a token, and a configured token must be
   presented as `Authorization: Bearer ...` on every HTTP request. Configuration lives in
   `transport.*` (`MCP_TRANSPORT`, `MCP_HTTP_HOST`, `MCP_HTTP_PORT`, `MCP_HTTP_PATH`,
@@ -622,7 +649,7 @@ blocked the release.
       `apps/remote-server-mcp/src/remote_server_mcp/operations.py`. Add
       `container_runtime: docker|podman|nerdctl` and build operations from the selected
       runtime.
-- **Done (unreleased):** `build_container_catalog(runtime)` returns every container and
+- **Done:** `build_container_catalog(runtime)` returns every container and
   Compose operation for the selected runtime; `SecurityValidator.container_runtime` rejects
   unknown values with a warning and falls back to Docker. The command allowlist covers
   Podman/nerdctl subcommands and the existing Docker ones. The resolver and every tool use
@@ -634,7 +661,7 @@ blocked the release.
 - [x] **Fix.** There is no `compose up/down/pull/ps`. Add a small, explicit set of compose
       operations scoped to `services_path/<service>/`, with a dry-run or confirmation
       argument.
-- **Done (unreleased):** `compose_ps` is read-only; `compose_pull`, `compose_up` and
+- **Done:** `compose_ps` is read-only; `compose_pull`, `compose_up` and
   `compose_down` run through `<runtime> compose --project-directory
   <services_path>/<service> <subcommand>` and require `confirm=true`. All four are added to
   the command policy with fixed subcommand arguments, a directory below `services_path`
@@ -645,7 +672,7 @@ blocked the release.
 
 - [x] **Fix.** `restart_service` and `stop_service` execute immediately. Add a `confirm`
       parameter or MCP elicitation, and a simple per-session rate limit.
-- **Done (unreleased):** `restart_service`, `stop_service`, `compose_pull`, `compose_up`
+- **Done:** `restart_service`, `stop_service`, `compose_pull`, `compose_up`
   and `compose_down` default to `confirm=false` and return the exact command preview without
   executing it. Confirmed calls pass a sliding-window `RateLimiter` (`rate_limit`, default
   10 calls per 60 s, per server process). Tests cover the preview path, execution, the
@@ -656,14 +683,14 @@ blocked the release.
 - [x] **Fix.** `.github/workflows/ci.yml` runs ruff, format, ty and pytest, but not
       `pymarkdown` or `check-md-links`. Add both steps (or run `pre-commit` in CI) so
       documentation checks are enforced remotely.
-- **Done (unreleased):** CI runs `pymarkdown -c .pymarkdown scan .` and
+- **Done:** CI runs `pymarkdown -c .pymarkdown scan .` and
   `python scripts/check_md_links.py` after the test suites.
 
 #### P2-7 Known_hosts summary logging
 
 - [x] **Fix.** The loader logs up to three skipped entries plus a count. Aggregate skipped
       entries into one summary warning per file.
-- **Done (unreleased):** the loader logs a single warning with the skipped count, the first
+- **Done:** the loader logs a single warning with the skipped count, the first
   ten line numbers and the file name; host key verification remains enabled for every entry
   that parses. A test asserts one aggregated record for two skipped lines.
 
@@ -671,7 +698,7 @@ blocked the release.
 
 - [x] **Optional.** No MCP resources are exposed (`list_mcp_resources` is empty). Consider
       exposing the config schema and tool catalog as resources.
-- **Done (unreleased):** both servers expose `server-mcp://config/schema` (defaults and
+- **Done:** both servers expose `server-mcp://config/schema` (defaults and
   environment override names, credential values masked), `server-mcp://tools/catalog`
   (name, description, annotations and schemas) and a `server-mcp://tools/{name}` template.
   Reading a resource never executes a host command. Tests cover registration, content and
@@ -684,7 +711,7 @@ blocked the release.
 - [x] Consider Python 3.14 in the CI matrix (currently 3.11–3.13; local verification already
       runs on 3.14).
 - [x] Consider a short demo/screenshot section in the README once the repository is public.
-- **Done (unreleased):** all three publishable packages declare authors, URLs, keywords and
+- **Done:** all three publishable packages declare authors, URLs, keywords and
   classifiers; CI includes Python 3.14; the repository has a code of conduct, bug/feature
   issue forms, a PR template and `CODEOWNERS`; the README has a "See it work" section with
   representative response snippets.
@@ -696,7 +723,7 @@ blocked the release.
 - [x] `SSHTunnel` opens a static forward at startup with no reconnect. Re-open the forward
       when the SSH connection drops, or surface a clear "tunnel down" error instead of
       hanging queries.
-- **Done (unreleased):** `connect()` is serialized and re-checks `_connected` inside the
+- **Done:** `connect()` is serialized and re-checks `_connected` inside the
   lock, so concurrent calls share one connection. The tunnel monitors its SSH connection,
   re-opens the forward on the previously bound local port with exponential backoff, exposes
   `down`/`last_error` while reconnecting, and stops the monitor on shutdown.
@@ -709,7 +736,7 @@ blocked the release.
       query. Reuse one session per client and close it on shutdown.
 - [x] `get_full_disk_report()` issues `1 + N` sequential InfluxDB queries. Use one query (or
       concurrent queries over the shared session) to cut report latency.
-- **Done (unreleased):** each HTTP client owns one lazily created `ClientSession` and
+- **Done:** each HTTP client owns one lazily created `ClientSession` and
   exposes `close()`; both servers cache one client per service and close the sessions on
   shutdown. The disk overview uses one window-function query to return the latest valid row
   per device instead of one query per disk.
@@ -721,7 +748,7 @@ blocked the release.
 - [x] `get_service_status` runs `docker stats --no-stream` (1–2 s per container) and
       `docker port`, then discards the stats when `Running: false`. Check the inspect result
       first and skip both commands for stopped containers.
-- **Done (unreleased):** inspect is the first command per container; when `Running:` is
+- **Done:** inspect is the first command per container; when `Running:` is
   false, the tool reports that stats and ports are unavailable without running either
   command.
 - **Tests:** a stopped container emits no `stats`/`port` command; a running container still
@@ -735,7 +762,7 @@ blocked the release.
       `get_nvme_health`, `run_smart_test`, `get_zfs_status`, `get_raid_status`,
       `get_snapraid_status`, `get_mount_status`, `get_io_stats`, `query_prometheus_disk`
       and `query_influxdb_disk`.
-- **Done (unreleased):** all thirteen tools return `ToolOutput` with `data` on success:
+- **Done:** all thirteen tools return `ToolOutput` with `data` on success:
   parsed SMART/NVMe attributes, test status, ZFS/RAID/SnapRAID/mount/I/O command output and
   the decoded query payload (`rows`/`row_count` or `result`).
 - **Tests:** every tool publishes the `ToolResponse` schema, and each tool's representative
@@ -746,9 +773,23 @@ blocked the release.
 - [x] `remote-server-mcp/server.py` still says `"- Not contain quotes or newlines"`,
       contradicting `validate_prometheus_query()`, which allows them. Update the message to
       describe the actual policy.
-- **Done (unreleased):** both PromQL error messages now state the real limits: no null
+- **Done:** both PromQL error messages now state the real limits: no null
   bytes or control characters other than newline/tab, at most 5000 characters, one
   expression. Quotes, label matchers and comparisons are explicitly allowed.
+
+#### P2-15 Structured output depth (deferred)
+
+- [ ] `remote-server-mcp` still returns bare strings for `get_host_service_status` and
+      `get_host_service_logs`, so `ToolResponse.data` is `{}`; `get_service_status` only
+      adds target/container metadata instead of the state, health and resource fields it
+      prints. Populate them the same way `disk-health-mcp` did in P2-13.
+- [ ] `get_snapraid_status` (and partially `get_zfs_status`) feeds human-readable tables to
+      the generic `_parse_key_value_output()`, which yields `{"SnapRAID status report": ""}`
+      rather than parity age, sync state or error counts. Research whether SnapRAID exposes
+      machine-readable output before writing a parser; until then the raw text is the only
+      reliable payload.
+- **Why deferred:** both are typed-payload improvements, not correctness issues, and the
+      SnapRAID part needs a format decision. Track them here rather than in a side document.
 
 ### 3.4 Release and migration
 
@@ -853,30 +894,26 @@ longer tracked here.
   `.env` to service config files and host status/log output.
 - [x] **P2-14:** the `query_prometheus` error message is user-facing; fixed to describe
   the actual policy text.
+- [x] **`docs/issues/influxdb-api-error-handling.md`:** the HTML/proxy-body detection
+  (A–C) and the structured-database field (E) were implemented and this plan now owns the
+  history. Item D (do not send DB queries through public ingress) is covered by the
+  `influxdb.ssh_tunnel` / `prometheus.ssh_tunnel` block from P1-7, which opens a loopback
+  forward over the executor SSH connection and reconnects on drop.
 - **All tool changes:** update `README.md`, `docs/tools.md`, `docs/configuration.md`,
   `docs/security-model.md` and `CHANGELOG.md` in the same change.
 
 ## 5. Implementation order
 
-1. **P0:** complete (P0-1 through P0-8).
-2. **Query and command policy:** P1-12 InfluxDB `LIMIT`/comments/pass-through, P1-13 argv
-   argument shape, P1-14 `lsblk` device validation.
-3. **Operational controls:** P1-15 rate limiting/bearer, P1-16 audit permissions and
-   coverage, P1-17 general secret redaction.
-4. **Documentation:** section 4 items for the changes above.
-5. **Release:** section 3.4. The version is decided (`0.2.0`); push the release commit, tag,
-   publish and then run the live smoke checks in 6.3.
-6. **Modernization:** complete (P2-10 through P2-14 and the remaining P2 items).
+1. **All P0, P1 and P2 items are complete** (P0-1 through P0-8, P1-1 through P1-19, P2-1
+   through P2-14). The serial-identity work (P1-19) landed after `v0.2.1` and is part of
+   `0.3.0`.
+2. **Release:** `0.3.0` follows the steady-state path in `docs/releasing.md`: clean build,
+   signed tag, trusted-publishing workflow, then the live smoke checks in 6.3 with the
+   installed packages.
+3. **Remaining work is outside this repository:** the catafalco prerequisites in 3.5.
+4. **Deferred:** P2-15 (structured output depth and SnapRAID machine-readable format).
 
-Suggested PR split:
-
-- PR 1 (done in worktree): P0-6 config env overrides + tests.
-- PR 2 (done in worktree): P0-7/P0-8 SSH/local file confinement + tests.
-- PR 3: P1-12/P1-13 query and argv hardening + tests.
-- PR 4: P1-14/P1-15 device validation and rate limiting + tests.
-- PR 5: P1-16/P1-17 audit and redaction + docs.
-- PR 6: release (section 3.4) after the smoke checks.
-- Later PRs: complete (P2-10 through P2-14 and remaining polish).
+There is no pending PR split; the branch history is linear on `main`.
 
 ## 6. Verification
 
@@ -899,15 +936,15 @@ uv build --all-packages
 
 | Check | Result |
 |---|---|
-| `server-management-lib` tests | 359 passed, 94.47% coverage (gate 90%) |
-| `remote-server-mcp` tests | 253 passed (+17 integration opt-in), 84.79% coverage (gate 60%) |
-| `disk-health-mcp` tests | 122 passed, 77.50% coverage (gate 65%) |
+| `server-management-lib` tests | 462 passed, 91.46% coverage (gate 90%) |
+| `remote-server-mcp` tests | 266 passed (+17 integration opt-in), 85.19% coverage (gate 60%) |
+| `disk-health-mcp` tests | 194 passed, 84.13% coverage (gate 65%) |
 | Python version used locally | 3.14.8 |
-| `ruff check`, `ruff format --check`, `ty check` | passing on `81733d2` |
-| `pre-commit run --all-files` | passing on `81733d2` (ruff, ty, per-package pytest, pymarkdown, link check) |
-| Remote CI | green on `de6d981` and `81733d2`, Python 3.11–3.14 |
-| `uv build --all-packages` | all three wheels/sdists build, `py.typed` included; `dist/` cleaned first because the version stays `0.2.0` |
-| Package version | `0.2.0` in the four `pyproject.toml` files, the three `__version__` values, `uv.lock` and the newest `CHANGELOG.md` section |
+| `ruff check`, `ruff format --check`, `ty check` | passing on the `0.3.0` tree |
+| `pre-commit run --all-files` | passing on the `0.3.0` tree (ruff, ty, per-package pytest, pymarkdown, link check) |
+| Remote CI | green through the `0.2.1` release and the post-release commits, Python 3.11–3.14 |
+| `uv build --all-packages` | all three wheels/sdists build, `py.typed` included; `dist/` is always rebuilt from scratch |
+| Package version | `0.3.0` in the four `pyproject.toml` files, the three `__version__` values, `uv.lock` and the newest `CHANGELOG.md` section |
 
 ### 6.3 Live smoke checks (read-only)
 
@@ -918,8 +955,8 @@ that touches the relevant tool.
 get_server_health()
 list_services()
 list_containers()                                  # stopped and crashed containers too
-get_service_status("deluge")                       # expect Health: unhealthy
-get_container_health("deluge")                     # expect the failing probe output
+get_service_status("deluge")                       # expect the Health field (healthy after the probe fix)
+get_container_health("deluge")                     # expect the recent probe output
 get_service_status("immich-server")                # expect it to work after P1-1
 get_host_service_status("telegraf")                # after P1-2
 get_host_service_logs("telegraf", lines=200)       # after P1-2; journalctl -u
@@ -929,7 +966,7 @@ get_snapraid_status()                              # after P1-2
 get_mount_status()                                 # after P1-2; mergerFS + df
 get_service_logs("immich-server", lines=100, since="1h")   # after P1-5
 search_service_logs("immich", "connection refused", since="1h")  # after P1-5
-get_service_status("vllm")                         # stopped: no zeroed stats
+get_service_status("vllm")                         # retired: expect "Unknown service or container", no zeroed stats
 get_disk_health("sda")                             # expect valid data plus sample age after P1-6
 get_disk_health("vda")                             # expect explicit no-data error, not 100/100
 get_smart_attributes("sda")
@@ -938,6 +975,16 @@ query_influxdb("SELECT device, health_ok FROM smart_device WHERE time > now() - 
 query_prometheus("up")                             # expected: "not enabled" (Prometheus retired)
 get_service_file("cypht", "compose.yml")           # after P1-17: inline secrets masked
 ```
+
+Verified on 2026-10-22 against the workspace tree that became `0.3.0` (the servers were
+started with `uv run --project …`): `sda` and `nvme0n1` returned InfluxDB samples with
+verified serial identity, freshness and failed-poll evidence; `vda` returned the explicit
+no-data error; mount/mergerFS, SnapRAID and `iostat` reported real data; `immich-server`
+resolved through its compose project; `deluge` was healthy with probe output; `vllm` was
+reported as unknown; `telegraf` logs and the `sshd` refusal worked; `.env` and `compose.yml`
+were redacted; the InfluxDB query returned rows and Prometheus reported "not enabled".
+These checks used the workspace, not the PyPI artifact; repeat the `uvx` variant after the
+`0.3.0` upload.
 
 Additional checks after the review fixes:
 
@@ -998,8 +1045,10 @@ label (for example `watchtower`, `wud`, `socket-proxy`) still need
 
 ## 8. Resume instructions
 
-1. Start with P1-12 through P1-17. P2 items do not block the tag.
-2. Pick an item from section 3. Each checkbox names the file or area to change.
+1. The in-repo backlog is complete. The remaining open work is the catafalco prerequisites
+   in 3.5, which are handled outside this repository.
+2. For new in-repo work, start from the deferred P2-15 or add an item to section 3 with a
+   checkbox that names the file or area to change.
 3. Read the relevant code/doc section before editing; keep the security model in
    `docs/security-model.md` intact.
 4. Add or update tests in the same PR (P0 items require regression tests).
