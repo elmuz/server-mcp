@@ -15,11 +15,15 @@ removed). Earlier snapshots remain in git history.
   **Current release:** `v0.4.0` (signed, 2026-10-23) ships the serial-based disk identity
   (P1-19), the live-operation handover fixes in 3.6, the journal-time normalization and the
   structured error payloads. Publish run `39869621919` uploaded all three packages in
-  library→apps order, and `uvx --no-cache` resolves `0.4.0`. The remaining open items are
-  the catafalco prerequisites in 3.5 and the host-side self-test privilege in 3.6, both
-  outside this repository.
-- **Last updated:** 2026-10-23 (`v0.4.0` release preparation; handover fixes for self-tests,
-  `start_service`, output parsing, routing, host units and structured errors)
+  library→apps order, and `uvx --no-cache` resolves `0.4.0`. The planned in-repo work is
+  multi-target support (3.7) and containerized trust domains (3.8); the remaining external
+  prerequisites are the
+  catafalco items in 3.5 and the host-side self-test privilege in 3.6.
+- **Last updated:** 2026-10-27 (adds the containerized trust-domain project in 3.8 and
+  refreshes the security-model scope; previous update was the multi-target plan in 3.7)
+- **Plan retention:** this file remains the single backlog. Completed sections are kept as
+  history because they carry live findings and verification evidence; extend the plan
+  rather than replacing it with a second document.
 - **Provenance:** every finding below was re-verified against `81733d2` before merging;
   findings already fixed are marked `[x]` and kept only as history.
 - **Target deployment:** `catafalco` (Ubuntu home server/NAS; Docker services under `/srv`)
@@ -942,6 +946,355 @@ They are listed so the MCP work is not "fixed" against a broken environment.
 - [x] **Do not add `node_exporter`.** SMART data comes from Telegraf/InfluxDB; there are no
       `smartmon_*` metrics. Prometheus remains optional and is retired on this host.
 
+### 3.7 Multi-target support (planned, 2026-10-26)
+
+**Status:** design agreed, not implemented. This section is the working plan; keep it in
+sync with the code as the phases land. The current code is already host-agnostic per
+process: `catafalco` appears only in documentation and example configs, and the target is
+selected by `ssh.host`, `services_path`, metric endpoints and the other config sections.
+The real limitation is that one process owns one config, one executor, one rate limiter and
+one metric/tunnel set.
+
+**Goal:** let one MCP server address several configured hosts so an agent can debug a
+cross-host problem (for example, server A cannot reach server B) without losing the
+security properties of the single-host design.
+
+**Non-goal:** accepting an arbitrary hostname, username, key path or port from the model.
+That would turn the MCP server into a network pivot and a credential-laundering proxy. A
+`target` argument must resolve through an operator-configured allowlist.
+
+#### Security invariants
+
+- A target is an alias in the `targets` configuration map, never a free-form host value.
+- The model cannot supply SSH credentials, key paths, ports, `known_hosts` files or
+  `services_path`. Those belong to the target context.
+- Each target has its own credentials, host-key policy, `services_path`,
+  `allowed_containers`, `host_units`, disk paths, container runtime, metric endpoints,
+  rate limiter and audit metadata.
+- `target` is required when more than one target is configured. Omission is allowed only
+  for the legacy single-target configuration, and the response still names the resolved
+  target. Never silently default to the first target when several exist.
+- Every command, file read, query, policy refusal and rate-limit event carries the target
+  alias. A shared audit file is acceptable only when every record is target-tagged.
+- Cross-host probes are opt-in, read-only and destination-allowlisted. Do not add generic
+  `curl`, `nc`, `ssh` or port-scanning tools.
+
+#### Configuration model
+
+Keep the existing top-level sections as defaults and add an optional `targets` map. A target
+inherits the defaults and overrides only what differs. If `targets` is absent, synthesize a
+single target (working name `default`) from the existing config, so current deployments and
+tests keep working.
+
+```yaml
+targets:
+  catafalco:
+    ssh:
+      host: catafalco.example.com
+      username: mcp
+      key_path: ~/.ssh/mcp_catafalco
+    security:
+      services_path: /srv
+    health:
+      disk_paths: ["/", "/mnt/storage"]
+    influxdb:
+      enabled: true
+      host: 127.0.0.1
+      ssh_tunnel:
+        enabled: true
+
+  server-b:
+    ssh:
+      host: server-b.example.com
+      username: mcp
+      key_path: ~/.ssh/mcp_server_b
+    security:
+      services_path: /opt/services
+```
+
+Open question to settle in Phase 1: target-scoped environment overrides. The current
+`ENV_OVERRIDES` table is singular (`SSH_HOST`, `INFLUXDB_TOKEN`, ...). Either add an
+explicit naming scheme such as `REMOTE_SERVER_MCP_TARGET_<ALIAS>_SSH_HOST`, or require
+secrets to live in a per-target `.env`/config file. Do not make the model or an HTTP caller
+choose credentials.
+
+#### Runtime model
+
+Introduce a target registry in `server-management-lib`, for example
+`packages/server-management-lib/src/server_management_lib/targets.py`:
+
+```python
+@dataclass
+class TargetContext:
+    name: str
+    config: dict
+    security: SecurityValidator
+    executor: Executor
+    catalog: ContainerCatalog
+    rate_limiter: RateLimiter | None
+    audit: AuditLogger
+```
+
+The registry lazily creates and caches one context per alias. It owns executor lifecycle,
+metric clients and tunnels. Do not use a mutable global "current target" or a contextvar as
+the primary routing mechanism: pass the resolved context explicitly through the tool
+functions so a concurrent call cannot observe another call's target.
+
+`apply_config()` should build a new registry and swap it atomically instead of mutating the
+global `security`, `executor`, `catalog` and `rate_limiter` objects in place. In-flight calls
+keep their old context until they finish; new calls use the new one.
+
+#### Tool surface
+
+- Add `target` as the first argument to every host-scoped tool in both apps. Keep `service`,
+  `device`, `unit` and query arguments unchanged.
+- Add `list_targets()` returning aliases, capabilities and (optionally) reachability.
+- Include `target` in every `ToolOutput.data` payload, error message and audit record.
+- Update tool descriptions so the model knows the target is an allowlisted alias and that
+  it must not guess or invent one.
+- Keep `READ_ONLY`, `WRITE_ACTION` and `DESTRUCTIVE_ACTION` annotations tool-wide. The
+  annotation does not vary by target; `confirm=true` remains mandatory for state-changing
+  calls.
+- Scope MCP resources by target, for example `server-mcp://targets`,
+  `server-mcp://targets/{target}/config/schema` and
+  `server-mcp://targets/{target}/tools/catalog`. Keep the old resource URIs as aliases for
+  the single-target case if that is cheap.
+
+#### Lifecycle, rate limits and metrics
+
+- Create executors lazily; do not open SSH connections at import time.
+- At startup, probe every target and report degraded targets without refusing to start the
+  whole process. One unreachable host must not block tools for the others.
+- Close every executor, metric client and tunnel on shutdown.
+- Replace the global rate limiter with a per-target limiter (probably keyed by
+  `(target, action)`) so one noisy host cannot exhaust the budget for another.
+- Key metric clients and tunnels by target, not by `id(config)`. Replace the brittle
+  `_metric_clients` cache.
+- Add `target` to audit events. Decide whether the default is one shared JSONL file with a
+  `target` field or one file per target; shared is better for cross-host timelines, split
+  files are easier to isolate.
+
+#### Cross-host diagnostics (separate opt-in phase)
+
+Multi-target support alone lets the agent inspect both hosts, but not prove that A can reach
+B. Add this only after the registry is stable:
+
+- `get_network_status(target)` using allowlisted `ip`/`ss` operations.
+- `check_connection(source, destination, port)` where `destination` is another configured
+  target or an explicitly allowlisted endpoint. Never accept an arbitrary host/port from the
+  model.
+- Aggregate views that collect logs from both ends for a bounded time window, with explicit
+  target-local timestamps and a clock-skew warning.
+
+#### Implementation phases
+
+- [ ] **Phase 1 — config and registry.** Add the `targets` config merge, alias validation,
+      single-target compatibility synthesis and target-scoped environment override decision.
+      Add `TargetContext`/`TargetRegistry` in the library. Tests cover inheritance, alias
+      validation, duplicate aliases, missing `targets`, and the legacy single-target config.
+- [ ] **Phase 2 — remote-server-mcp.** Replace module-level `security`, `executor`, `catalog`
+      and `rate_limiter` reads with a resolved target context. Add `target` to every tool,
+      `list_targets()`, target-aware errors and `ToolOutput.data`. Keep `resolution.py`
+      stateless; it already accepts `executor`, `security` and `catalog` explicitly.
+- [ ] **Phase 3 — disk-health-mcp.** Apply the same registry and `target` parameter. Keep
+      per-target `host.enabled`, InfluxDB/Prometheus settings, device identity and SMART
+      source priority. A target may legitimately support disks but not Docker, or the
+      reverse; expose that through `list_targets()` capabilities.
+- [ ] **Phase 4 — lifecycle and observability.** Per-target rate limiters, target-tagged
+      audit, metric clients and tunnels keyed by target, startup probes, shutdown cleanup and
+      partial-failure reporting.
+- [ ] **Phase 5 — MCP surface.** Target-scoped resources, tool description updates and the
+      documented compatibility rule (`target` optional only with one configured target).
+- [ ] **Phase 6 — cross-host diagnostics (optional).** Add the allowlisted network/status
+      tools and aggregate views only after the first five phases are covered by tests.
+- [ ] **Phase 7 — docs and release.** Update `README.md`, `docs/configuration.md`,
+      `docs/tools.md`, `docs/architecture.md`, `docs/security-model.md`, `AGENTS.md` and
+      `CHANGELOG.md`. Add a multi-target example config and a live smoke procedure with two
+      targets.
+
+#### Testing requirements
+
+- Unit tests must not require a real host or network. Mock executors per target and assert
+  that each tool routes to the requested alias only.
+- Security tests must assert that a raw hostname, IP, username, key path or port is rejected
+  as a target; that a target cannot escape its configured `services_path`; and that one
+  target's credentials never appear in another target's command, file read or audit record.
+- Concurrency tests: two simultaneous tool calls for different targets must not share a
+  connection, rate limit or metric client. A config reload during an in-flight call must not
+  change that call's target.
+- Integration tests use the existing `integration` marker and remain opt-in.
+- Keep or raise the current coverage gates; do not lower them.
+
+#### Acceptance criteria
+
+- An existing single-target `config.yaml` works unchanged; tools may omit `target` and the
+  resolved alias appears in the response.
+- With two configured targets, `target` is mandatory and an unknown alias is rejected with a
+  helpful `list_targets()` hint.
+- No tool accepts or forwards an operator-supplied host, user, key, port or arbitrary path.
+- Audit and rate limiting are unambiguous per target; one unreachable target does not block
+  the other.
+- `list_targets()` and target-scoped resources expose capabilities without leaking secrets.
+- Docs, tests and `CHANGELOG.md` are updated in the same change.
+
+#### Risks and open questions
+
+- **Blast radius.** One process with credentials for several hosts is a higher-value target
+  than several single-host processes. For sensitive deployments, keep the recommended mode
+  as one MCP server per target; make multiplexing opt-in.
+- **HTTP authorization.** The Streamable HTTP transport has one process-wide bearer token.
+  A multi-target HTTP server therefore grants access to every target. Per-user/per-target
+  authorization is out of scope unless the deployment requires it.
+- **Model mistakes.** A model can forget or guess `target`. Make it required with multiple
+  targets, reject unknown aliases, and echo the resolved target in every result.
+- **Output volume.** Per-call caps still apply, but a model can call many targets in one
+  turn. Aggregate views must apply a composite cap.
+- **Naming.** Prefer `target` over `host` or `server`: `host` implies an arbitrary network
+  hostname, and `server` collides with the existing `service` vocabulary.
+- **Decision needed:** shared versus per-target audit files, and the exact target-scoped
+  environment-variable scheme.
+
+### 3.8 Containerized trust domains (planned, 2026-10-27)
+
+**Status:** design agreed, not implemented. This section extends the plan; it does not
+replace 3.7 or the completed history.
+
+**Why:** the controls in [security-model.md](security-model.md) assume the agent reaches the
+target only through the MCP server. A coding agent with a shell on the control node can edit
+the MCP checkout or configuration, kill or restart the process, read SSH keys and vault
+passwords directly, or bypass the MCP with `ssh`, `docker` or `ansible-playbook`. In that
+deployment the MCP policy is not a security boundary.
+
+**Goal:** make the MCP policy meaningful again when the agent is untrusted (prompt
+injection, a compromised model or a compromised dependency) by separating the untrusted
+author/harness from the privileged MCP/deployer with process, user, filesystem and
+credential boundaries. The human approval for deployment must live outside both.
+
+**Non-goals:**
+
+- Do not add a generic `ansible-playbook`, `docker run` or shell tool to `server-mcp`.
+- Do not accept a playbook path, tag, inventory, extra vars, image or command from the
+  model. Deployment remains a fixed, operator-configured operation on an approved commit.
+- Do not treat a container as sufficient for fully hostile code. Docker shares the host
+  kernel; use a VM or separate machine when the code itself is untrusted.
+- Do not break the trusted single-user workflow: stdio and the local executor remain
+  supported, but they are not an isolation boundary.
+
+#### Trust domains
+
+```text
+Host / human approval
+│
+├── author container (untrusted model)
+│     - workspace read-write, no host home
+│     - no SSH keys, vault password, MCP config or Docker socket
+│     - no host PID/network/IPC; non-root; dropped capabilities
+│     - reaches only the model API and the MCP endpoint
+│
+├── MCP container (privileged executor)
+│     - pinned read-only image; no agent-writable code
+│     - config, SSH key and known_hosts read-only or injected as secrets
+│     - audit volume is the only writable mount
+│     - egress only to the configured target and metric endpoints
+│
+└── deployer/approval boundary
+      - approved commit/diff, not a mutable working tree
+      - vault password and deployment credentials only here
+      - human approval outside the author container
+```
+
+The author and the MCP must not share a writable repository, a Docker socket, a home
+directory or a process namespace. If the author can write the code or configuration that
+the MCP loads, the split provides no protection.
+
+#### Security invariants
+
+- The MCP code is installed from a pinned wheel or image and mounted read-only. The author
+  workspace is never mounted into the MCP container.
+- The MCP configuration, SSH key, `known_hosts` and metric tokens are read-only inputs. The
+  audit log is the only writable state.
+- The author container has no host SSH keys, no vault password, no cloud credentials, no
+  MCP configuration and no Docker socket.
+- The author container runs as a non-root user with `cap_drop: ALL`,
+  `no-new-privileges`, a read-only root filesystem, tmpfs for temporary files and explicit
+  CPU, memory and PID limits.
+- The MCP container uses the same hardening and a minimal base image. It does not run
+  privileged and does not mount the host root, the Docker socket or `/proc`.
+- The MCP transport is Streamable HTTP with a bearer token over an internal network. The
+  listener is not publicly reachable. stdio remains available for a trusted local setup,
+  but stdio by itself does not create a trust boundary.
+- The deployer accepts only an approved commit or artifact. It rejects a dirty worktree,
+  model-supplied tags, extra vars, inventory paths and playbook paths, and verifies the
+  commit/diff that the human approved.
+- The model can request a deployment; it cannot mint the approval. The approval is a human
+  action in a terminal, CI or Git host outside the author container.
+- Multi-target support (3.7) must not be deployed next to an untrusted agent without these
+  boundaries. One process holding credentials for several hosts increases the blast radius.
+
+#### Workstreams and phases
+
+- [x] **Phase 1 — threat model and docs.** Add the trust-boundary section to
+      `docs/security-model.md`, link it from the plan, and state that the MCP policy is not
+      a boundary against a local agent with write access. This phase is documentation-only.
+- **Done:** `docs/security-model.md` now scopes the controls to an agent that reaches the
+  target only through the MCP, records the local-agent limitation and links to this
+  section. The outdated catafalco blanket-sudo statement was corrected in the security
+  model and `docs/tools.md`.
+- [ ] **Phase 2 — MCP runtime.** Add a minimal container image and an example Compose or
+      systemd unit that runs `remote-server-mcp` and `disk-health-mcp` as separate services
+      over Streamable HTTP. The image runs non-root, from a read-only root filesystem, with
+      config/key/`known_hosts` secrets and a writable audit volume. Pin the image by digest
+      in the example. Keep the tools and the command policy unchanged.
+- [ ] **Phase 3 — author sandbox.** Document a harness-agnostic sandbox template: workspace
+      read-write, no host home, no SSH keys, no vault password, no Docker socket, restricted
+      egress and the MCP endpoint as the only control-plane destination. Client-specific
+      setup stays in `docs/harnesses.md`; root docs stay harness-agnostic.
+- [ ] **Phase 4 — deployer and approval.** If Ansible deployment is added, build it as a
+      separate deployer, not as a `server-mcp` tool. The deployer reads only an approved
+      commit, maps service names to fixed tags, runs the fixed playbook from a clean
+      worktree and keeps the vault password and deployment SSH key. A local approval helper
+      or CI approval is the trust anchor. This is a cross-repo workstream with the Ansible
+      repository; `server-mcp` only documents the contract.
+- [ ] **Phase 5 — verification and release.** Add a repeatable smoke test that starts the
+      MCP container, calls read-only tools over HTTP, verifies the author cannot read the
+      MCP config/key or the Docker socket, verifies the MCP cannot read the author
+      workspace, and checks the audit volume. Update `docs/configuration.md`,
+      `docs/architecture.md`, `docs/security-model.md`, `README.md` and `CHANGELOG.md`.
+
+#### Acceptance criteria
+
+- A user can run the MCP from a read-only image with read-only configuration and secrets,
+  and the existing read-only tools work over Streamable HTTP.
+- An author container with the workspace mounted cannot read the host SSH key, the MCP
+  configuration, the audit log or the Docker socket, and cannot signal the MCP process.
+- The MCP container cannot read the author workspace or the Ansible vault password.
+- The MCP image is pinned and the only writable path is the audit volume.
+- A deployment request without an approved commit or outside the approval boundary is
+  refused before any privileged command runs.
+- The trusted single-user stdio setup still works and is documented as the lower-isolation
+  option.
+- Tests cover the configuration/secrets boundary where it can be tested without Docker;
+  container smoke checks are documented and opt-in.
+
+#### Risks and open questions
+
+- **Docker is not a VM.** A kernel or runtime escape defeats the split. Use rootless Docker
+  or Podman where possible, and a VM/separate host for fully hostile code.
+- **Shared HTTP token.** The Streamable HTTP transport has one process-wide bearer token.
+  Keep the listener on an internal network, rotate the token and do not expose it to the
+  model. Per-user authorization is out of scope.
+- **Operational complexity.** Two images, secrets, network policy and an approval helper are
+  more work than a local stdio process. Start with Phase 2 and keep the stdio path for
+  trusted single-user use.
+- **Deployer scope.** Ansible roles are code execution as root, not just file edits. Do not
+  let the author container write the playbook or role that the deployer runs. The approved
+  commit is the boundary.
+- **Supply chain.** Pin image digests, build from the locked workspace, and publish the
+  image only from CI. Do not let the author build the image the deployer trusts.
+- **Decision needed:** whether the MCP container is one image with two entry points or two
+  images; whether the deployer lives in this repository, the Ansible repository or a small
+  separate helper.
+
 ## 4. Documentation drift
 
 These are part of their parent items; do not close a parent until the documentation is
@@ -962,6 +1315,9 @@ longer tracked here.
   `.env` to service config files and host status/log output.
 - [x] **P2-14:** the `query_prometheus` error message is user-facing; fixed to describe
   the actual policy text.
+- [x] **3.8 trust boundary:** `docs/security-model.md` now states the scope of the MCP
+  policy, links to the containerized trust-domain plan and no longer claims that catafalco
+  uses blanket passwordless sudo. `docs/tools.md` matches the narrow-sudo description.
 - [x] **`docs/issues/influxdb-api-error-handling.md`:** the HTML/proxy-body detection
   (A–C) and the structured-database field (E) were implemented and this plan now owns the
   history. Item D (do not send DB queries through public ingress) is covered by the
@@ -972,14 +1328,22 @@ longer tracked here.
 
 ## 5. Implementation order
 
-1. **All P0, P1 and P2 items are complete** (P0-1 through P0-8, P1-1 through P1-19, P2-1
-   through P2-14). The serial-identity work (P1-19) landed after `v0.2.1` and is part of
-   `0.3.0`.
-2. **Release:** `0.3.0` follows the steady-state path in `docs/releasing.md`: clean build,
+1. **All P0, P1 and P2 items are complete** (P0-1 through P0-8, P1-1 through P1-20, P2-1
+   through P2-15). The serial-identity work (P1-19), the canonical device vocabulary
+   (P1-20) and the structured-output depth (P2-15) landed through `0.4.0`.
+2. **Release:** `0.4.0` followed the steady-state path in `docs/releasing.md`: clean build,
    signed tag, trusted-publishing workflow, then the live smoke checks in 6.3 with the
-   installed packages.
-3. **Remaining work is outside this repository:** the catafalco prerequisites in 3.5.
-4. **P2-15 is complete** (structured host/status data and SnapRAID parsing). The remaining
+   installed packages. The next release uses the same path.
+3. **Containerized trust domains (3.8) should land before or with multi-target support
+   (3.7).** Multi-target increases the blast radius of one process; do not deploy it next
+   to an untrusted agent without the separation in 3.8. Phases 1–3 are in-repo; the Ansible
+   deployer is a separate cross-repo workstream.
+4. **Containerized trust domains (3.8) are the next in-repo security feature; multi-target
+   support (3.7) follows or lands alongside them.** Start 3.8 with Phase 2 (MCP runtime),
+   then 3.7 Phase 1 (config and registry), and keep the single-target process as the
+   default deployment.
+5. **Remaining work is outside this repository:** the catafalco prerequisites in 3.5.
+6. **P2-15 is complete** (structured host/status data and SnapRAID parsing). The remaining
    open work is the catafalco host-side self-test privilege wrapper in 3.6.
 
 There is no pending PR split; the branch history is linear on `main`.
@@ -1005,16 +1369,16 @@ uv build --all-packages
 
 | Check | Result |
 |---|---|
-| `server-management-lib` tests | 462 passed, 91.46% coverage (gate 90%) |
-| `remote-server-mcp` tests | 266 passed (+17 integration opt-in), 85.19% coverage (gate 60%) |
-| `disk-health-mcp` tests | 194 passed, 84.13% coverage (gate 65%) |
+| `server-management-lib` tests | 499 passed, 91.59% coverage (gate 90%) |
+| `remote-server-mcp` tests | 281 passed (+17 integration opt-in), 86.49% coverage (gate 60%) |
+| `disk-health-mcp` tests | 219 passed, 83.42% coverage (gate 65%) |
 | Python version used locally | 3.14.8 |
-| `ruff check`, `ruff format --check`, `ty check` | passing on the `0.3.0` tree |
-| `pre-commit run --all-files` | passing on the `0.3.0` tree (ruff, ty, per-package pytest, pymarkdown, link check) |
+| `ruff check`, `ruff format --check`, `ty check` | passing on the `0.4.0` tree |
+| `pre-commit run --all-files` | passing on the `0.4.0` tree (ruff, ty, per-package pytest, pymarkdown, link check) |
 | Remote CI | green through the `0.2.1` release and the post-release commits, Python 3.11–3.14 |
 | `uv build --all-packages` | all three wheels/sdists build, `py.typed` included; `dist/` is always rebuilt from scratch |
-| Package version | `0.3.0` in the four `pyproject.toml` files, the three `__version__` values, `uv.lock` and the newest `CHANGELOG.md` section |
-| PyPI | `0.3.0` on all three projects (publish run `39852335149`); `uvx` resolves the installed wheels |
+| Package version | `0.4.0` in the four `pyproject.toml` files, the three `__version__` values, `uv.lock` and the newest `CHANGELOG.md` section |
+| PyPI | `0.4.0` on all three projects (publish run `39869621919`); `uvx` resolves the installed wheels |
 
 ### 6.3 Live smoke checks (read-only)
 
@@ -1097,7 +1461,10 @@ label (for example `watchtower`, `wud`, `socket-proxy`) still need
   `git-filter-repo` was unavailable.
 - Recommended remote is a new `elmuz/server-mcp` repository; reusing/renaming
   `remote-server-mcp` is documented as an alternative.
-- Local executor instead of multi-target support (explicit user decision).
+- Local executor remains the single-host alternative to SSH. Multi-target support is now
+  planned as an allowlisted target registry (section 3.7), not as a free-form host argument.
+  The recommended secure deployment remains one MCP server process per target; multiplexing
+  is opt-in.
 - No runtime SMART database refresh; generation is an explicit offline script.
 - InfluxDB is the primary SMART source; `smartctl` is an explicit fallback and must never
   fabricate a healthy result.
@@ -1110,17 +1477,24 @@ label (for example `watchtower`, `wud`, `socket-proxy`) still need
 - Redaction is defense-in-depth for files the operator intentionally exposes (`.env`,
   compose/config files). Real credential stores remain blocked.
 - `docs/modernization-plan.md` is the only backlog. Review/handoff documents are merged here
-  rather than kept as parallel plans.
+  rather than kept as parallel plans. The plan is extended, not replaced: completed sections
+  remain as history because they carry live findings and verification evidence.
+- The MCP policy is not a boundary against a local agent that can edit the MCP or use a
+  host shell. The fix is separate trust domains (3.8), not another confirmation prompt.
+- Do not add a generic `ansible-playbook` or deployment tool to `server-mcp`. Deployment is a
+  separate, operator-approved operation on an approved commit.
 - The first published release is `0.2.0`. A version that was never tagged or published is
   not a release, so post-`50de082` fixes are folded into it rather than published as
   `0.2.1`/`0.3.0`. From `0.2.0` onward, released sections are immutable.
 
 ## 8. Resume instructions
 
-1. The in-repo backlog is complete. The remaining open work is the catafalco prerequisites
-   in 3.5, which are handled outside this repository.
-2. For new in-repo work, start from the deferred P2-15 or add an item to section 3 with a
-   checkbox that names the file or area to change.
+1. The in-repo backlog is complete except the planned containerized trust domains in 3.8
+   and multi-target support in 3.7. The remaining open work outside this repository is the
+   catafalco prerequisites in 3.5.
+2. For new in-repo work, start with 3.8 if the coding-agent threat is the priority, or 3.7
+   for the multi-host feature. Add new items to section 3 with a checkbox that names the
+   file or area to change.
 3. Read the relevant code/doc section before editing; keep the security model in
    `docs/security-model.md` intact.
 4. Add or update tests in the same PR (P0 items require regression tests).

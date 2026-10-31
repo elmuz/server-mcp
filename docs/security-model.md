@@ -8,7 +8,29 @@ The model can only call the tools that exist. Each tool validates its inputs, bu
 bounded operation and passes it to an executor. There is no `exec_command`, no `run_shell`
 and no path where arbitrary user text is concatenated into a shell string.
 
+## Scope and trust boundaries
+
+These controls protect the target host from a model that reaches it **only through the MCP
+server**. They assume the MCP process, its code, its configuration and its credentials are
+operator-controlled and are not writable by the agent.
+
+That assumption does not hold when a coding agent runs on the same control node with a
+shell and write access to the MCP checkout, its virtual environment, its configuration or
+its process. Such an agent can edit the tool layer, change the configuration, kill or
+restart the process, read the SSH keys directly, or bypass the MCP with `ssh`, `docker` or
+`ansible-playbook`. In that deployment the MCP policy is not a security boundary.
+
+The planned isolation model in
+[modernization-plan.md](modernization-plan.md#38-containerized-trust-domains-planned-2026-10-27)
+separates the untrusted author/harness from the privileged MCP/deployer. Until it is
+implemented, run the MCP as a separate user or service and do not expose its checkout,
+configuration, keys or process to the coding agent. A container is only useful when it
+creates that separation: do not share a writable repository or the Docker socket between
+the agent and the MCP.
+
 ## What the agent cannot do
+
+Under the intended trust boundary, the agent cannot:
 
 - Execute arbitrary commands or open a shell
 - Run `docker run`, `docker exec` or `docker build`
@@ -22,6 +44,10 @@ and no path where arbitrary user text is concatenated into a shell string.
 - Download or upload files
 - Use the InfluxDB or Prometheus APIs to write data
 - Bypass output limits or the audit log
+
+These statements describe what the tool catalog exposes. They do not describe what a local
+coding agent with shell access can do; see
+[Scope and trust boundaries](#scope-and-trust-boundaries).
 
 ## Controls
 
@@ -58,11 +84,11 @@ which contains no caller-supplied text. The model therefore cannot reach `sudo` 
 any tool, even on a host that grants the executor broad passwordless sudo. `-n` makes a
 missing or unmatched host rule fail instead of prompting on a non-interactive session.
 
-The host needs either a dedicated sudoers entry for that one command or an existing
-blanket passwordless sudo for the executor. The catafalco deployment uses the latter
-(`security_sudoers_passwordless` in the `geerlingguy.security` role), where the dedicated
-entry is simply redundant. The actual restriction on what can be executed is the command
-policy, not the sudoers entry.
+The host needs a dedicated sudoers entry for exactly that command. A blanket passwordless
+sudo rule for the executor would also make it work, but it is not required and is not
+recommended. The reference catafalco deployment removed blanket passwordless sudo on
+2026-10-20; automation uses narrow grants such as the SnapRAID status rule. The actual
+restriction on what can be executed is the command policy, not the sudoers entry.
 
 The local executor additionally rejects shell operators and uses `create_subprocess_exec`
 without a shell.
@@ -221,6 +247,10 @@ model cannot choose the transport or the token.
 
 ## Known limitations
 
+- **The MCP is not a sandbox around the agent's host account.** If the agent has a shell on
+  the same host, can edit the MCP checkout or configuration, or can signal the process, it
+  can bypass every control on this page. Use the separate trust domains in the plan, or a
+  VM, when the agent itself is untrusted.
 - **Containers need a service directory or an allowlist entry.** A service directory
   resolves to its containers through the `com.docker.compose.project` label (with a
   same-name fallback). A standalone container that has no directory under `services_path`

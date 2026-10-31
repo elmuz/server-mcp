@@ -18,7 +18,7 @@ block as before. The config schema and the tool catalog are available as MCP res
 | `list_services` | — | read-only | Lists directories under `services_path` and running Docker containers |
 | `list_containers` | — | read-only | Lists every container (`docker ps -a`), including stopped and crashed ones, with compose project and service mapping |
 | `get_service_logs` | `service`, `lines` (1–1000), `since`, `until`, `container` | read-only | Returns timestamped container logs with optional time window and per-container targeting; multi-container services are labelled per container |
-| `search_service_logs` | `service`, `pattern`, `lines` (1–5000), `since`, `until`, `container` | read-only | Filters timestamped logs for an exact literal string (no regex); punctuation is preserved |
+| `search_service_logs` | `service`, `pattern`, `lines` (1–5000), `since`, `until`, `container` | read-only | Filters timestamped logs for an exact literal string (no regex); punctuation is kept |
 | `get_service_status` | `service` | read-only | `docker inspect` (state, health, failing streak, exit code), `docker stats` and exposed ports for every resolved container; stopped containers report that resource usage is unavailable instead of `0B / 0B` |
 | `get_container_health` | `service`, `entries` (1–20) | read-only | Healthcheck status and recent probe output for every resolved container |
 | `get_host_service_status` | `unit` | read-only | `systemctl status` for a unit in `security.host_units` |
@@ -209,10 +209,10 @@ The target host therefore needs a sudoers rule for exactly this command, for exa
 funkysloth ALL=(root) NOPASSWD: /usr/local/bin/snapraid status
 ```
 
-A host that already grants the executor blanket passwordless sudo needs no extra rule;
-catafalco does (`security_sudoers_passwordless`), so the dedicated entry there only
-documents the requirement. On a host with narrower sudo, the entry above is required and
-its exact-argument match keeps `snapraid status <extra>` from running without a password.
+A blanket passwordless sudo rule for the executor would also work, but it is not required
+and is not recommended. The reference catafalco deployment removed blanket passwordless
+sudo on 2026-10-20, so the dedicated entry above is the actual grant. Its exact-argument
+match keeps `snapraid status <extra>` from running without a password.
 `sudo --non-interactive` (`-n`) fails instead of prompting on a non-interactive SSH
 session.
 
