@@ -13,7 +13,7 @@ Group=1000
 ReadOnly=true
 DropCapability=ALL
 NoNewPrivileges=true
-Init=true
+RunInit=true
 PidsLimit=256
 Memory=512m
 Tmpfs=/tmp:rw,nosuid,nodev,size=64m

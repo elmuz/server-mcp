@@ -14,6 +14,7 @@ REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CONFIG_DIR="${HOME}/.config/server-mcp"
 STATE_DIR="${HOME}/.local/state/server-mcp"
 UNIT_DIR="${HOME}/.config/containers/systemd"
+SYSTEMD_USER_DIR="${HOME}/.config/systemd/user"
 ENABLE=0
 FORCE=0
 
@@ -38,7 +39,7 @@ install -d -m 0700 \
   "${CONFIG_DIR}/ssh" \
   "${STATE_DIR}" \
   "${STATE_DIR}/audit"
-install -d -m 0755 "${UNIT_DIR}"
+install -d -m 0755 "${UNIT_DIR}" "${SYSTEMD_USER_DIR}"
 
 install_if_missing() {
   local source="$1"
@@ -78,10 +79,15 @@ for unit in \
   pi-control.network \
   mcp-egress.network \
   mcp-remote.container \
-  mcp-disk.container \
-  server-mcp.target; do
+  mcp-disk.container; do
   install_if_missing "${REPO_DIR}/deploy/quadlet/${unit}" "${UNIT_DIR}/${unit}" 0644
 done
+
+# Quadlet ignores plain .target files, so the aggregation target is a regular
+# systemd user unit.
+install_if_missing \
+  "${REPO_DIR}/deploy/quadlet/server-mcp.target" \
+  "${SYSTEMD_USER_DIR}/server-mcp.target" 0644
 
 if command -v systemctl >/dev/null 2>&1; then
   systemctl --user daemon-reload || true
@@ -91,6 +97,7 @@ echo "Installed Server MCP:"
 echo "  config: ${CONFIG_DIR}"
 echo "  state:  ${STATE_DIR}"
 echo "  units:  ${UNIT_DIR}"
+echo "  target: ${SYSTEMD_USER_DIR}/server-mcp.target"
 echo
 echo "Next steps:"
 echo "  1. Set ssh.host in ${CONFIG_DIR}/remote.yaml and disk.yaml."
