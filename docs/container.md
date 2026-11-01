@@ -46,6 +46,12 @@ The build uses the locked uv workspace. It never resolves dependencies at runtim
 runtime image is non-root, has no Docker socket and no host home. CI builds the same
 Dockerfile with Docker; the image is OCI and runs under rootless Podman.
 
+Podman builds OCI images by default, so it prints `HEALTHCHECK is not supported for OCI
+image format and will be ignored`. That is expected: container health is defined by
+`HealthCmd=` in the Quadlet units, not by the image. Build with
+`podman build --format docker` only if you need the Dockerfile health check embedded in
+the image.
+
 Release images are published to GHCR by `.github/workflows/image.yml`. The workflow prints
 the image digest. Pin that digest in the Quadlet `Image=` lines instead of using a mutable
 tag:
@@ -65,7 +71,9 @@ The installer:
 - creates `~/.config/server-mcp` and `~/.local/state/server-mcp/audit` with private modes;
 - installs the example configs, `.env`, `known_hosts` and SSH-key placeholder if missing;
 - generates `secrets/http-token` if missing;
-- installs the Quadlet units under `~/.config/containers/systemd/`.
+- installs the Quadlet units (`.container`, `.network`) under
+  `~/.config/containers/systemd/` and the `server-mcp.target` user unit under
+  `~/.config/systemd/user/` (Quadlet ignores plain `.target` files).
 
 It never overwrites existing configuration, keys or tokens unless `--force` is given.
 

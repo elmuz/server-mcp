@@ -26,6 +26,17 @@ versioning.
 - `deploy/install.sh` creates the user config/state directories and token, installs the
   example configs and units, and leaves existing secrets untouched.
 
+### Fixed
+
+- The container image builds its virtual environment at `/opt/venv`, so the
+  `remote-server-mcp` and `disk-health-mcp` console-script shebangs resolve in the runtime
+  image.
+- Quadlet units use `RunInit=true`, which the Podman Quadlet generator accepts; the previous
+  `Init=true` made the generator skip both container units.
+- `deploy/install.sh` installs `server-mcp.target` under `~/.config/systemd/user/`, because
+  Quadlet ignores plain `.target` files, so `systemctl --user enable --now server-mcp.target`
+  works after installation.
+
 ### Documentation
 
 - Added [docs/container.md](docs/container.md) with the image build, Quadlet install,
