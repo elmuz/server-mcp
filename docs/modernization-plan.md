@@ -15,12 +15,13 @@ removed). Earlier snapshots remain in git history.
   **Current release:** `v0.4.0` (signed, 2026-10-23) ships the serial-based disk identity
   (P1-19), the live-operation handover fixes in 3.6, the journal-time normalization and the
   structured error payloads. Publish run `39869621919` uploaded all three packages in
-  library→apps order, and `uvx --no-cache` resolves `0.4.0`. The planned in-repo work is
-  multi-target support (3.7) and containerized trust domains (3.8); the remaining external
-  prerequisites are the
-  catafalco items in 3.5 and the host-side self-test privilege in 3.6.
-- **Last updated:** 2026-10-27 (adds the containerized trust-domain project in 3.8 and
-  refreshes the security-model scope; previous update was the multi-target plan in 3.7)
+  library→apps order, and `uvx --no-cache` resolves `0.4.0`. The container runtime for 3.8
+  is implemented; the remaining in-repo feature is multi-target support (3.7). The author
+  sandbox integration and the deployer/approval boundary are deployment work outside this
+  repository. The remaining external prerequisites are the catafalco items in 3.5 and the
+  host-side self-test privilege in 3.6.
+- **Last updated:** 2026-11-01 (implements the 3.8 Phase 2 container runtime, Quadlet units,
+  image CI, token-file transport and runtime checks)
 - **Plan retention:** this file remains the single backlog. Completed sections are kept as
   history because they carry live findings and verification evidence; extend the plan
   rather than replacing it with a second document.
@@ -1154,10 +1155,11 @@ B. Add this only after the registry is stable:
 - **Decision needed:** shared versus per-target audit files, and the exact target-scoped
   environment-variable scheme.
 
-### 3.8 Containerized trust domains (planned, 2026-10-27)
+### 3.8 Containerized trust domains (runtime implemented, 2026-10-27)
 
-**Status:** design agreed, not implemented. This section extends the plan; it does not
-replace 3.7 or the completed history.
+**Status:** the MCP runtime is implemented. The author sandbox integration, deployer and
+end-to-end isolation verification remain deployment work. This section extends the plan; it
+does not replace 3.7 or the completed history.
 
 **Why:** the controls in [security-model.md](security-model.md) assume the agent reaches the
 target only through the MCP server. A coding agent with a shell on the control node can edit
@@ -1240,11 +1242,20 @@ the MCP loads, the split provides no protection.
   target only through the MCP, records the local-agent limitation and links to this
   section. The outdated catafalco blanket-sudo statement was corrected in the security
   model and `docs/tools.md`.
-- [ ] **Phase 2 — MCP runtime.** Add a minimal container image and an example Compose or
+- [x] **Phase 2 — MCP runtime.** Add a minimal container image and an example Compose or
       systemd unit that runs `remote-server-mcp` and `disk-health-mcp` as separate services
       over Streamable HTTP. The image runs non-root, from a read-only root filesystem, with
       config/key/`known_hosts` secrets and a writable audit volume. Pin the image by digest
       in the example. Keep the tools and the command policy unchanged.
+- **Done:** `container/Dockerfile` builds one image with both console scripts from the locked
+  workspace. `deploy/quadlet/` runs them under `server-mcp.target` on an internal
+  `pi-control` network plus a separate `mcp-egress` network; config, key, `known_hosts` and
+  token are read-only mounts and the audit directory is the only writable state.
+  `transport.token_file`/`MCP_HTTP_TOKEN_FILE` and `--check-config` were added, container
+  startup rejects `executor: local`, and `.github/workflows/image.yml` lints, builds,
+  smoke-tests and publishes the image with provenance and an SBOM. The units use
+  `localhost/server-mcp:dev` for local builds; replace it with the GHCR digest printed by
+  the release workflow. See [container.md](container.md).
 - [ ] **Phase 3 — author sandbox.** Document a harness-agnostic sandbox template: workspace
       read-write, no host home, no SSH keys, no vault password, no Docker socket, restricted
       egress and the MCP endpoint as the only control-plane destination. Client-specific
@@ -1330,18 +1341,19 @@ longer tracked here.
 
 1. **All P0, P1 and P2 items are complete** (P0-1 through P0-8, P1-1 through P1-20, P2-1
    through P2-15). The serial-identity work (P1-19), the canonical device vocabulary
-   (P1-20) and the structured-output depth (P2-15) landed through `0.4.0`.
+   (P1-20) and the structured-output depth (P2-15) landed through `0.4.0`. The container
+   runtime (3.8 Phase 2) is implemented in the current tree.
 2. **Release:** `0.4.0` followed the steady-state path in `docs/releasing.md`: clean build,
    signed tag, trusted-publishing workflow, then the live smoke checks in 6.3 with the
    installed packages. The next release uses the same path.
-3. **Containerized trust domains (3.8) should land before or with multi-target support
-   (3.7).** Multi-target increases the blast radius of one process; do not deploy it next
-   to an untrusted agent without the separation in 3.8. Phases 1–3 are in-repo; the Ansible
-   deployer is a separate cross-repo workstream.
-4. **Containerized trust domains (3.8) are the next in-repo security feature; multi-target
-   support (3.7) follows or lands alongside them.** Start 3.8 with Phase 2 (MCP runtime),
-   then 3.7 Phase 1 (config and registry), and keep the single-target process as the
-   default deployment.
+3. **The 3.8 Phase 2 MCP runtime has landed.** Multi-target support (3.7) increases the
+   blast radius of one process; do not deploy it next to an untrusted agent before the
+   author sandbox integration (Phase 3) and end-to-end isolation checks (Phase 5). The
+   Ansible deployer is a separate cross-repo workstream.
+4. **The next in-repo feature is multi-target support (3.7).** Start with 3.7 Phase 1
+   (config and registry), then Phase 2 (remote-server-mcp) and Phase 3 (disk-health-mcp),
+   keeping the single-target process as the default deployment. 3.8 Phase 3 and Phase 5
+   continue as deployment work.
 5. **Remaining work is outside this repository:** the catafalco prerequisites in 3.5.
 6. **P2-15 is complete** (structured host/status data and SnapRAID parsing). The remaining
    open work is the catafalco host-side self-test privilege wrapper in 3.6.
@@ -1369,10 +1381,10 @@ uv build --all-packages
 
 | Check | Result |
 |---|---|
-| `server-management-lib` tests | 499 passed, 91.59% coverage (gate 90%) |
-| `remote-server-mcp` tests | 281 passed (+17 integration opt-in), 86.49% coverage (gate 60%) |
-| `disk-health-mcp` tests | 219 passed, 83.42% coverage (gate 65%) |
-| Python version used locally | 3.14.8 |
+| `server-management-lib` tests | 523 passed, 91.19% coverage (gate 90%) |
+| `remote-server-mcp` tests | 287 passed (+17 integration opt-in), 84.27% coverage (gate 60%) |
+| `disk-health-mcp` tests | 224 passed, 82.93% coverage (gate 65%) |
+| Python version used locally | 3.12.16 |
 | `ruff check`, `ruff format --check`, `ty check` | passing on the `0.4.0` tree |
 | `pre-commit run --all-files` | passing on the `0.4.0` tree (ruff, ty, per-package pytest, pymarkdown, link check) |
 | Remote CI | green through the `0.2.1` release and the post-release commits, Python 3.11–3.14 |
@@ -1489,12 +1501,13 @@ label (for example `watchtower`, `wud`, `socket-proxy`) still need
 
 ## 8. Resume instructions
 
-1. The in-repo backlog is complete except the planned containerized trust domains in 3.8
-   and multi-target support in 3.7. The remaining open work outside this repository is the
-   catafalco prerequisites in 3.5.
-2. For new in-repo work, start with 3.8 if the coding-agent threat is the priority, or 3.7
-   for the multi-host feature. Add new items to section 3 with a checkbox that names the
-   file or area to change.
+1. The in-repo backlog is complete except multi-target support in 3.7. The container
+   runtime for 3.8 Phase 2 is implemented; the author sandbox integration, deployer and
+   end-to-end isolation checks remain deployment work. The remaining open work outside this
+   repository is the catafalco prerequisites in 3.5.
+2. For new in-repo work, start with 3.7 (multi-target). The 3.8 Phase 2 runtime is done;
+   Phase 3 (author sandbox) and Phase 5 (isolation verification) are deployment work. Add
+   new items to section 3 with a checkbox that names the file or area to change.
 3. Read the relevant code/doc section before editing; keep the security model in
    `docs/security-model.md` intact.
 4. Add or update tests in the same PR (P0 items require regression tests).

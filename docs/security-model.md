@@ -20,13 +20,15 @@ its process. Such an agent can edit the tool layer, change the configuration, ki
 restart the process, read the SSH keys directly, or bypass the MCP with `ssh`, `docker` or
 `ansible-playbook`. In that deployment the MCP policy is not a security boundary.
 
-The planned isolation model in
-[modernization-plan.md](modernization-plan.md#38-containerized-trust-domains-planned-2026-10-27)
-separates the untrusted author/harness from the privileged MCP/deployer. Until it is
-implemented, run the MCP as a separate user or service and do not expose its checkout,
-configuration, keys or process to the coding agent. A container is only useful when it
-creates that separation: do not share a writable repository or the Docker socket between
-the agent and the MCP.
+The containerized deployment in [container.md](container.md) separates the author/harness
+from the privileged MCP process. The MCP runs as a systemd user service, from a pinned
+image, with read-only configuration and credentials, on an internal network. The author
+container has no MCP checkout, configuration, SSH key or Docker socket.
+
+A container is only useful when it creates that separation: do not share a writable
+repository or the Docker socket between the agent and the MCP. The deployment and its
+remaining limitations are tracked in
+[modernization-plan.md](modernization-plan.md#38-containerized-trust-domains-runtime-implemented-2026-10-27).
 
 ## What the agent cannot do
 
@@ -249,8 +251,13 @@ model cannot choose the transport or the token.
 
 - **The MCP is not a sandbox around the agent's host account.** If the agent has a shell on
   the same host, can edit the MCP checkout or configuration, or can signal the process, it
-  can bypass every control on this page. Use the separate trust domains in the plan, or a
-  VM, when the agent itself is untrusted.
+  can bypass every control on this page. Use the container deployment in
+  [container.md](container.md), or a VM, when the agent itself is untrusted.
+- **The container boundary does not remove destructive tools.** A compromised model that
+  reaches the MCP with the bearer token can still call `restart_service`, `stop_service`,
+  `compose_up` and `compose_down` within the rate limit. `confirm=true` is a model-supplied
+  safety interlock, not a human approval. If service disruption must be prevented, add a
+  read-only profile or an approval step outside the author container.
 - **Containers need a service directory or an allowlist entry.** A service directory
   resolves to its containers through the `com.docker.compose.project` label (with a
   same-name fallback). A standalone container that has no directory under `services_path`

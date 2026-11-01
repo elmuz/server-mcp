@@ -26,6 +26,14 @@ versioning.
 - `deploy/install.sh` creates the user config/state directories and token, installs the
   example configs and units, and leaves existing secrets untouched.
 
+### Documentation
+
+- Added [docs/container.md](docs/container.md) with the image build, Quadlet install,
+  network/token contract, verification and residual risks, and linked it from the README,
+  getting-started guide, architecture, security model and modernization plan.
+- Documented `transport.token_file`, `MCP_HTTP_TOKEN_FILE`, `--http-token-file` and
+  `--check-config` in the configuration reference.
+
 ## [0.4.0] - 2026-10-23
 
 ### Changed

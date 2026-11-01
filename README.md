@@ -118,6 +118,25 @@ Add `"env": {"REMOTE_SERVER_MCP_CONFIG": "/path/to/config.yaml"}` if you keep th
 elsewhere. Disk diagnostics work the same way with `disk-health-mcp` and
 `DISK_HEALTH_MCP_CONFIG`.
 
+## Container deployment
+
+For a coding-agent sandbox that is separate from the privileged MCP process, the repository
+ships one image and Quadlet units for both servers. The MCP runs as a systemd user service,
+with read-only configuration/key/token mounts, an internal `pi-control` network and a
+separate target-facing `mcp-egress` network.
+
+```bash
+podman build -f container/Dockerfile -t localhost/server-mcp:dev .
+deploy/install.sh
+# edit ~/.config/server-mcp/*.yaml, install the SSH key, then:
+systemctl --user enable --now server-mcp.target
+```
+
+The services listen on Streamable HTTP with a bearer token read from
+`~/.config/server-mcp/secrets/http-token`. No host port is published. See
+[docs/container.md](docs/container.md) for the network contract, token rotation, CI image
+workflow and residual risks.
+
 ## What the agents can do
 
 `remote-server-mcp` (22 tools):

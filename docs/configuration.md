@@ -81,7 +81,8 @@ transport:
   host: "127.0.0.1"          # non-loopback requires a token
   port: 8000
   path: "/mcp"
-  token: null                # prefer MCP_HTTP_TOKEN
+  token: null                # prefer a token file or MCP_HTTP_TOKEN
+  token_file: null           # e.g. /run/secrets/mcp_token in a container
 
 rate_limit:
   enabled: true
@@ -125,12 +126,57 @@ remote-server-mcp --transport streamable-http --http-host 127.0.0.1 --http-port 
 ```
 
 The endpoint is `/mcp` by default (`transport.path`). A non-loopback bind address is
-refused unless a bearer token is configured. Set `transport.token` or, preferably,
-`MCP_HTTP_TOKEN`; every HTTP request must then send `Authorization: Bearer <token>`.
-`MCP_TRANSPORT`, `MCP_HTTP_HOST`, `MCP_HTTP_PORT` and `MCP_HTTP_PATH` override the matching
-config keys. The CLI flags take precedence over the config file. On a loopback bind without
-a token, any local process can call the server, so keep the default unless a client
-genuinely cannot launch a process.
+refused unless a bearer token is configured. Every HTTP request must then send
+`Authorization: Bearer <token>`.
+
+The token can come from:
+
+- `transport.token` / `MCP_HTTP_TOKEN`;
+- `transport.token_file` / `MCP_HTTP_TOKEN_FILE`;
+- `--http-token-file`.
+
+A token file takes precedence over an inline token. The file must be regular, non-empty and
+not accessible by group/other (mode `0600` or `0400`). In the container deployment the token
+is mounted read-only at `/run/secrets/mcp_token` and never appears in an environment
+variable.
+
+`MCP_TRANSPORT`, `MCP_HTTP_HOST`, `MCP_HTTP_PORT`, `MCP_HTTP_PATH` and
+`MCP_HTTP_TOKEN_FILE` override the matching config keys. The CLI flags take precedence over
+the config file. On a loopback bind without a token, any local process can call the server,
+so keep the default unless a client genuinely cannot launch a process.
+
+## Container deployment
+
+The container image runs both servers as separate systemd user services and reaches them
+over Streamable HTTP on an internal Podman network. Use `executor: ssh`; `local` is rejected
+because it would run inside the MCP container, not on the target. The important container
+paths are:
+
+```yaml
+ssh:
+  key_path: "/run/secrets/ssh_key"
+  known_hosts: "/etc/server-mcp/known_hosts"
+
+transport:
+  type: streamable-http
+  host: "0.0.0.0"
+  token_file: "/run/secrets/mcp_token"
+
+audit:
+  enabled: true
+  path: "/var/lib/server-mcp/remote.jsonl"
+```
+
+Validate a mounted configuration without connecting to the target:
+
+```bash
+remote-server-mcp --check-config --config /etc/server-mcp/config.yaml
+disk-health-mcp --check-config --config /etc/server-mcp/config.yaml
+```
+
+`--check-config` validates the merged YAML, SSH key and known_hosts mounts, audit directory,
+HTTP binding and token file. See [container.md](container.md) for the Quadlet units,
+networks, token rotation and verification.
 
 ## Rate limiting
 
@@ -323,6 +369,7 @@ Environment variables override the YAML file.
 | `MCP_HTTP_PORT` | `transport.port` |
 | `MCP_HTTP_PATH` | `transport.path` |
 | `MCP_HTTP_TOKEN` | `transport.token` |
+| `MCP_HTTP_TOKEN_FILE` | `transport.token_file` |
 | `OUTPUT_MAX_BYTES` | `output.max_bytes` |
 | `AUDIT_ENABLED` | `audit.enabled` |
 | `AUDIT_LOG_PATH` | `audit.path` |

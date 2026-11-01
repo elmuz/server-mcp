@@ -131,6 +131,14 @@ uv run --directory apps/remote-server-mcp python -c \
   "from remote_server_mcp.server import mcp; print([t.name for t in mcp._tool_manager.list_tools()])"
 ```
 
+## Container deployment
+
+The optional container deployment runs both MCP servers as systemd user services (Quadlet)
+and reaches them over Streamable HTTP on an internal network. It keeps the MCP process,
+configuration, SSH key and token outside the coding-agent sandbox. See
+[container.md](container.md) for the image build, installer, network contract and residual
+risks.
+
 ## Troubleshooting
 
 | Symptom | Check |
