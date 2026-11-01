@@ -30,13 +30,19 @@ COPY pyproject.toml uv.lock README.md ./
 COPY packages ./packages
 COPY apps ./apps
 
-RUN uv sync \
+# Create the environment at its final runtime path. Installing into
+# /src/.venv and copying it to /opt/venv would leave every console-script
+# shebang pointing at /src/.venv/bin/python, which does not exist in the
+# runtime image.
+ENV UV_PROJECT_ENVIRONMENT=/opt/venv
+RUN uv venv /opt/venv --python /usr/local/bin/python3.13 \
+    && uv sync \
         --frozen \
         --no-dev \
         --no-editable \
         --all-packages \
-        --python /usr/local/bin/python3.13 \
-    && find /src/.venv -type d -name __pycache__ -prune -exec rm -rf {} +
+        --python /opt/venv/bin/python3.13 \
+    && find /opt/venv -type d -name __pycache__ -prune -exec rm -rf {} +
 
 
 FROM ${PYTHON_IMAGE} AS runtime
@@ -65,7 +71,7 @@ RUN groupadd --gid "${GID}" mcp \
     && useradd --uid "${UID}" --gid "${GID}" --create-home \
         --shell /usr/sbin/nologin mcp
 
-COPY --from=builder /src/.venv /opt/venv
+COPY --from=builder /opt/venv /opt/venv
 
 RUN install -d -o "${UID}" -g "${GID}" -m 0750 /etc/server-mcp \
     && install -d -o "${UID}" -g "${GID}" -m 0700 /var/lib/server-mcp \
