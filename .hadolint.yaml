@@ -1,0 +1,4 @@
+# Debian package versions are not pinned: the base image tag selects the
+# distribution and apt supplies current security updates at build time.
+ignored:
+  - DL3008

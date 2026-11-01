@@ -14,6 +14,12 @@ versioning.
 - Both MCP servers accept `--check-config`, which validates the merged configuration,
   SSH key/known_hosts mounts, audit directory, HTTP binding and token file without opening
   an SSH connection. Container startup rejects `executor: local`.
+- A single `server-mcp` container image contains both console scripts. The image runs
+  non-root from a read-only root filesystem, drops all capabilities and has no Docker
+  socket. `scripts/container-smoke.sh` exercises both entry points, the token file and the
+  HTTP bearer-token middleware.
+- `.github/workflows/image.yml` lints the Dockerfile, builds and smoke-tests the image on
+  every change, and publishes a tag to GHCR with provenance and an SBOM on release tags.
 
 ## [0.4.0] - 2026-10-23
 

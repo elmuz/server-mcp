@@ -1,0 +1,25 @@
+# Build context for the server image.
+.git
+.github
+.idea
+.venv
+**/__pycache__
+**/*.py[cod]
+**/*.egg-info
+**/.pytest_cache
+**/.ruff_cache
+**/.coverage
+**/.coverage.*
+**/tests
+dist
+build
+docs
+examples
+scripts
+*.log
+*.jsonl
+.env
+.env.*
+config.yaml
+*.pem
+*.key
