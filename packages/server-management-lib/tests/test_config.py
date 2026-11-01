@@ -225,6 +225,17 @@ class TestConfigMerging:
         assert security.container_runtime == "podman"
         assert isinstance(create_executor(config, security), LocalExecutor)
 
+    def test_token_file_env_override(self, tmp_path):
+        config_file = tmp_path / "config.yaml"
+        config_file.write_text("transport:\n  type: streamable-http\n")
+
+        result = load_config(
+            config_file,
+            use_dotenv=False,
+            env={"MCP_HTTP_TOKEN_FILE": "/run/secrets/mcp_token"},
+        )
+        assert result["transport"]["token_file"] == "/run/secrets/mcp_token"
+
     def test_invalid_env_value_is_ignored(self, tmp_path):
         config_file = tmp_path / "config.yaml"
         config_file.write_text("ssh:\n  port: 22\n")
@@ -282,6 +293,7 @@ class TestConfigSchema:
 
         assert defaults["container_runtime"] == "docker"
         assert defaults["transport"]["type"] == "stdio"
+        assert defaults["transport"]["token_file"] is None
         assert defaults["rate_limit"]["enabled"] is True
         assert defaults["influxdb"]["token"] == "***"
         assert defaults["ssh"]["password"] == "***"
@@ -294,6 +306,10 @@ class TestConfigSchema:
         assert overrides["MCP_HTTP_TOKEN"] == {
             "section": "transport",
             "key": "token",
+        }
+        assert overrides["MCP_HTTP_TOKEN_FILE"] == {
+            "section": "transport",
+            "key": "token_file",
         }
         assert overrides["CONTAINER_RUNTIME"]["section"] == "container_runtime"
 

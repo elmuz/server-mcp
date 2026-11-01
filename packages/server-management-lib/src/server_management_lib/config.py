@@ -40,8 +40,12 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "host": "127.0.0.1",
         "port": 8000,
         "path": "/mcp",
-        # Required for a non-loopback bind. Prefer MCP_HTTP_TOKEN over YAML.
+        # Required for a non-loopback bind. Prefer MCP_HTTP_TOKEN or
+        # MCP_HTTP_TOKEN_FILE over YAML. When both are set, the file wins.
         "token": None,
+        # Path to a file containing the bearer token. The file must be a
+        # regular file with no group/other permissions.
+        "token_file": None,
     },
     # Sliding-window limit for destructive/state-changing tool calls.
     "rate_limit": {
@@ -148,6 +152,7 @@ ENV_OVERRIDES: dict[str, tuple[str | None, str, type]] = {
     "MCP_HTTP_PORT": ("transport", "port", int),
     "MCP_HTTP_PATH": ("transport", "path", str),
     "MCP_HTTP_TOKEN": ("transport", "token", str),
+    "MCP_HTTP_TOKEN_FILE": ("transport", "token_file", str),
     "OUTPUT_MAX_BYTES": ("output", "max_bytes", int),
     "AUDIT_ENABLED": ("audit", "enabled", bool),
     "AUDIT_LOG_PATH": ("audit", "path", str),

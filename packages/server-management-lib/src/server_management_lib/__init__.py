@@ -48,6 +48,7 @@ from .responses import (
     build_response,
     make_structured_tool,
 )
+from .runtime import RuntimeCheck, collect_runtime_check
 from .security import (
     SNAPRAID_STATUS_SUDO_ARGV,
     FileAccess,
@@ -59,6 +60,8 @@ from .ssh_manager import SSHConfigurationError, SSHManager
 from .transport import (
     BearerTokenMiddleware,
     is_loopback_host,
+    load_http_token_file,
+    resolve_http_token,
     run_streamable_http,
     validate_http_binding,
 )
@@ -95,6 +98,7 @@ __all__ = [
     "RemoteDirEntry",
     "RemoteFileError",
     "RemotePathError",
+    "RuntimeCheck",
     "SSHConfigurationError",
     "SSHManager",
     "SSHTunnel",
@@ -108,6 +112,7 @@ __all__ = [
     "__version__",
     "build_response",
     "close_metric_tunnels",
+    "collect_runtime_check",
     "config_schema",
     "create_audit_logger",
     "create_executor",
@@ -115,6 +120,7 @@ __all__ = [
     "influxdb_group_by_advisory",
     "is_loopback_host",
     "load_config",
+    "load_http_token_file",
     "make_structured_tool",
     "normalize_device_name",
     "open_metric_tunnels",
@@ -123,6 +129,7 @@ __all__ = [
     "redact_env_content",
     "redact_secrets",
     "resolve_config_path",
+    "resolve_http_token",
     "run_streamable_http",
     "sanitize_output",
     "strip_ansi",

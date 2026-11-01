@@ -4,6 +4,17 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses semantic
 versioning.
 
+## [Unreleased]
+
+### Added
+
+- Streamable HTTP bearer tokens can be read from a file (`transport.token_file`,
+  `MCP_HTTP_TOKEN_FILE`, `--http-token-file`). Token files must be regular, non-empty and
+  not accessible by group/other; the file takes precedence over an inline token.
+- Both MCP servers accept `--check-config`, which validates the merged configuration,
+  SSH key/known_hosts mounts, audit directory, HTTP binding and token file without opening
+  an SSH connection. Container startup rejects `executor: local`.
+
 ## [0.4.0] - 2026-10-23
 
 ### Changed

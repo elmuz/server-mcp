@@ -21,6 +21,7 @@ import json
 import logging
 import os
 import re
+import sys
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -30,12 +31,14 @@ from mcp.types import ToolAnnotations
 
 from server_management_lib import (
     DEFAULT_MAX_OUTPUT_BYTES,
+    ConfigError,
     ConfigNotFoundError,
     InfluxDBClient,
     PrometheusClient,
     SecurityValidator,
     ToolOutput,
     close_metric_tunnels,
+    collect_runtime_check,
     config_schema,
     create_audit_logger,
     create_executor,
@@ -47,6 +50,7 @@ from server_management_lib import (
     open_metric_tunnels,
     parse_duration,
     resolve_config_path,
+    resolve_http_token,
     run_streamable_http,
     sanitize_output,
 )
@@ -2954,6 +2958,65 @@ def tool_details_resource(name: str) -> dict:
     return _tool_metadata(name)
 
 
+def check_config(
+    config_path: Path | None = None,
+    *,
+    transport: str | None = None,
+    http_host: str | None = None,
+    http_port: int | None = None,
+    http_path: str | None = None,
+    http_token_file: str | None = None,
+) -> int:
+    """Validate the runtime configuration without starting the server."""
+    resolved = resolve_config_path(
+        config_path, env_var=CONFIG_ENV_VAR, app_name=APP_NAME
+    )
+    try:
+        cfg = load_config(
+            resolved,
+            env_var=CONFIG_ENV_VAR,
+            app_name=APP_NAME,
+            required=True,
+        )
+    except (ConfigError, ConfigNotFoundError) as e:
+        print(f"❌ {e}", file=sys.stderr)
+        return 2
+
+    transport_config = cfg.setdefault("transport", {})
+    if not isinstance(transport_config, dict):
+        transport_config = {}
+        cfg["transport"] = transport_config
+    if transport:
+        transport_config["type"] = transport
+    if http_host:
+        transport_config["host"] = http_host
+    if http_port is not None:
+        transport_config["port"] = http_port
+    if http_path:
+        transport_config["path"] = http_path
+    if http_token_file:
+        transport_config["token_file"] = http_token_file
+
+    check = collect_runtime_check(
+        cfg,
+        container=os.environ.get("SERVER_MCP_CONTAINER") == "1",
+    )
+    for warning in check.warnings:
+        print(f"⚠️ {warning}", file=sys.stderr)
+    for issue in check.issues:
+        print(f"❌ {issue}", file=sys.stderr)
+    if not check.ok:
+        return 2
+
+    print("✅ Configuration OK")
+    if resolved is not None:
+        print(f"  config: {resolved}")
+    print(f"  executor: {check.executor}")
+    print(f"  transport: {check.transport}")
+    print(f"  token: {check.token_source}")
+    return 0
+
+
 async def main(
     config_path: Path | None = None,
     *,
@@ -2961,6 +3024,7 @@ async def main(
     http_host: str | None = None,
     http_port: int | None = None,
     http_path: str | None = None,
+    http_token_file: str | None = None,
 ) -> None:
     """Run the MCP server."""
     configure_logging()
@@ -2970,6 +3034,19 @@ async def main(
     except ConfigNotFoundError as e:
         logger.error("%s", e)
         raise SystemExit(2) from e
+
+    if os.environ.get("SERVER_MCP_CONTAINER") == "1":
+        check = collect_runtime_check(
+            config,
+            container=True,
+            token_file_override=http_token_file,
+        )
+        for warning in check.warnings:
+            logger.warning("%s", warning)
+        if not check.ok:
+            for issue in check.issues:
+                logger.error("%s", issue)
+            raise SystemExit(2)
 
     logger.info("Using configuration: %s", resolved)
 
@@ -3003,7 +3080,10 @@ async def main(
             host = http_host or str(transport_config.get("host", "127.0.0.1"))
             port = http_port or int(transport_config.get("port", 8000))
             path = http_path or str(transport_config.get("path", "/mcp"))
-            token = transport_config.get("token") or None
+            token = resolve_http_token(
+                transport_config.get("token"),
+                http_token_file or transport_config.get("token_file"),
+            )
             await run_streamable_http(mcp, host=host, port=port, token=token, path=path)
         else:
             logger.error("Unknown transport: %s", selected)
@@ -3047,7 +3127,28 @@ def cli() -> None:
         default=None,
         help="Streamable HTTP endpoint path (default: /mcp)",
     )
+    parser.add_argument(
+        "--http-token-file",
+        default=None,
+        help="Read the Streamable HTTP bearer token from this file",
+    )
+    parser.add_argument(
+        "--check-config",
+        action="store_true",
+        help="Validate configuration and exit without starting the server",
+    )
     args = parser.parse_args()
+    if args.check_config:
+        raise SystemExit(
+            check_config(
+                args.config,
+                transport=args.transport,
+                http_host=args.http_host,
+                http_port=args.http_port,
+                http_path=args.http_path,
+                http_token_file=args.http_token_file,
+            )
+        )
     asyncio.run(
         main(
             args.config,
@@ -3055,6 +3156,7 @@ def cli() -> None:
             http_host=args.http_host,
             http_port=args.http_port,
             http_path=args.http_path,
+            http_token_file=args.http_token_file,
         )
     )
 
