@@ -1,0 +1,51 @@
+# remote-server-mcp configuration for the containerized deployment.
+#
+# Installed at ~/.config/server-mcp/remote.yaml and mounted read-only at
+# /etc/server-mcp/config.yaml. Edit it on the host, then restart the unit.
+
+executor: ssh
+container_runtime: docker
+
+ssh:
+  host: "catafalco.example.com"
+  port: 22
+  username: "mcp"
+  key_path: "/run/secrets/ssh_key"
+  known_hosts: "/etc/server-mcp/known_hosts"
+  connect_timeout: 10
+
+security:
+  services_path: "/srv"
+  allowed_containers: []
+  host_units: ["telegraf", "smartmontools", "docker", "smbd"]
+  allow_generic_commands: false
+
+health:
+  disk_paths:
+    - "/"
+
+# Optional metric sources. Keep disabled until configured.
+influxdb:
+  enabled: false
+
+prometheus:
+  enabled: false
+
+transport:
+  type: streamable-http
+  host: "0.0.0.0"
+  port: 8000
+  path: "/mcp"
+  token_file: "/run/secrets/mcp_token"
+
+rate_limit:
+  enabled: true
+  max_calls: 10
+  window_seconds: 60
+
+output:
+  max_bytes: 64000
+
+audit:
+  enabled: true
+  path: "/var/lib/server-mcp/remote.jsonl"

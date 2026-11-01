@@ -1,0 +1,106 @@
+#!/usr/bin/env bash
+#
+# Install the Server MCP Quadlet units and user state.
+#
+# Usage:
+#   deploy/install.sh [--enable] [--force]
+#
+# The install is idempotent. Existing configuration, keys and tokens are never
+# overwritten unless --force is given; --force also replaces installed units.
+
+set -euo pipefail
+
+REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+CONFIG_DIR="${HOME}/.config/server-mcp"
+STATE_DIR="${HOME}/.local/state/server-mcp"
+UNIT_DIR="${HOME}/.config/containers/systemd"
+ENABLE=0
+FORCE=0
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --enable) ENABLE=1; shift ;;
+    --force) FORCE=1; shift ;;
+    -h|--help)
+      sed -n '2,12p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+      exit 0
+      ;;
+    *)
+      echo "Unknown option: $1" >&2
+      exit 2
+      ;;
+  esac
+done
+
+install -d -m 0700 \
+  "${CONFIG_DIR}" \
+  "${CONFIG_DIR}/secrets" \
+  "${CONFIG_DIR}/ssh" \
+  "${STATE_DIR}" \
+  "${STATE_DIR}/audit"
+install -d -m 0755 "${UNIT_DIR}"
+
+install_if_missing() {
+  local source="$1"
+  local destination="$2"
+  local mode="$3"
+
+  if [[ ! -e "${destination}" || "${FORCE}" -eq 1 ]]; then
+    install -m "${mode}" "${source}" "${destination}"
+  fi
+}
+
+install_if_missing \
+  "${REPO_DIR}/deploy/examples/catafalco/remote.yaml" \
+  "${CONFIG_DIR}/remote.yaml" 0600
+install_if_missing \
+  "${REPO_DIR}/deploy/examples/catafalco/disk.yaml" \
+  "${CONFIG_DIR}/disk.yaml" 0600
+install_if_missing \
+  "${REPO_DIR}/deploy/examples/catafalco/.env.example" \
+  "${CONFIG_DIR}/.env" 0600
+install_if_missing \
+  "${REPO_DIR}/deploy/examples/catafalco/known_hosts.example" \
+  "${CONFIG_DIR}/known_hosts" 0644
+install_if_missing \
+  "${REPO_DIR}/deploy/examples/catafalco/ssh/id_ed25519.example" \
+  "${CONFIG_DIR}/ssh/id_ed25519" 0600
+
+if [[ ! -e "${CONFIG_DIR}/secrets/http-token" ]]; then
+  umask 077
+  head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n' \
+    > "${CONFIG_DIR}/secrets/http-token"
+  printf '\n' >> "${CONFIG_DIR}/secrets/http-token"
+  chmod 0600 "${CONFIG_DIR}/secrets/http-token"
+fi
+
+for unit in \
+  pi-control.network \
+  mcp-egress.network \
+  mcp-remote.container \
+  mcp-disk.container \
+  server-mcp.target; do
+  install_if_missing "${REPO_DIR}/deploy/quadlet/${unit}" "${UNIT_DIR}/${unit}" 0644
+done
+
+if command -v systemctl >/dev/null 2>&1; then
+  systemctl --user daemon-reload || true
+fi
+
+echo "Installed Server MCP:"
+echo "  config: ${CONFIG_DIR}"
+echo "  state:  ${STATE_DIR}"
+echo "  units:  ${UNIT_DIR}"
+echo
+echo "Next steps:"
+echo "  1. Set ssh.host in ${CONFIG_DIR}/remote.yaml and disk.yaml."
+echo "  2. Replace ${CONFIG_DIR}/ssh/id_ed25519 and populate known_hosts."
+echo "  3. Build or pull the image and set Image= in the two .container units."
+echo "  4. Start the stack:"
+echo "       systemctl --user enable --now server-mcp.target"
+echo
+echo "The bearer token is ${CONFIG_DIR}/secrets/http-token."
+
+if [[ "${ENABLE}" -eq 1 ]]; then
+  systemctl --user enable --now server-mcp.target
+fi

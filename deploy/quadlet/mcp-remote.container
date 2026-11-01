@@ -1,0 +1,36 @@
+[Unit]
+Description=Remote Server MCP
+PartOf=server-mcp.target
+
+[Container]
+Image=localhost/server-mcp:dev
+ContainerName=mcp-remote
+Network=pi-control.network
+Network=mcp-egress.network
+UserNS=keep-id
+User=1000
+Group=1000
+ReadOnly=true
+DropCapability=ALL
+NoNewPrivileges=true
+Init=true
+PidsLimit=256
+Memory=512m
+Tmpfs=/tmp:rw,nosuid,nodev,size=64m
+Volume=%h/.config/server-mcp/remote.yaml:/etc/server-mcp/config.yaml:ro
+Volume=%h/.config/server-mcp/.env:/etc/server-mcp/.env:ro
+Volume=%h/.config/server-mcp/ssh/id_ed25519:/run/secrets/ssh_key:ro
+Volume=%h/.config/server-mcp/known_hosts:/etc/server-mcp/known_hosts:ro
+Volume=%h/.config/server-mcp/secrets/http-token:/run/secrets/mcp_token:ro
+Volume=%h/.local/state/server-mcp/audit:/var/lib/server-mcp:rw
+Exec=remote-server-mcp --config /etc/server-mcp/config.yaml --transport streamable-http --http-host 0.0.0.0 --http-port 8000
+HealthCmd=python -c "import socket; socket.create_connection(('127.0.0.1', 8000), 2).close()"
+HealthInterval=30s
+HealthTimeout=5s
+HealthStartPeriod=15s
+HealthRetries=3
+
+[Service]
+Restart=always
+RestartSec=5
+TimeoutStopSec=30

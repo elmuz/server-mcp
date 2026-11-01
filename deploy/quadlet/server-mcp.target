@@ -1,0 +1,7 @@
+[Unit]
+Description=Server MCP stack
+Wants=mcp-remote.service mcp-disk.service
+After=mcp-remote.service mcp-disk.service
+
+[Install]
+WantedBy=default.target

@@ -53,6 +53,8 @@ audit:
   path: "/var/lib/server-mcp/audit.jsonl"
 YAML
 
+# ShellCheck sees commas inside --tmpfs/--mount values as array separators.
+# shellcheck disable=SC2054
 common=(
   --rm
   --read-only

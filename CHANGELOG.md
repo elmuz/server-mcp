@@ -20,6 +20,11 @@ versioning.
   HTTP bearer-token middleware.
 - `.github/workflows/image.yml` lints the Dockerfile, builds and smoke-tests the image on
   every change, and publishes a tag to GHCR with provenance and an SBOM on release tags.
+- Quadlet units install the two MCP services as a `server-mcp.target`, with separate
+  `pi-control` and `mcp-egress` networks, a read-only root filesystem, dropped capabilities,
+  read-only config/key/token mounts and a writable audit directory.
+- `deploy/install.sh` creates the user config/state directories and token, installs the
+  example configs and units, and leaves existing secrets untouched.
 
 ## [0.4.0] - 2026-10-23
 

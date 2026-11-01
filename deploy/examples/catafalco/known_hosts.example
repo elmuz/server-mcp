@@ -1,0 +1,6 @@
+# SSH known_hosts for the target.
+#
+# Populate this file on the host before starting the units:
+#   ssh-keyscan -H catafalco.example.com >> ~/.config/server-mcp/known_hosts
+#
+# Do not disable host key verification.

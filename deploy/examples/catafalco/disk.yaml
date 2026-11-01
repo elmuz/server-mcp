@@ -1,0 +1,58 @@
+# disk-health-mcp configuration for the containerized deployment.
+#
+# Installed at ~/.config/server-mcp/disk.yaml and mounted read-only at
+# /etc/server-mcp/config.yaml. Edit it on the host, then restart the unit.
+
+executor: ssh
+
+ssh:
+  host: "catafalco.example.com"
+  port: 22
+  username: "mcp"
+  key_path: "/run/secrets/ssh_key"
+  known_hosts: "/etc/server-mcp/known_hosts"
+  connect_timeout: 10
+
+security:
+  services_path: "/srv"
+  allow_generic_commands: false
+
+host:
+  enabled: true
+
+# InfluxDB is the preferred SMART source. Keep disabled until configured.
+influxdb:
+  enabled: false
+  host: "127.0.0.1"
+  port: 8181
+  use_https: false
+  database: null
+  token: null
+  query_limit: 1000
+
+prometheus:
+  enabled: false
+  host: "127.0.0.1"
+  port: 9090
+  use_https: false
+  token: null
+  query_timeout: "30s"
+
+transport:
+  type: streamable-http
+  host: "0.0.0.0"
+  port: 8000
+  path: "/mcp"
+  token_file: "/run/secrets/mcp_token"
+
+rate_limit:
+  enabled: true
+  max_calls: 10
+  window_seconds: 60
+
+output:
+  max_bytes: 64000
+
+audit:
+  enabled: true
+  path: "/var/lib/server-mcp/disk.jsonl"
