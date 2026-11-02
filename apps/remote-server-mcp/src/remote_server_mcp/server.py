@@ -928,7 +928,8 @@ def _format_container_health(container: str, output: str, entries: int) -> str:
         health = json.loads(output)
     except json.JSONDecodeError:
         # Docker errors are already human-readable and may include an exit code.
-        return output
+        # Probe output and Docker errors can contain credentials, so redact them.
+        return redact_secrets(output)
 
     if not health:
         return f"Container '{container}' has no healthcheck configured."
@@ -956,7 +957,9 @@ def _format_container_health(container: str, output: str, entries: int) -> str:
         lines.append(f"  [{started_at}] exit {exit_code}")
         for line in probe_output.splitlines():
             lines.append(f"    {line}")
-    return "\n".join(lines)
+    # Healthcheck commands frequently print the URL, header or DSN they use.
+    # Keep the probe structure readable and mask recognized secret values.
+    return redact_secrets("\n".join(lines))
 
 
 @structured_tool(READ_ONLY)
@@ -1475,8 +1478,12 @@ async def search_service_logs(
             output = await executor.execute_safe_command(cmd)
 
             # Filter locally: no shell pipe, so the local executor works too.
+            # Match against the raw line so redaction cannot hide a requested
+            # pattern, then redact what is returned to the model.
             container_matches = [
-                line for line in output.splitlines() if exact_pattern in line
+                redact_secrets(line)
+                for line in output.splitlines()
+                if exact_pattern in line
             ]
             if resolution.multiple:
                 matches.extend(f"[{name}] {line}" for line in container_matches)

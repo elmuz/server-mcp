@@ -212,6 +212,26 @@ class TestDockerCommandConstruction:
 
         assert result == "!important #tag ~home it's fine"
 
+    def test_log_search_redacts_secret_values(self, patched):
+        patched.execute_safe_command.return_value = (
+            "DB_PASSWORD=hunter2\nconnecting to postgres://user:pass@db/app\n"
+        )
+
+        result = asyncio.run(server.search_service_logs("app", "DB_PASSWORD"))
+
+        assert result == "DB_PASSWORD=***"
+        assert "hunter2" not in result
+
+    def test_log_search_redacts_url_credentials(self, patched):
+        patched.execute_safe_command.return_value = (
+            "plain line\nconnecting to postgres://user:pass@db/app\n"
+        )
+
+        result = asyncio.run(server.search_service_logs("app", "postgres://"))
+
+        assert result == "connecting to postgres://user:***@db/app"
+        assert ":pass@" not in result
+
     def test_docker_logs_include_timestamps(self, patched):
         asyncio.run(server.get_service_logs("app"))
 
@@ -343,6 +363,42 @@ class TestContainerHealth:
         command = patched.execute_safe_command.await_args.args[0]
         assert command.startswith("docker inspect --format")
         assert command.endswith(" -- deluge")
+
+    def test_get_container_health_redacts_probe_output(self, patched):
+        health = {
+            "Status": "unhealthy",
+            "FailingStreak": 1,
+            "Log": [
+                {
+                    "Start": "2026-10-18T10:00:00Z",
+                    "ExitCode": 1,
+                    "Output": (
+                        "GET https://user:pass@example/health "
+                        "Authorization: Bearer abc123\n"
+                        "API_KEY=super-secret"
+                    ),
+                }
+            ],
+        }
+        patched.execute_safe_command.return_value = json.dumps(health)
+
+        result = asyncio.run(server.get_container_health("app", entries=1))
+
+        assert "https://user:***@example/health" in result
+        assert "Authorization: Bearer ***" in result
+        assert "API_KEY=***" in result
+        assert ":pass@" not in result
+        assert "abc123" not in result
+        assert "super-secret" not in result
+
+    def test_get_container_health_redacts_docker_error(self, patched):
+        patched.execute_safe_command.return_value = (
+            "error: failed with token=abc123 for app"
+        )
+
+        result = asyncio.run(server.get_container_health("app"))
+
+        assert result == "error: failed with token=*** for app"
 
     def test_get_container_health_without_healthcheck(self, patched):
         patched.execute_safe_command.return_value = "null"
