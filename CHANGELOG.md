@@ -39,6 +39,9 @@ versioning.
 - `load_config()` treats a configuration candidate it cannot inspect (for example an
   unreadable working directory) as absent. Importing a server package no longer fails with
   `PermissionError` when the process runs as a different UID than the image owner.
+- The container image makes `/etc/server-mcp` traversable by any UID (mode 0755), so the
+  image can run as a user other than 1000 with operator-mounted configuration; the mounted
+  files themselves stay read-only and 0600.
 
 ### Documentation
 

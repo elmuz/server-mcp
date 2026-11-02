@@ -73,7 +73,9 @@ RUN groupadd --gid "${GID}" mcp \
 
 COPY --from=builder /opt/venv /opt/venv
 
-RUN install -d -o "${UID}" -g "${GID}" -m 0750 /etc/server-mcp \
+# The config directory only holds operator-mounted files and must be traversable
+# by whatever UID the container runs as; the files themselves stay 0600.
+RUN install -d -o "${UID}" -g "${GID}" -m 0755 /etc/server-mcp \
     && install -d -o "${UID}" -g "${GID}" -m 0700 /var/lib/server-mcp \
     && install -d -o root -g root -m 0755 /run/secrets
 
