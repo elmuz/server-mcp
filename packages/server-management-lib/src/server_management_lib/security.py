@@ -53,6 +53,14 @@ BY_ID_PREFIXES = ("ata-", "nvme-", "scsi-", "usb-", "wwn-")
 DEVICE_IDENTITY_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 ._:#+-]{0,63}$")
 MAX_DEVICE_INPUT_LENGTH = 128
 
+# InfluxDB schema helper: a plain table name or ``schema.table``. The value is
+# always rendered into a quoted SHOW statement by the client, never passed as a
+# free-form query.
+INFLUX_TABLE_NAME_PATTERN = re.compile(
+    r"^[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)?$"
+)
+MAX_INFLUX_TABLE_NAME_LENGTH = 128
+
 # A token that looks like a kernel name but is not canonical (a partition such
 # as ``sda1``, where SMART needs the whole disk, or a malformed
 # ``nvme0n1n1``) must be rejected instead of being mistaken for a serial or a
@@ -1089,6 +1097,24 @@ class SecurityValidator:
 
         # A single trailing semicolon is harmless; drop it before sending.
         return query.strip().rstrip(";").rstrip()
+
+    def validate_influxdb_table_name(self, table: str) -> str | None:
+        """Validate a table name used by the InfluxDB schema helper.
+
+        The schema helper builds ``SHOW COLUMNS FROM ...`` itself, so the name
+        is not a free-form query. Accept a plain identifier or a
+        ``schema.table`` identifier and reject everything else, including
+        quotes, whitespace, dots in the wrong place and control characters.
+        """
+        if not table or not isinstance(table, str):
+            return None
+        if len(table) > MAX_INFLUX_TABLE_NAME_LENGTH:
+            logger.warning("InfluxDB table name too long: %d chars", len(table))
+            return None
+        if not INFLUX_TABLE_NAME_PATTERN.match(table):
+            logger.warning("Invalid InfluxDB table name: %r", table)
+            return None
+        return table
 
     def validate_prometheus_query(self, query: str) -> str | None:
         """

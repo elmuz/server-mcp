@@ -100,6 +100,16 @@ class TestInfluxDBQueryValidation:
         ):
             assert self.security.validate_influxdb_query(query) is None
 
+    def test_influxdb_table_name_validation(self):
+        assert self.security.validate_influxdb_table_name("smart_device") == (
+            "smart_device"
+        )
+        assert self.security.validate_influxdb_table_name("system.parquet_files") == (
+            "system.parquet_files"
+        )
+        for table in ["", "cpu; DROP TABLE x", 'cpu"', "cpu table", "a.b.c", "1cpu"]:
+            assert self.security.validate_influxdb_table_name(table) is None, table
+
     def test_quotes_and_identifiers_accepted(self):
         for query in (
             'SELECT * FROM "cpu load" WHERE usage >= 0.9',
@@ -207,6 +217,10 @@ class TestToolRegistration:
         tools = list(mcp_server.mcp._tool_manager._tools.keys())
         assert "query_influxdb" in tools
 
+    def test_get_influxdb_schema_registered(self):
+        tools = list(mcp_server.mcp._tool_manager._tools.keys())
+        assert "get_influxdb_schema" in tools
+
     def test_query_prometheus_registered(self):
         tools = list(mcp_server.mcp._tool_manager._tools.keys())
         assert "query_prometheus" in tools
@@ -216,9 +230,9 @@ class TestToolRegistration:
         assert "get_prometheus_targets" in tools
 
     def test_total_tool_count(self):
-        """We expect 22 tools (15 SSH/host + 3 database + 4 compose)."""
+        """We expect 23 tools (15 SSH/host + 4 database + 4 compose)."""
         tools = list(mcp_server.mcp._tool_manager._tools.keys())
-        assert len(tools) == 22, f"Expected 22 tools, got {len(tools)}: {tools}"
+        assert len(tools) == 23, f"Expected 23 tools, got {len(tools)}: {tools}"
 
     def test_only_safe_tools_registered(self):
         """Verify no unexpected/generic command tools exist."""
@@ -245,6 +259,7 @@ class TestToolRegistration:
             "search_service_logs",
             "get_server_health",
             "query_influxdb",
+            "get_influxdb_schema",
             "query_prometheus",
             "get_prometheus_targets",
         }
@@ -423,6 +438,49 @@ class TestDisabledServiceBehavior:
                     server_mod.config["influxdb"]["database"] = original_db
 
         asyncio.run(run_test())
+
+    def test_influxdb_schema_disabled_returns_error(self):
+        config = {"influxdb": {"enabled": False}}
+
+        async def run_test():
+            with patch.object(mcp_server, "config", config):
+                result = await mcp_server.get_influxdb_schema()
+            assert "not enabled" in result.lower()
+
+        asyncio.run(run_test())
+
+    def test_influxdb_schema_rejects_an_invalid_table_name(self):
+        config = {"influxdb": {"enabled": True, "database": "testdb"}}
+
+        async def run_test():
+            with patch.object(mcp_server, "config", config):
+                result = await mcp_server.get_influxdb_schema('cpu"; DROP TABLE x')
+            assert "Invalid table name" in result
+
+        asyncio.run(run_test())
+
+    def test_influxdb_schema_builds_show_statements(self):
+        config = {"influxdb": {"enabled": True, "database": "testdb"}}
+        calls = []
+
+        class FakeClient:
+            async def schema(self, table=None, database=None):
+                calls.append((table, database))
+                return "✅ Query successful\n\n[]"
+
+        async def run_test():
+            with (
+                patch.object(mcp_server, "config", config),
+                patch.object(
+                    mcp_server, "_get_influxdb_client", return_value=FakeClient()
+                ),
+            ):
+                await mcp_server.get_influxdb_schema()
+                await mcp_server.get_influxdb_schema("system.parquet_files")
+
+        asyncio.run(run_test())
+
+        assert calls == [(None, "testdb"), ("system.parquet_files", "testdb")]
 
     def test_influxdb_invalid_query_returns_error(self):
         """Invalid SQL should return validation error, not crash."""

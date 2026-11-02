@@ -2,10 +2,11 @@
 
 Security-first MCP server for Docker service management over SSH or on the local host.
 
-Part of the [Server MCP suite](../../README.md). It exposes a fixed catalog of 22 tools
+Part of the [Server MCP suite](../../README.md). It exposes a fixed catalog of 23 tools
 (directory and container discovery, container and host-service logs, status and health,
-start/stop/restart, scoped Compose operations, confined file reads, server health and
-read-only InfluxDB/Prometheus queries). No generic command execution.
+start/stop/restart, scoped Compose operations, confined file reads, server health,
+read-only InfluxDB/Prometheus queries and InfluxDB schema discovery). No generic command
+execution.
 
 The container CLI is configurable (`docker`, `podman` or `nerdctl`). `start_service`,
 `restart_service`, `stop_service`, `compose_pull`, `compose_up` and `compose_down` require

@@ -1587,6 +1587,60 @@ async def query_influxdb(query: str, database: str | None = None) -> str | ToolO
 
 
 @structured_tool(READ_ONLY)
+async def get_influxdb_schema(
+    table: str | None = None, database: str | None = None
+) -> str | ToolOutput:
+    """Discover InfluxDB tables and their columns.
+
+    Without ``table`` this returns ``SHOW TABLES``. With ``table`` it returns
+    ``SHOW COLUMNS`` for that table, which is the reliable way to learn whether
+    a column such as ``time`` exists before writing a query. The statement is
+    built by the client from a validated identifier, so this is not a second
+    query surface.
+
+    Args:
+        table: Optional table name (``smart_device`` or ``system.parquet_files``)
+        database: Database name (overrides config default)
+
+    Returns:
+        Table list or column metadata as JSON
+    """
+    influxdb_config = config.get("influxdb", {})
+    if not influxdb_config.get("enabled", False):
+        return (
+            "❌ InfluxDB queries are not enabled.\n"
+            "Set 'influxdb.enabled: true' in config.yaml and configure host/port."
+        )
+
+    validated_table: str | None = None
+    if table is not None:
+        validated_table = security.validate_influxdb_table_name(table)
+        if validated_table is None:
+            _audit("schema_blocked", kind="influxdb", table=table)
+            return (
+                f"❌ Invalid table name: {table}\n"
+                "Use a plain name or schema.table (letters, digits, underscore, "
+                "and one dot). No quotes or spaces."
+            )
+
+    db = database or influxdb_config.get("database")
+    if not db:
+        return (
+            "❌ No database specified. Provide 'database' parameter or set "
+            "'influxdb.database' in config.yaml."
+        )
+
+    client = _get_influxdb_client()
+    result = await client.schema(validated_table, database=db)
+    data: dict = {
+        "database": db,
+        "table": validated_table,
+        **_query_data(result),
+    }
+    return ToolOutput(result, data=data)
+
+
+@structured_tool(READ_ONLY)
 async def query_prometheus(query: str, time: str | None = None) -> str | ToolOutput:
     """Query Prometheus using PromQL (read-only).
 

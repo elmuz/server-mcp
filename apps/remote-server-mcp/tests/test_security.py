@@ -351,6 +351,7 @@ class TestToolSecurity:
             "search_service_logs",
             "get_server_health",
             "query_influxdb",
+            "get_influxdb_schema",
             "query_prometheus",
             "get_prometheus_targets",
         }

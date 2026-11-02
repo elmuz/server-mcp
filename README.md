@@ -139,7 +139,7 @@ workflow and residual risks.
 
 ## What the agents can do
 
-`remote-server-mcp` (22 tools):
+`remote-server-mcp` (23 tools):
 
 | Tool | Access |
 |---|---|
@@ -147,9 +147,9 @@ workflow and residual risks.
 | `get_service_logs`, `search_service_logs` | read-only |
 | `get_service_status`, `get_container_health` | read-only |
 | `get_host_service_status`, `get_host_service_logs`, `search_host_service_logs` | read-only, systemd units from an allowlist |
-| `get_service_file`, `list_service_files` | read-only, confined to the service directory; credential values in `.env` and compose/config files are masked, and key/credential files are refused |
+| `get_service_file`, `list_service_files` | read-only, confined to the service directory; credential values in `.env` and compose/config files are masked, and key/credential files plus data dumps and archives are refused |
 | `get_server_health` | read-only |
-| `query_influxdb`, `query_prometheus`, `get_prometheus_targets` | read-only |
+| `query_influxdb`, `get_influxdb_schema`, `query_prometheus`, `get_prometheus_targets` | read-only |
 | `compose_ps` | read-only, scoped to `services_path/<service>` |
 | `start_service` | write, requires `confirm=true` |
 | `compose_pull`, `compose_up` | write, require `confirm=true` |

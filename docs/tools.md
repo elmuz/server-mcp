@@ -28,6 +28,7 @@ block as before. The config schema and the tool catalog are available as MCP res
 | `list_service_files` | `service`, `subdirectory` | read-only | Lists files inside the service directory |
 | `get_server_health` | — | read-only | Uptime, memory, disk usage for every `health.disk_paths` mount, running containers and unhealthy containers |
 | `query_influxdb` | `query`, `database` | read-only | Single `SELECT` against InfluxDB v3 |
+| `get_influxdb_schema` | `table` (optional), `database` | read-only | Lists tables (`SHOW TABLES`) or columns for one table (`SHOW COLUMNS`); use it before writing a query against an unfamiliar measurement |
 | `query_prometheus` | `query`, `time` | read-only | Instant PromQL query (Prometheus is optional) |
 | `get_prometheus_targets` | — | read-only | Prometheus scrape targets and health (optional) |
 | `compose_ps` | `service` | read-only | `docker compose --project-directory <service> ps` |
@@ -66,6 +67,9 @@ get_service_file("cypht", ".env")       # credential values masked; benign keys 
 get_service_file("cypht", "compose.yml") # inline passwords/tokens masked
 query_prometheus('up{job="node"} > 0')  # optional; any Prometheus target
 query_influxdb("SELECT * FROM smart_device WHERE time > now() - INTERVAL '1 hour' LIMIT 100")
+get_influxdb_schema()                          # table list
+get_influxdb_schema("system.parquet_files")    # columns, including whether time exists
+get_influxdb_schema("smart_device")
 ```
 
 ## disk-health-mcp

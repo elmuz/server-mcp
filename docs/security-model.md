@@ -184,8 +184,10 @@ keywords (`INTO`, `DROP`, `INSERT`, `UPDATE`, ...) rejected and SQL comments (`-
 above `influxdb.query_limit` is clamped, and a `LIMIT` is appended when the outermost query
 has none. `LIMIT` text inside a string literal, an identifier or a nested subquery does not
 count. The validator returns the sanitized query and the tools send exactly that value to
-the HTTP client, not the original input. PromQL is sent to Prometheus's read-only
-instant-query endpoint; quotes, label matchers and comparison operators are allowed because
+the HTTP client, not the original input. The InfluxDB schema helper is not a second query
+surface: it accepts only a plain or `schema.table` identifier and builds a fixed
+`SHOW TABLES` / `SHOW COLUMNS FROM` statement itself. PromQL is sent to Prometheus's
+read-only instant-query endpoint; quotes, label matchers and comparison operators are allowed because
 the query is never executed by a shell.
 
 `disk-health-mcp` builds some queries itself (device tag, disk serial) and the client does

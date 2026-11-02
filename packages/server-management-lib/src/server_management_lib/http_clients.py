@@ -249,14 +249,7 @@ class InfluxDBClient:
                         label="InfluxDB error",
                     )
 
-                    hint = ""
-                    if _should_show_scan_hint(sql_query, error_body):
-                        hint = (
-                            "💡 Tip: InfluxDB 3 Core has a file-scan limit. "
-                            "Queries without a `WHERE time` clause may fail "
-                            "with HTTP 500. Add a time range like:\n"
-                            "   WHERE time > now() - INTERVAL '1 hour'\n\n"
-                        )
+                    hint = _scan_hint(sql_query, error_body)
 
                     self._log_audit(sql_query, db, response.status, started)
                     return (
@@ -272,6 +265,28 @@ class InfluxDBClient:
         except TimeoutError:
             self._log_audit(sql_query, db, "timeout", started)
             return f"❌ Query timed out after {self.timeout} seconds"
+
+    async def schema(
+        self, table: str | None = None, database: str | None = None
+    ) -> str:
+        """Return ``SHOW TABLES`` or ``SHOW COLUMNS`` for one table.
+
+        The statement is built here, not supplied by the caller. ``table`` is
+        restricted to a plain or ``schema.table`` identifier and each part is
+        double-quoted before it reaches the query endpoint.
+        """
+        if table is None:
+            return await self.query("SHOW TABLES", database=database)
+
+        if (
+            not isinstance(table, str)
+            or len(table) > MAX_TABLE_NAME_LENGTH
+            or not _TABLE_NAME_PATTERN.match(table)
+        ):
+            return f"❌ Invalid table name: {table!r}"
+
+        quoted = ".".join(f'"{part}"' for part in table.split("."))
+        return await self.query(f"SHOW COLUMNS FROM {quoted}", database=database)
 
 
 class PrometheusClient:
@@ -534,6 +549,19 @@ _SCAN_LIMIT_PATTERN = re.compile(r"(?:file[ -]scan|scan[ -]limit)", re.IGNORECAS
 
 _TIME_PREDICATE_PATTERN = re.compile(r"\btime\b", re.IGNORECASE)
 
+# Tables referenced by ``FROM``/``JOIN``. Used only to decide whether the
+# file-scan hint makes sense; ``system`` tables have no ``time`` column.
+_TABLE_REFERENCE_PATTERN = re.compile(
+    r"\b(?:FROM|JOIN)\s+"
+    r"(?P<table>[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)?)",
+    re.IGNORECASE,
+)
+
+_TABLE_NAME_PATTERN = re.compile(
+    r"^[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)?$"
+)
+MAX_TABLE_NAME_LENGTH = 128
+
 _WHERE_END_KEYWORDS = frozenset(
     {"GROUP BY", "ORDER BY", "LIMIT", "HAVING", "UNION", "WINDOW", "OFFSET"}
 )
@@ -615,11 +643,57 @@ def _has_time_predicate(sql_query: str) -> bool:
     return False
 
 
+def _referenced_tables(sql_query: str) -> list[str]:
+    """Return the table names after ``FROM`` and ``JOIN`` in a query."""
+    return [
+        match.group("table") for match in _TABLE_REFERENCE_PATTERN.finditer(sql_query)
+    ]
+
+
+def _uses_only_system_tables(sql_query: str) -> bool:
+    """True when every referenced table is in the ``system`` schema.
+
+    ``system.parquet_files`` and the other system tables have no ``time``
+    column, so the generic file-scan hint sends the caller in the wrong
+    direction. A mixed query still gets the generic hint because its user
+    table may need a time filter.
+    """
+    tables = _referenced_tables(sql_query)
+    return bool(tables) and all(table.lower().startswith("system.") for table in tables)
+
+
 def _should_show_scan_hint(sql_query: str, error_body: str) -> bool:
     """Only hint at the file-scan limit when it can be the actual cause."""
     if _SCAN_LIMIT_PATTERN.search(error_body):
         return True
     return not _has_time_predicate(sql_query)
+
+
+def _scan_hint(sql_query: str, error_body: str) -> str:
+    """Build the error hint, or an empty string when it does not apply."""
+    if not _should_show_scan_hint(sql_query, error_body):
+        return ""
+    if _uses_only_system_tables(sql_query) and not _SCAN_LIMIT_PATTERN.search(
+        error_body
+    ):
+        tables = {table.lower() for table in _referenced_tables(sql_query)}
+        if "system.parquet_files" in tables:
+            return (
+                "💡 Tip: `system.parquet_files` has no `time` column. "
+                "Use `min_time` / `max_time` (Int64 ns epoch) for a time "
+                "window, or omit the predicate entirely.\n\n"
+            )
+        return (
+            "💡 Tip: `system` tables have no `time` column. "
+            "Inspect the actual columns with `get_influxdb_schema()` and "
+            "`get_influxdb_schema(table=...)`, then filter on a real column.\n\n"
+        )
+    return (
+        "💡 Tip: InfluxDB 3 Core has a file-scan limit. "
+        "Queries without a `WHERE time` clause may fail "
+        "with HTTP 500. Add a time range like:\n"
+        "   WHERE time > now() - INTERVAL '1 hour'\n\n"
+    )
 
 
 def _ensure_limit(sql_query: str, limit: int) -> str:
@@ -643,6 +717,11 @@ def _ensure_limit(sql_query: str, limit: int) -> str:
         return f"{query}\nLIMIT {maximum}"
 
     statement = statements[0]
+    # Only SELECT results are row-bounded. Schema statements such as
+    # ``SHOW TABLES`` and ``SHOW COLUMNS`` are already bounded by the schema.
+    if statement.get_type().upper() != "SELECT":
+        return query
+
     tokens = statement.tokens
     for index, token in enumerate(tokens):
         if token.ttype not in sql_tokens.Keyword or token.value.upper() != "LIMIT":

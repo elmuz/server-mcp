@@ -176,6 +176,40 @@ class TestInfluxDBClientQueries:
 
         asyncio.run(run())
 
+    def test_schema_builds_show_statements(self):
+        client = InfluxDBClient(host="localhost", database="testdb")
+
+        async def run():
+            mock_response = MagicMock()
+            mock_response.status = 200
+            mock_response.json = AsyncMock(return_value=[])
+
+            mock_cm = AsyncMock()
+            mock_cm.__aenter__ = AsyncMock(return_value=mock_response)
+            mock_cm.__aexit__ = AsyncMock(return_value=None)
+
+            mock_session = MagicMock()
+            mock_session.post.return_value = mock_cm
+            mock_session.__aenter__ = AsyncMock(return_value=mock_session)
+            mock_session.__aexit__ = AsyncMock(return_value=None)
+
+            with patch(
+                "server_management_lib.http_clients.aiohttp.ClientSession",
+                return_value=mock_session,
+            ):
+                await client.schema()
+                await client.schema("system.parquet_files")
+
+            statements = [
+                call.kwargs["json"]["q"] for call in mock_session.post.call_args_list
+            ]
+            assert statements == [
+                "SHOW TABLES",
+                'SHOW COLUMNS FROM "system"."parquet_files"',
+            ]
+
+        asyncio.run(run())
+
     def test_query_connection_error(self):
         client = InfluxDBClient(host="localhost", database="testdb")
 
@@ -753,6 +787,12 @@ class TestQueryHelpers:
         query = "SELECT * FROM cpu LIMIT 5"
         assert _ensure_limit(query, 10) == query
 
+    def test_ensure_limit_skips_schema_statements(self):
+        from server_management_lib.http_clients import _ensure_limit
+
+        assert _ensure_limit("SHOW TABLES", 10) == "SHOW TABLES"
+        assert _ensure_limit('SHOW COLUMNS FROM "cpu"', 10) == 'SHOW COLUMNS FROM "cpu"'
+
     def test_ensure_limit_after_line_comment(self):
         from server_management_lib.http_clients import _ensure_limit
 
@@ -1136,6 +1176,32 @@ class TestTimeFilterHintAccuracy:
 
         query = "SELECT * FROM cpu WHERE note = 'time'"
         assert _has_time_predicate(query) is False
+        assert "Tip: InfluxDB 3 Core" in self._query(query)
+
+    def test_system_table_gets_a_schema_hint_not_a_time_hint(self):
+        from server_management_lib.http_clients import _uses_only_system_tables
+
+        query = "SELECT * FROM system.queries"
+        assert _uses_only_system_tables(query) is True
+        result = self._query(query)
+        assert "`system` tables have no `time` column" in result
+        assert "Tip: InfluxDB 3 Core" not in result
+
+    def test_parquet_files_hint_names_min_and_max_time(self):
+        result = self._query("SELECT * FROM system.parquet_files")
+
+        assert "`system.parquet_files` has no `time` column" in result
+        assert "`min_time` / `max_time` (Int64 ns epoch)" in result
+        assert "Tip: InfluxDB 3 Core" not in result
+
+    def test_mixed_system_and_user_tables_keep_the_time_hint(self):
+        from server_management_lib.http_clients import _uses_only_system_tables
+
+        query = (
+            "SELECT * FROM system.parquet_files "
+            "JOIN smart_device ON system.parquet_files.path = smart_device.path"
+        )
+        assert _uses_only_system_tables(query) is False
         assert "Tip: InfluxDB 3 Core" in self._query(query)
 
     def test_group_by_time_is_not_a_where_predicate(self):
