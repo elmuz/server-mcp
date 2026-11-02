@@ -11,7 +11,31 @@ from pathlib import Path
 
 import pytest
 
-from server_management_lib.config import DEFAULT_CONFIG, load_config
+from server_management_lib.config import (
+    DEFAULT_CONFIG,
+    load_config,
+    resolve_config_path,
+)
+
+
+def test_unreadable_cwd_candidate_is_ignored(tmp_path, monkeypatch):
+    """An unreadable cwd candidate must not abort the import-time load."""
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+    blocked = tmp_path / "config.yaml"
+    real_exists = Path.exists
+
+    def exists_or_deny(self):
+        if self.resolve() == blocked.resolve():
+            raise PermissionError(13, "Permission denied", str(self))
+        return real_exists(self)
+
+    monkeypatch.setattr(Path, "exists", exists_or_deny)
+
+    assert resolve_config_path(app_name="remote-server-mcp") is None
+    config = load_config(app_name="remote-server-mcp", log_missing=False)
+    assert config["executor"] == "ssh"
+    assert config["transport"]["type"] == "stdio"
 
 
 class TestDefaultConfiguration:

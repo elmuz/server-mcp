@@ -36,6 +36,9 @@ versioning.
 - `deploy/install.sh` installs `server-mcp.target` under `~/.config/systemd/user/`, because
   Quadlet ignores plain `.target` files, so `systemctl --user enable --now server-mcp.target`
   works after installation.
+- `load_config()` treats a configuration candidate it cannot inspect (for example an
+  unreadable working directory) as absent. Importing a server package no longer fails with
+  `PermissionError` when the process runs as a different UID than the image owner.
 
 ### Documentation
 

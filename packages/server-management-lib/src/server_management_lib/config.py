@@ -192,6 +192,20 @@ def _deep_merge(base: Mapping[str, Any], override: Mapping[str, Any]) -> dict:
     return result
 
 
+def _candidate_exists(path: Path) -> bool:
+    """Return whether a config candidate can be inspected.
+
+    Import-time loading runs with a best-effort policy, so a directory the
+    process cannot traverse (for example a ``/home/mcp`` owned by UID 1000
+    while the container runs as another UID) must read as "not found" rather
+    than abort the import.
+    """
+    try:
+        return path.exists()
+    except OSError:
+        return False
+
+
 def resolve_config_path(
     explicit: Path | str | None = None,
     *,
@@ -215,11 +229,11 @@ def resolve_config_path(
         xdg_home = os.environ.get("XDG_CONFIG_HOME")
         base = Path(xdg_home).expanduser() if xdg_home else Path.home() / ".config"
         candidate = base / app_name / "config.yaml"
-        if candidate.exists():
+        if _candidate_exists(candidate):
             return candidate
 
     cwd_candidate = Path.cwd() / "config.yaml"
-    if cwd_candidate.exists():
+    if _candidate_exists(cwd_candidate):
         return cwd_candidate
 
     return None
@@ -255,7 +269,7 @@ def _load_dotenv(config_file: Path) -> None:
         return
 
     env_file = config_file.parent / ".env"
-    if env_file.exists():
+    if _candidate_exists(env_file):
         load_dotenv(env_file)
 
 
@@ -297,7 +311,7 @@ def load_config(
         _apply_env_overrides(config, environment)
         return config
 
-    if resolved is None or not resolved.exists():
+    if resolved is None or not _candidate_exists(resolved):
         if required:
             raise ConfigNotFoundError(
                 "No configuration file found. Searched: "
