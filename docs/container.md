@@ -186,7 +186,8 @@ scripts/container-smoke.sh localhost/server-mcp:dev
 
 That script starts both console scripts with the read-only hardening, verifies that a
 request without the token gets `401`, and verifies that an authenticated request is not
-rejected by the middleware.
+rejected by the middleware. It uses Docker in CI and Podman on a rootless host; set
+`CONTAINER_ENGINE=docker|podman` to force one.
 
 ## Residual risks
 

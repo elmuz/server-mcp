@@ -1,9 +1,12 @@
 #!/usr/bin/env bash
 #
-# Smoke-test a built Server MCP image with plain Docker.
+# Smoke-test a built Server MCP image with Docker or Podman.
 #
 # Usage:
 #   scripts/container-smoke.sh localhost/server-mcp:ci
+#
+# CI uses Docker; local rootless hosts can use Podman. Override the engine with
+# CONTAINER_ENGINE if both are installed.
 #
 # The script verifies both console scripts, the token file, the read-only
 # container hardening and the Streamable HTTP bearer-token middleware.
@@ -11,13 +14,37 @@
 set -euo pipefail
 
 image="${1:?usage: $0 IMAGE}"
+
+engine="${CONTAINER_ENGINE:-}"
+if [[ -z "$engine" ]]; then
+  if command -v docker >/dev/null 2>&1; then
+    engine=docker
+  elif command -v podman >/dev/null 2>&1; then
+    engine=podman
+  else
+    echo "❌ neither docker nor podman is installed" >&2
+    exit 2
+  fi
+fi
+if ! command -v "$engine" >/dev/null 2>&1; then
+  echo "❌ container engine not found: $engine" >&2
+  exit 2
+fi
+
+# Rootless Podman maps --user to a subordinate UID, so the bind-mounted
+# secrets would be unreadable. keep-id makes the current host UID inside.
+engine_opts=()
+if [[ "$engine" == "podman" ]]; then
+  engine_opts+=(--userns=keep-id)
+fi
+
 tmp="$(mktemp -d)"
 token="$(head -c 32 /dev/urandom | sha256sum | cut -d' ' -f1)"
 names=()
 
 cleanup() {
   for name in "${names[@]}"; do
-    docker rm -f "$name" >/dev/null 2>&1 || true
+    "$engine" rm -f "$name" >/dev/null 2>&1 || true
   done
   rm -rf "$tmp"
 }
@@ -62,16 +89,17 @@ common=(
   --security-opt=no-new-privileges
   --tmpfs /tmp:rw,nosuid,nodev
   --user "$(id -u):$(id -g)"
+  "${engine_opts[@]}"
   --mount "type=bind,src=$tmp/config.yaml,dst=/etc/server-mcp/config.yaml,ro"
   --mount "type=bind,src=$tmp/token,dst=/run/secrets/mcp_token,ro"
   --mount "type=bind,src=$tmp/ssh_key,dst=/run/secrets/ssh_key,ro"
   --mount "type=bind,src=$tmp/known_hosts,dst=/etc/server-mcp/known_hosts,ro"
-  --mount "type=bind,src=$tmp/audit,dst=/var/lib/server-mcp,rw"
+  --mount "type=bind,src=$tmp/audit,dst=/var/lib/server-mcp"
 )
 
-docker run "${common[@]}" "$image" \
+"$engine" run "${common[@]}" "$image" \
   remote-server-mcp --check-config --config /etc/server-mcp/config.yaml
-docker run "${common[@]}" "$image" \
+"$engine" run "${common[@]}" "$image" \
   disk-health-mcp --check-config --config /etc/server-mcp/config.yaml
 
 start_and_check() {
@@ -81,7 +109,7 @@ start_and_check() {
   local container_name="server-mcp-smoke-${name}-$$"
 
   names+=("$container_name")
-  docker run -d --name "$container_name" \
+  "$engine" run -d --name "$container_name" \
     --read-only \
     --cap-drop=ALL \
     --security-opt=no-new-privileges \
@@ -89,12 +117,13 @@ start_and_check() {
     --memory=512m \
     --tmpfs /tmp:rw,nosuid,nodev \
     --user "$(id -u):$(id -g)" \
+    "${engine_opts[@]}" \
     --publish "127.0.0.1:${port}:8000" \
     --mount "type=bind,src=$tmp/config.yaml,dst=/etc/server-mcp/config.yaml,ro" \
     --mount "type=bind,src=$tmp/token,dst=/run/secrets/mcp_token,ro" \
     --mount "type=bind,src=$tmp/ssh_key,dst=/run/secrets/ssh_key,ro" \
     --mount "type=bind,src=$tmp/known_hosts,dst=/etc/server-mcp/known_hosts,ro" \
-    --mount "type=bind,src=$tmp/audit,dst=/var/lib/server-mcp,rw" \
+    --mount "type=bind,src=$tmp/audit,dst=/var/lib/server-mcp" \
     "$image" "$command" \
       --config /etc/server-mcp/config.yaml \
       --transport streamable-http \
@@ -113,12 +142,12 @@ start_and_check() {
   done
 
   if [[ "$code" == "000" ]]; then
-    docker logs "$container_name" >&2 || true
+    "$engine" logs "$container_name" >&2 || true
     echo "❌ ${command} did not start listening" >&2
     return 1
   fi
   if [[ "$code" != "401" ]]; then
-    docker logs "$container_name" >&2 || true
+    "$engine" logs "$container_name" >&2 || true
     echo "❌ ${command}: expected 401 without a token, got ${code}" >&2
     return 1
   fi
@@ -132,7 +161,7 @@ start_and_check() {
     "http://127.0.0.1:${port}/mcp")"
 
   if [[ "$auth_code" == "401" ]]; then
-    docker logs "$container_name" >&2 || true
+    "$engine" logs "$container_name" >&2 || true
     echo "❌ ${command}: authenticated request was rejected" >&2
     return 1
   fi
