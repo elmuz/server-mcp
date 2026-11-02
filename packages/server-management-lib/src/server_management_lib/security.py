@@ -304,9 +304,33 @@ BLOCKED_PATH_COMPONENTS: frozenset[str] = frozenset(
     }
 )
 
-# Extensions that identify key material or an encrypted secret store.
+# Extensions that identify key material, an encrypted secret store, or a bulk
+# data dump/archive. Dumps and archives are refused because they are not useful
+# to read as text and are a convenient way to move secrets and whole databases
+# through ``get_service_file``.
 BLOCKED_PATH_SUFFIXES: frozenset[str] = frozenset(
-    {".pem", ".key", ".p12", ".pfx", ".jks", ".keystore", ".kdbx"}
+    {
+        ".pem",
+        ".key",
+        ".p12",
+        ".pfx",
+        ".jks",
+        ".keystore",
+        ".kdbx",
+        ".sql",
+        ".dump",
+        ".tar",
+        ".gz",
+        ".tgz",
+        ".bz2",
+        ".xz",
+        ".zip",
+        ".7z",
+        ".rar",
+        ".bak",
+        ".sqlite",
+        ".sqlite3",
+    }
 )
 
 # ``.env`` files are readable because they are the primary way to debug a
@@ -356,7 +380,8 @@ def _relative_file_access(file_path: str) -> tuple[FileAccess, str | None]:
         if pure.suffix in BLOCKED_PATH_SUFFIXES:
             return (
                 FileAccess.BLOCKED_SENSITIVE,
-                f"file extension {pure.suffix!r} may contain key material",
+                f"file extension {pure.suffix!r} may contain key material "
+                "or a bulk data dump",
             )
 
         if (

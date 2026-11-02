@@ -626,6 +626,34 @@ class TestFilePathValidation:
             result = self.security.validate_service_file_path(service, path)
             assert result is None, f"Should block sensitive file: {path}"
 
+    def test_data_dumps_and_archives_are_blocked(self):
+        blocked = [
+            ("myapp", "backup.sql"),
+            ("myapp", "db.dump"),
+            ("myapp", "backup.tar"),
+            ("myapp", "logs.tar.gz"),
+            ("myapp", "backup.tgz"),
+            ("myapp", "archive.zip"),
+            ("myapp", "config.bak"),
+            ("myapp", "data.sqlite3"),
+        ]
+        for service, path in blocked:
+            check = self.security.check_service_file_path(service, path)
+            assert check.path is None, f"Should block data dump: {path}"
+            assert check.access is FileAccess.BLOCKED_SENSITIVE
+
+    def test_readable_logs_and_configs_are_still_allowed(self):
+        allowed = [
+            ("myapp", "config.yml"),
+            ("myapp", "logs/error.log"),
+            ("myapp", "logs/access.log.1"),
+            ("myapp", "compose.yaml"),
+        ]
+        for service, path in allowed:
+            check = self.security.check_service_file_path(service, path)
+            assert check.path is not None, f"Should accept: {path}"
+            assert check.access is not FileAccess.BLOCKED_SENSITIVE
+
     def test_sensitive_files_report_a_policy_block(self):
         check = self.security.check_service_file_path("myapp", "keys/server.key")
         assert check.path is None

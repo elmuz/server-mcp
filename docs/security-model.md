@@ -125,7 +125,10 @@ whole path, so `monkey.txt` and `tokenizer.json` are not mistaken for key or tok
 Private keys (`.key`, `.pem`, `.p12`, ...), credential stores (`.ssh`, `.aws`, `.git`,
 `.netrc`, `.pgpass`, ...) and secret-named components (`secrets/`, `password`, `token`,
 `credentials`) are refused with an explicit "blocked by the sensitive-file policy" error
-that is distinct from the invalid-path error.
+that is distinct from the invalid-path error. Bulk data dumps and archives (`.sql`,
+`.dump`, `.tar`, `.gz`, `.tgz`, `.bz2`, `.xz`, `.zip`, `.7z`, `.rar`, `.bak`, `.sqlite`,
+`.sqlite3`) are refused for the same reason: they are not useful to read as text and are a
+convenient way to move a database or a whole directory through `get_service_file`.
 
 Dotenv files (`.env`, `.env.local`, `.env.production`, `*.env`) are readable because they
 are the primary way to debug a compose stack whose `compose.yml` only contains `${VARS}`.

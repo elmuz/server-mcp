@@ -24,7 +24,7 @@ block as before. The config schema and the tool catalog are available as MCP res
 | `get_host_service_status` | `unit` | read-only | `systemctl status` for a unit in `security.host_units` |
 | `get_host_service_logs` | `unit`, `lines` (1–5000), `since` | read-only | `journalctl -u` for a unit in `security.host_units`, with an optional time window |
 | `search_host_service_logs` | `unit`, `pattern`, `lines` (1–5000), `since` | read-only | Filters journal lines for an exact literal string (no regex) |
-| `get_service_file` | `service`, `file_path` | read-only | Reads a file inside the service directory over SFTP; credential values in `.env` and compose/config files are masked, and key/credential files are refused |
+| `get_service_file` | `service`, `file_path` | read-only | Reads a file inside the service directory over SFTP; credential values in `.env` and compose/config files are masked, and key/credential files plus data dumps and archives are refused |
 | `list_service_files` | `service`, `subdirectory` | read-only | Lists files inside the service directory |
 | `get_server_health` | — | read-only | Uptime, memory, disk usage for every `health.disk_paths` mount, running containers and unhealthy containers |
 | `query_influxdb` | `query`, `database` | read-only | Single `SELECT` against InfluxDB v3 |

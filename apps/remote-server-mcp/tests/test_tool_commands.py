@@ -146,6 +146,13 @@ class TestServicePathConsistency:
         assert "DB_HOST=db" in result
         assert "masked" in result
 
+    def test_data_dump_is_blocked_by_the_sensitive_file_policy(self, patched):
+        result = asyncio.run(server.get_service_file("app", "backup.sql"))
+
+        assert "sensitive-file policy" in result
+        assert "Invalid file path" not in result
+        patched.read_remote_file.assert_not_awaited()
+
     def test_sensitive_file_reports_the_policy_not_an_invalid_path(self, patched):
         result = asyncio.run(server.get_service_file("app", "keys/server.key"))
 
