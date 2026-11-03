@@ -81,8 +81,9 @@ some links. The new-repository path is cleaner.
 ## PyPI releases
 
 The three packages are published separately but share one version. **Publish the library
-first:** the apps depend on `server-management-lib>=0.4,<0.5`, so an app that is uploaded
-before its library resolves to nothing and cannot be installed.
+first:** the apps depend on `server-management-lib>=0.5,<0.6`, so an app that is uploaded
+before its library resolves to nothing and cannot be installed. Bump that upper bound in the
+same change as the library version, or the published apps become uninstallable.
 
 | PyPI project | Source directory |
 |---|---|
@@ -90,14 +91,23 @@ before its library resolves to nothing and cannot be installed.
 | `remote-server-mcp` | `apps/remote-server-mcp` |
 | `disk-health-mcp` | `apps/disk-health-mcp` |
 
-`0.2.0` is published on PyPI, so steps 1–4 are the one-off bootstrap that was used for it
-and §5 is the steady state for every later release. Released versions install with `uvx`;
-an unreleased commit still runs from the workspace as described in
+`0.2.0` was the one-off bootstrap (steps 1–4); §5 is the steady state for every later
+release and has been used for `0.2.1`, `0.3.0`, `0.4.0` and `0.5.0`. Released versions
+install with `uvx`; an unreleased commit still runs from the workspace as described in
 [harnesses.md](harnesses.md):
 
 ```bash
 uv run --project /path/to/server-mcp --package remote-server-mcp remote-server-mcp
 ```
+
+**One tag, two channels.** Pushing `vX.Y.Z` also builds and publishes
+`ghcr.io/elmuz/server-mcp:vX.Y.Z` from the same commit, through
+[image.yml](../.github/workflows/image.yml). The image is the recommended deployment; the
+`uvx` install is the supported lower-isolation stdio/HTTP option, and it does not provide the
+container's isolation, token middleware or audit guarantees. Release notes list the package
+version and the digest of the image built from the same commit. The two workflows are still
+independent: a failing image build does not block the PyPI upload (tracked as 3.9 in the
+[plan](modernization-plan.md)).
 
 ### 1. Pre-flight
 
@@ -235,7 +245,7 @@ account-wide token can overwrite every project you own.
 
 ## Versioning
 
-- The three packages share the suite version (`0.4.0`). The workspace root
+- The three packages share the suite version (`0.5.0`). The workspace root
   `pyproject.toml` carries the same version for `uv` output and should not drift.
 - **`0.2.0` is the first published release.** It was never tagged when the monorepo
   consolidation landed (`50de082`, commit message `… (v0.2.0)`), so the P0/P1/P2
@@ -245,16 +255,16 @@ account-wide token can overwrite every project you own.
   container health, permissive command policy) stay out of the first PyPI upload.
 - Because the fixes were folded in, the version string did **not** change with them. Clean
   `dist/` before building; a stale pre-fix wheel would otherwise be published as `0.2.0`.
-- Tag releases as `v0.2.0`, `v0.2.1`, `v0.3.0`, ... The next change after this release gets
-  a new version: `v0.3.1` for fixes, `v0.4.0` for features or breaking config/tool changes
-  while the suite is pre-1.0.
+- Tag releases as `v0.2.0`, `v0.2.1`, `v0.3.0`, `v0.4.0`, `v0.5.0`, ... While the suite is
+  pre-1.0, fixes get a patch tag (`v0.5.1`) and new features or breaking config/tool changes
+  get a minor tag (`v0.6.0`). Never retag a released version.
 - **The `v` belongs to the tag, not to the version.** The tag is `v0.2.1` and the packaged
   version is `0.2.1`; PEP 440 does not allow a `v` prefix in `project.version`, so `0.2.1`
   is what `pip`/`uvx` resolve and what PyPI lists. The workflow depends on both forms: the
   `on.push.tags` filter matches `v*` only, and the guard compares the tag with
   `v${version}`. A bare `0.2.1` tag would neither trigger the workflow nor pass the check.
-- Keep [CHANGELOG.md](../CHANGELOG.md) up to date. Released sections (`## [0.2.0]`,
-  `## [0.2.1]`) are dated with their release date and stay unchanged; new work goes under
+- Keep [CHANGELOG.md](../CHANGELOG.md) up to date. Released sections (`## [0.2.0]` through
+  `## [0.5.0]`) are dated with their release date and stay unchanged; new work goes under
   `## [Unreleased]`.
 
 ## Checklist
@@ -269,5 +279,9 @@ account-wide token can overwrite every project you own.
 - [ ] `rm -rf dist && uv build --all-packages`, then `uv publish --dry-run "dist/*"`
 - [ ] Library published before the apps, uploads not interleaved
 - [ ] `uvx remote-server-mcp --help` and `uvx disk-health-mcp --help` resolve from PyPI
+- [ ] The image workflow published `ghcr.io/elmuz/server-mcp:vX.Y.Z` from the same commit;
+      record the digest in the release notes
+- [ ] `podman run --rm ghcr.io/elmuz/server-mcp@sha256:<digest> remote-server-mcp --help`
+      runs from the pinned digest, not only from the mutable tag
 - [ ] Live smoke checks re-run with the installed packages
 - [ ] Old repositories archived with a pointer to the monorepo

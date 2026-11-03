@@ -10,16 +10,25 @@
 
 ## 1. Install
 
-From a checkout:
+The shortest path for a trusted single-user setup is the published package:
+
+```bash
+uvx remote-server-mcp --help
+uvx disk-health-mcp --help
+```
+
+`uvx` resolves `server-management-lib` from PyPI. If the agent that calls the MCP server is
+not trusted, use the [container deployment](container.md) instead: it is the only setup where
+the MCP policy is a boundary, and a PyPI install does not provide its isolation, token
+middleware or audit guarantees.
+
+To work on the code, use a checkout:
 
 ```bash
 git clone https://github.com/elmuz/server-mcp.git
 cd server-mcp
 uv sync --all-packages --all-extras
 ```
-
-When the packages are published, `uvx remote-server-mcp` and `uvx disk-health-mcp` will be
-the shortest path. Until then use `uv run` from the workspace (see below).
 
 ## 2. Configure
 

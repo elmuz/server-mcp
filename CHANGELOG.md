@@ -6,8 +6,14 @@ versioning.
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-11-03
+
 ### Added
 
+- `get_influxdb_schema` (read-only) reports the InfluxDB tables (`SHOW TABLES`) or the
+  columns of one table (`SHOW COLUMNS`), so a query can be written against the real schema.
+  The statement is built by the client from a validated `table`/`schema.table` identifier,
+  so it is not a second query surface.
 - Streamable HTTP bearer tokens can be read from a file (`transport.token_file`,
   `MCP_HTTP_TOKEN_FILE`, `--http-token-file`). Token files must be regular, non-empty and
   not accessible by group/other; the file takes precedence over an inline token.
@@ -26,8 +32,22 @@ versioning.
 - `deploy/install.sh` creates the user config/state directories and token, installs the
   example configs and units, and leaves existing secrets untouched.
 
+### Changed
+
+- The InfluxDB file-scan hint is context-aware. A failing query that only reads `system`
+  tables no longer suggests `WHERE time`, which those tables do not have; for
+  `system.parquet_files` the hint names `min_time`/`max_time` (Int64 nanoseconds since the
+  epoch) instead.
+
 ### Fixed
 
+- `search_service_logs` and `get_container_health` mask credentials in the returned lines
+  and in the healthcheck probe output, and Docker error text goes through the same
+  redactor. Matching still runs on the raw line, so a pattern that redaction would hide is
+  still found.
+- `get_service_file` refuses bulk data dumps and archives (`.sql`, `.dump`, `.tar`, `.gz`,
+  `.tgz`, `.bz2`, `.xz`, `.zip`, `.7z`, `.rar`, `.bak`, `.sqlite`, `.sqlite3`) with the
+  explicit sensitive-file error. Ordinary logs, configs and dotenv files stay readable.
 - The container image builds its virtual environment at `/opt/venv`, so the
   `remote-server-mcp` and `disk-health-mcp` console-script shebangs resolve in the runtime
   image.
@@ -45,6 +65,8 @@ versioning.
 
 ### Documentation
 
+- `AGENTS.md` matches the 23-tool count, and `docs/tools.md` documents
+  `get_influxdb_schema`.
 - Added [docs/container.md](docs/container.md) with the image build, Quadlet install,
   network/token contract, verification and residual risks, and linked it from the README,
   getting-started guide, architecture, security model and modernization plan.

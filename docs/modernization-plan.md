@@ -21,8 +21,9 @@ removed). Earlier snapshots remain in git history.
   support (3.7). The author sandbox integration and the deployer/approval boundary are
   deployment work outside this repository. The remaining external prerequisites are the
   catafalco items in 3.5 and the host-side self-test privilege in 3.6.
-- **Last updated:** 2026-11-02 (records the 3.8 Phase 2 container runtime as complete, adds
-  3.9 release channel parity, and reconciles the implementation order in sections 5 and 8)
+- **Last updated:** 2026-11-03 (prepares and tags 0.5.0: the release-channel contract, the
+  one-image decision and the corrected release order. 2026-11-02: records the 3.8 Phase 2
+  container runtime as complete, adds 3.9 and reconciles sections 5 and 8)
 - **Plan retention:** this file remains the single backlog. Completed sections are kept as
   history because they carry live findings and verification evidence; extend the plan
   rather than replacing it with a second document.
@@ -1332,10 +1333,12 @@ while the other is broken or missing.
       job shared with `image.yml`) before any upload. The script already selects Docker or
       Podman (`CONTAINER_ENGINE` overrides it) and passes on both; only the workflow wiring
       remains.
-- [ ] **State the support contract.** In `README.md`, present the container/Quadlet
-      deployment as recommended and `uvx`/`uv` as the supported lower-isolation stdio/HTTP
-      option. In `docs/releasing.md`, record that one tag publishes PyPI and GHCR from the
-      same commit, and that release notes list the image digest next to the package version.
+- [x] **State the support contract.** `README.md` now opens the quick start with the channel
+      choice (container for an untrusted agent, checkout or `uvx` for a trusted single user)
+      and `docs/getting-started.md` no longer claims the packages are unpublished.
+      `docs/releasing.md` records that one tag publishes PyPI and GHCR from the same commit,
+      that the image is the recommended deployment, and that release notes carry the digest.
+      The `>=0.5,<0.6` library pin is documented as part of every version bump.
 - [ ] **Verify the fan-out in the release checklist.** For the next release, confirm the
       three PyPI packages and `ghcr.io/elmuz/server-mcp:vX.Y.Z` come from the same commit,
       and add the digest to the release notes.
@@ -1439,16 +1442,17 @@ uv build --all-packages
 
 | Check | Result |
 |---|---|
-| `server-management-lib` tests | 523 passed, 91.19% coverage (gate 90%) |
-| `remote-server-mcp` tests | 287 passed (+17 integration opt-in), 84.27% coverage (gate 60%) |
+| `server-management-lib` tests | 531 passed, 91.03% coverage (gate 90%) |
+| `remote-server-mcp` tests | 297 passed (+17 integration opt-in), 84.44% coverage (gate 60%) |
 | `disk-health-mcp` tests | 224 passed, 82.93% coverage (gate 65%) |
 | Python version used locally | 3.12.16 |
-| `ruff check`, `ruff format --check`, `ty check` | passing on the `0.4.0` tree |
-| `pre-commit run --all-files` | passing on the `0.4.0` tree (ruff, ty, per-package pytest, pymarkdown, link check) |
+| `ruff check`, `ruff format --check`, `ty check` | passing on the `0.5.0` tree |
+| `pre-commit run --all-files` | passing on the `0.5.0` tree (ruff, ty, per-package pytest, pymarkdown, link check) |
 | Remote CI | green through the `0.2.1` release and the post-release commits, Python 3.11–3.14 |
 | `uv build --all-packages` | all three wheels/sdists build, `py.typed` included; `dist/` is always rebuilt from scratch |
-| Package version | `0.4.0` in the four `pyproject.toml` files, the three `__version__` values, `uv.lock` and the newest `CHANGELOG.md` section |
-| PyPI | `0.4.0` on all three projects (publish run `39869621919`); `uvx` resolves the installed wheels |
+| Package version | `0.5.0` in the four `pyproject.toml` files, the three `__version__` values, `uv.lock` and the newest `CHANGELOG.md` section |
+| PyPI | `0.4.0` on all three projects (publish run `39869621919`); `0.5.0` is prepared and publishes on the tag |
+| Container image | `image.yml` builds and smoke-tests every change; GHCR publication is tag-only and has not run yet |
 
 ### 6.3 Live smoke checks (read-only)
 

@@ -77,6 +77,12 @@ opposite approach:
 
 Requires Python 3.11+ and [uv](https://docs.astral.sh/uv/).
 
+**Choose the channel first.** If the agent that calls the MCP server is not trusted, use the
+[container deployment](#container-deployment): separate trust domains are the only setup
+where the MCP policy is a security boundary. For a trusted single-user setup, install from a
+checkout (below) or with `uvx remote-server-mcp` / `uvx disk-health-mcp` from PyPI; a PyPI
+install does not add the container's isolation, token middleware or audit guarantees.
+
 ```bash
 git clone https://github.com/elmuz/server-mcp.git
 cd server-mcp
