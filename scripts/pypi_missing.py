@@ -56,7 +56,8 @@ def main(argv: list[str]) -> int:
     candidates = sorted(
         path
         for path in dist.iterdir()
-        if path.is_file() and path.name.startswith(f"{project.replace('-', '_')}-{version}")
+        if path.is_file()
+        and path.name.startswith(f"{project.replace('-', '_')}-{version}")
     )
     if not candidates:
         print(f"no {project} {version} artifacts in {dist}", file=sys.stderr)

@@ -119,9 +119,17 @@ jobs:
       # rejects it instead of skipping it. Publish only the artifacts PyPI does not
       # list yet, by filename; `--check-url` stays as a second guard. Re-running a
       # partial release is then idempotent and continues where it stopped.
+      # A workflow_dispatch run executes this file from the default branch but checks
+      # out the tag, so a tag created before the selector existed has no helper. Fall
+      # back to every artifact there, which is the pre-0.5.0 behavior.
       - name: Publish server-management-lib
         run: |
-          python3 scripts/pypi_missing.py server-management-lib > "$RUNNER_TEMP/missing.txt"
+          if [ -f scripts/pypi_missing.py ]; then
+            python3 scripts/pypi_missing.py server-management-lib > "$RUNNER_TEMP/missing.txt"
+          else
+            echo "::warning::scripts/pypi_missing.py is missing in this tag; publishing every artifact"
+            ls dist/server_management_lib-* > "$RUNNER_TEMP/missing.txt"
+          fi
           mapfile -t files < "$RUNNER_TEMP/missing.txt"
           if [ "${#files[@]}" -eq 0 ]; then echo "server-management-lib: already on PyPI"; exit 0; fi
           printf 'uploading %s\n' "${files[@]}"
@@ -129,7 +137,12 @@ jobs:
 
       - name: Publish remote-server-mcp
         run: |
-          python3 scripts/pypi_missing.py remote-server-mcp > "$RUNNER_TEMP/missing.txt"
+          if [ -f scripts/pypi_missing.py ]; then
+            python3 scripts/pypi_missing.py remote-server-mcp > "$RUNNER_TEMP/missing.txt"
+          else
+            echo "::warning::scripts/pypi_missing.py is missing in this tag; publishing every artifact"
+            ls dist/remote_server_mcp-* > "$RUNNER_TEMP/missing.txt"
+          fi
           mapfile -t files < "$RUNNER_TEMP/missing.txt"
           if [ "${#files[@]}" -eq 0 ]; then echo "remote-server-mcp: already on PyPI"; exit 0; fi
           printf 'uploading %s\n' "${files[@]}"
@@ -137,7 +150,12 @@ jobs:
 
       - name: Publish disk-health-mcp
         run: |
-          python3 scripts/pypi_missing.py disk-health-mcp > "$RUNNER_TEMP/missing.txt"
+          if [ -f scripts/pypi_missing.py ]; then
+            python3 scripts/pypi_missing.py disk-health-mcp > "$RUNNER_TEMP/missing.txt"
+          else
+            echo "::warning::scripts/pypi_missing.py is missing in this tag; publishing every artifact"
+            ls dist/disk_health_mcp-* > "$RUNNER_TEMP/missing.txt"
+          fi
           mapfile -t files < "$RUNNER_TEMP/missing.txt"
           if [ "${#files[@]}" -eq 0 ]; then echo "disk-health-mcp: already on PyPI"; exit 0; fi
           printf 'uploading %s\n' "${files[@]}"

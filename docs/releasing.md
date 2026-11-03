@@ -219,7 +219,9 @@ cheapest guard against an accidental release tag.
 
 - push a release tag: `git tag -s v0.2.1 -m "v0.2.1" && git push origin v0.2.1`;
 - or publish a tag that already exists: *Actions* → *Publish* → *Run workflow*, branch
-  `main`, `tag` = `v0.2.0`.
+  `main`, `tag` = `v0.2.0`. The workflow file comes from `main` but the tree comes from the
+  tag, so a tag created before `scripts/pypi_missing.py` existed falls back to uploading every
+  artifact, with a warning, exactly as it did before 0.5.0.
 
 The job checks out the tag, builds and smoke-tests the container image, verifies that the
 tag equals the version in all four `pyproject.toml` files (so a mistyped tag fails before any

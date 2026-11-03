@@ -1372,7 +1372,9 @@ itself passed.
 
 - [x] Publish by filename instead of by hash. `scripts/pypi_missing.py` lists the dist
       artifacts PyPI does not have, and each workflow step passes only those; `--check-url`
-      stays as the second guard. `docs/releasing.md` documents the retry procedure.
+      stays as the second guard. A dispatch against a tag created before the helper existed
+      falls back to every artifact with a warning, because the workflow file comes from
+      `main` while the tree comes from the tag. `docs/releasing.md` documents both paths.
 - [ ] Optional: build with `SOURCE_DATE_EPOCH=$(git log -1 --format=%ct)` so the wheels are
       reproducible too. Not needed for idempotent publishing, only for artifact-level
       verification.
