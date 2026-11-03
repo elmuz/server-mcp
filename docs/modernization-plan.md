@@ -15,13 +15,14 @@ removed). Earlier snapshots remain in git history.
   **Current release:** `v0.4.0` (signed, 2026-10-23) ships the serial-based disk identity
   (P1-19), the live-operation handover fixes in 3.6, the journal-time normalization and the
   structured error payloads. Publish run `39869621919` uploaded all three packages in
-  library→apps order, and `uvx --no-cache` resolves `0.4.0`. The container runtime for 3.8
-  is implemented; the remaining in-repo feature is multi-target support (3.7). The author
-  sandbox integration and the deployer/approval boundary are deployment work outside this
-  repository. The remaining external prerequisites are the catafalco items in 3.5 and the
-  host-side self-test privilege in 3.6.
-- **Last updated:** 2026-11-01 (implements the 3.8 Phase 2 container runtime, Quadlet units,
-  image CI, token-file transport and runtime checks)
+  library→apps order, and `uvx --no-cache` resolves `0.4.0`. The 3.8 Phase 2 container
+  runtime is implemented and CI-covered (image, Quadlet units, token-file transport,
+  `--check-config`); the next in-repo work is release channel parity (3.9), then multi-target
+  support (3.7). The author sandbox integration and the deployer/approval boundary are
+  deployment work outside this repository. The remaining external prerequisites are the
+  catafalco items in 3.5 and the host-side self-test privilege in 3.6.
+- **Last updated:** 2026-11-02 (records the 3.8 Phase 2 container runtime as complete, adds
+  3.9 release channel parity, and reconciles the implementation order in sections 5 and 8)
 - **Plan retention:** this file remains the single backlog. Completed sections are kept as
   history because they carry live findings and verification evidence; extend the plan
   rather than replacing it with a second document.
@@ -1271,6 +1272,9 @@ the MCP loads, the split provides no protection.
       MCP config/key or the Docker socket, verifies the MCP cannot read the author
       workspace, and checks the audit volume. Update `docs/configuration.md`,
       `docs/architecture.md`, `docs/security-model.md`, `README.md` and `CHANGELOG.md`.
+- **Partial:** `scripts/container-smoke.sh` already starts the image, exercises both entry
+  points, the token file, `--check-config` and the HTTP bearer-token middleware under Docker
+  and Podman. The author/MCP isolation directions are still verified by hand.
 
 #### Acceptance criteria
 
@@ -1302,9 +1306,61 @@ the MCP loads, the split provides no protection.
   commit is the boundary.
 - **Supply chain.** Pin image digests, build from the locked workspace, and publish the
   image only from CI. Do not let the author build the image the deployer trusts.
-- **Decision needed:** whether the MCP container is one image with two entry points or two
-  images; whether the deployer lives in this repository, the Ansible repository or a small
-  separate helper.
+- **Decided:** one image with two entry points (`remote-server-mcp` and `disk-health-mcp`),
+  because both servers share `server-management-lib` and the same hardening; Quadlet (not
+  Compose) is the shipped unit format. The deployer stays outside this repository
+  (Phase 4); `server-mcp` documents the contract only.
+
+### 3.9 Release channel parity (planned, 2026-11-02)
+
+#### Context
+
+The project ships two artifacts from one signed tag: the PyPI packages
+(`server-management-lib`, then the two apps) and the GHCR container image built from
+`container/Dockerfile`. The container deployment is the recommended security boundary; the
+PyPI install remains the supported stdio/host-run channel and the documented
+lower-isolation option, so `README.md` and `docs/harnesses.md` still show `uvx`.
+
+#### Decision
+
+Keep publishing all three packages. Do not collapse the project to a container-only support
+contract now. The release gate must cover both channels so a tag cannot publish one artifact
+while the other is broken or missing.
+
+- [ ] **Gate the image in the publish workflow.** Add the image build and
+      `scripts/container-smoke.sh` to `.github/workflows/publish.yml` (or factor a reusable
+      job shared with `image.yml`) before any upload. The script already selects Docker or
+      Podman (`CONTAINER_ENGINE` overrides it) and passes on both; only the workflow wiring
+      remains.
+- [ ] **State the support contract.** In `README.md`, present the container/Quadlet
+      deployment as recommended and `uvx`/`uv` as the supported lower-isolation stdio/HTTP
+      option. In `docs/releasing.md`, record that one tag publishes PyPI and GHCR from the
+      same commit, and that release notes list the image digest next to the package version.
+- [ ] **Verify the fan-out in the release checklist.** For the next release, confirm the
+      three PyPI packages and `ghcr.io/elmuz/server-mcp:vX.Y.Z` come from the same commit,
+      and add the digest to the release notes.
+
+#### Acceptance criteria
+
+- A failing image build or smoke test blocks the PyPI upload in the same workflow run.
+- One signed tag produces all three PyPI packages and the matching GHCR image from the same
+  commit, pinned by digest in the Quadlet examples.
+- The README names the recommended channel and the alternative without implying that a
+  PyPI install provides the container's isolation, token middleware or audit guarantees.
+- `scripts/container-smoke.sh` works under Docker (CI) and Podman (local).
+
+#### Deferred decision
+
+Dropping PyPI (container-only support) stays an option but is out of scope. If adopted,
+remove `publish.yml`, the `uvx` snippets and the stdio installation path from the docs in one
+change, and say so explicitly in the README.
+
+#### Risks
+
+- Version drift between the image digest and the PyPI version. The shared release gate and
+  the digest in the release notes are the guard.
+- A single gate lengthens the publish run; the image build is cached, so the cost is the
+  smoke test, not a cold rebuild.
 
 ## 4. Documentation drift
 
@@ -1350,10 +1406,12 @@ longer tracked here.
    blast radius of one process; do not deploy it next to an untrusted agent before the
    author sandbox integration (Phase 3) and end-to-end isolation checks (Phase 5). The
    Ansible deployer is a separate cross-repo workstream.
-4. **The next in-repo feature is multi-target support (3.7).** Start with 3.7 Phase 1
-   (config and registry), then Phase 2 (remote-server-mcp) and Phase 3 (disk-health-mcp),
-   keeping the single-target process as the default deployment. 3.8 Phase 3 and Phase 5
-   continue as deployment work.
+4. **The next in-repo work is release channel parity (3.9), then multi-target support
+   (3.7).** 3.9 first, because it closes the gap where one tag can publish the PyPI packages
+   and the container image from different states. For 3.7, start with Phase 1 (config and
+   registry), then Phase 2 (remote-server-mcp) and Phase 3 (disk-health-mcp), keeping the
+   single-target process as the default deployment. 3.8 Phase 3 and Phase 5 continue as
+   deployment work.
 5. **Remaining work is outside this repository:** the catafalco prerequisites in 3.5.
 6. **P2-15 is complete** (structured host/status data and SnapRAID parsing). The remaining
    open work is the catafalco host-side self-test privilege wrapper in 3.6.
@@ -1495,19 +1553,24 @@ label (for example `watchtower`, `wud`, `socket-proxy`) still need
   host shell. The fix is separate trust domains (3.8), not another confirmation prompt.
 - Do not add a generic `ansible-playbook` or deployment tool to `server-mcp`. Deployment is a
   separate, operator-approved operation on an approved commit.
+- The container image and the PyPI packages are released by the same signed tag. The image
+  is the recommended deployment; the `uvx`/`uv` install stays supported as the
+  lower-isolation stdio/HTTP channel, and the one image carries both entry points.
 - The first published release is `0.2.0`. A version that was never tagged or published is
   not a release, so post-`50de082` fixes are folded into it rather than published as
   `0.2.1`/`0.3.0`. From `0.2.0` onward, released sections are immutable.
 
 ## 8. Resume instructions
 
-1. The in-repo backlog is complete except multi-target support in 3.7. The container
-   runtime for 3.8 Phase 2 is implemented; the author sandbox integration, deployer and
-   end-to-end isolation checks remain deployment work. The remaining open work outside this
-   repository is the catafalco prerequisites in 3.5.
-2. For new in-repo work, start with 3.7 (multi-target). The 3.8 Phase 2 runtime is done;
-   Phase 3 (author sandbox) and Phase 5 (isolation verification) are deployment work. Add
-   new items to section 3 with a checkbox that names the file or area to change.
+1. The in-repo backlog is complete except release channel parity in 3.9 and multi-target
+   support in 3.7, in that order. The 3.8 Phase 2 container runtime is implemented; the
+   author sandbox integration, deployer and end-to-end isolation checks remain deployment
+   work. The remaining open work outside this repository is the catafalco prerequisites in
+   3.5.
+2. For new in-repo work, the next item is 3.9 (release channel parity), then 3.7
+   (multi-target). The 3.8 Phase 2 runtime is done; Phase 3 (author sandbox) and Phase 5
+   (isolation verification) are deployment work. Add new items to section 3 with a checkbox
+   that names the file or area to change.
 3. Read the relevant code/doc section before editing; keep the security model in
    `docs/security-model.md` intact.
 4. Add or update tests in the same PR (P0 items require regression tests).
