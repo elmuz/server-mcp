@@ -52,8 +52,10 @@ image format and will be ignored`. That is expected: container health is defined
 `podman build --format docker` only if you need the Dockerfile health check embedded in
 the image.
 
-Release images are published to GHCR by `.github/workflows/image.yml`. The workflow prints
-the image digest. Pin that digest in the Quadlet `Image=` lines instead of using a mutable
+Release images are published to GHCR by `.github/workflows/image.yml`, from the same tag that
+publishes the PyPI packages; `.github/workflows/publish.yml` runs the same build and smoke
+test before its first upload, so a broken image blocks the release. The workflow prints the
+image digest. Pin that digest in the Quadlet `Image=` lines instead of using a mutable
 tag:
 
 ```ini

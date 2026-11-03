@@ -1328,11 +1328,10 @@ Keep publishing all three packages. Do not collapse the project to a container-o
 contract now. The release gate must cover both channels so a tag cannot publish one artifact
 while the other is broken or missing.
 
-- [ ] **Gate the image in the publish workflow.** Add the image build and
-      `scripts/container-smoke.sh` to `.github/workflows/publish.yml` (or factor a reusable
-      job shared with `image.yml`) before any upload. The script already selects Docker or
-      Podman (`CONTAINER_ENGINE` overrides it) and passes on both; only the workflow wiring
-      remains.
+- [x] **Gate the image in the publish workflow.** `.github/workflows/publish.yml` now has a
+      `container` job that builds `container/Dockerfile` and runs
+      `scripts/container-smoke.sh` on the release tag, and `publish` needs it. GHCR
+      publication stays in `image.yml`; the smoke script still selects Docker or Podman.
 - [x] **State the support contract.** `README.md` now opens the quick start with the channel
       choice (container for an untrusted agent, checkout or `uvx` for a trusted single user)
       and `docs/getting-started.md` no longer claims the packages are unpublished.

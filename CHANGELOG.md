@@ -6,6 +6,12 @@ versioning.
 
 ## [Unreleased]
 
+### Changed
+
+- The publish workflow builds and smoke-tests the release image before the first PyPI
+  upload, so a tag cannot publish packages while the image is broken. GHCR publication stays
+  in `image.yml`, from the same tag.
+
 ## [0.5.0] - 2026-11-03
 
 ### Added

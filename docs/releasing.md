@@ -105,9 +105,10 @@ uv run --project /path/to/server-mcp --package remote-server-mcp remote-server-m
 [image.yml](../.github/workflows/image.yml). The image is the recommended deployment; the
 `uvx` install is the supported lower-isolation stdio/HTTP option, and it does not provide the
 container's isolation, token middleware or audit guarantees. Release notes list the package
-version and the digest of the image built from the same commit. The two workflows are still
-independent: a failing image build does not block the PyPI upload (tracked as 3.9 in the
-[plan](modernization-plan.md)).
+version and the digest of the image built from the same commit. `publish.yml` builds and
+smoke-tests that image before the first upload (`publish` needs the `container` job), so a tag
+cannot publish packages while the image build is broken; GHCR publication itself stays in
+`image.yml`.
 
 ### 1. Pre-flight
 
