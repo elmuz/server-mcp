@@ -201,6 +201,12 @@ rejected by the middleware. It uses Docker in CI and Podman on a rootless host; 
   outside both containers.
 - **The author can exfiltrate its own credentials.** Provider and GitHub tokens are mounted
   into the author sandbox by design. Use disposable, narrowly scoped tokens.
+- **A shared writable workspace is not a trust boundary.** The sandbox mounts the project
+  read-write. If the operator runs host `pi`, tests, build, deploy or git hooks in that same
+  checkout later, files written by the agent execute on the host. This includes
+  `.pi/mcp.json`, `.pi/extensions`, `AGENTS.md`, `.git/hooks`, build metadata and scripts;
+  ignored files such as `.pi/` do not appear in `git diff`. Use a separate sandbox clone and
+  approved commits until workspace isolation is implemented.
 - **Docker/Podman shares the host kernel.** A runtime or kernel escape defeats the split.
   Use a VM or a separate machine for fully hostile code.
 - **The transport has one shared token.** It is not a multi-user auth system and has no

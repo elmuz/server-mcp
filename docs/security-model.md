@@ -263,6 +263,14 @@ model cannot choose the transport or the token.
   `compose_up` and `compose_down` within the rate limit. `confirm=true` is a model-supplied
   safety interlock, not a human approval. If service disruption must be prevented, add a
   read-only profile or an approval step outside the author container.
+- **The author workspace and a host checkout can be the same writable tree.** The container
+  keeps the agent away from host credentials during the session, but it does not protect
+  files the operator later executes on the host. An untrusted agent can write
+  `.pi/mcp.json`, `.pi/extensions`, `AGENTS.md`, git hooks, test configuration, build
+  metadata or scripts into the shared checkout. Running host `pi`, tests, build, deploy or
+  `pre-commit` from that checkout then runs agent-controlled files as the host user, and
+  ignored files such as `.pi/` do not appear in `git diff`. Use a separate sandbox clone
+  and approved commits, or review every changed and ignored file before host execution.
 - **Containers need a service directory or an allowlist entry.** A service directory
   resolves to its containers through the `com.docker.compose.project` label (with a
   same-name fallback). A standalone container that has no directory under `services_path`

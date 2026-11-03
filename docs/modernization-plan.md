@@ -1270,6 +1270,14 @@ the MCP loads, the split provides no protection.
       read-write, no host home, no SSH keys, no vault password, no Docker socket, restricted
       egress and the MCP endpoint as the only control-plane destination. Client-specific
       setup stays in `docs/harnesses.md`; root docs stay harness-agnostic.
+- [ ] **Phase 3b — isolate the sandbox workspace.** The current `pi-sandbox` mounts the
+      project directory read-write, so an untrusted author can plant files that a host-side
+      process later executes: `.pi/mcp.json`, `.pi/extensions`, `AGENTS.md`, git hooks, test
+      configuration, build metadata and scripts. Ignored paths such as `.pi/` do not appear
+      in `git diff`. Add a disposable clone or ephemeral workspace copy for sandbox
+      sessions, or make the host checkout read-only when the sandbox runs. Until then,
+      document the interim rule: never run host `pi`, tests, build, deploy or `pre-commit`
+      in a checkout an untrusted sandbox has written to without a separate review.
 - [ ] **Phase 4 — deployer and approval.** If Ansible deployment is added, build it as a
       separate deployer, not as a `server-mcp` tool. The deployer reads only an approved
       commit, maps service names to fixed tags, runs the fixed playbook from a clean
@@ -1313,6 +1321,10 @@ the MCP loads, the split provides no protection.
 - **Deployer scope.** Ansible roles are code execution as root, not just file edits. Do not
   let the author container write the playbook or role that the deployer runs. The approved
   commit is the boundary.
+- **Shared writable workspace.** The author sandbox and the host development checkout can
+  be the same directory. The container prevents direct host access during the session, but
+  it cannot prevent the operator from later executing agent-written files in that checkout
+  as the host user. Treat the sandbox workspace as untrusted output until Phase 3b lands.
 - **Supply chain.** Pin image digests, build from the locked workspace, and publish the
   image only from CI. Do not let the author build the image the deployer trusts.
 - **Decided:** one image with two entry points (`remote-server-mcp` and `disk-health-mcp`),

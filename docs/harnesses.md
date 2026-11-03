@@ -57,6 +57,67 @@ bind. See [configuration.md](configuration.md#transport).
 
 ## pi
 
+Pi has two distinct modes in this repository:
+
+- **Host development.** `pi` runs on the host with the repository mounted
+  directly. Use stdio MCP entries so the agent can edit the code, read
+  `~/.config/server-mcp/`, inspect systemd/Podman logs and debug the real
+  deployment. This is a trusted-operator environment, not a security boundary.
+- **Sandbox validation.** `pi-sandbox` runs the agent in a container. It uses
+  the internal `pi-control` endpoints and must not see the host config, SSH key
+  or Docker socket.
+
+The two modes use different files:
+
+```text
+.pi/mcp.json          host development (stdio or loopback)
+.pi/mcp.sandbox.json  sandbox (mcp-remote / mcp-disk on pi-control)
+```
+
+`pi-sandbox` prefers `.pi/mcp.sandbox.json` and mounts it read-only over
+`.pi/mcp.json` inside the container. A host-run `pi` reads `.pi/mcp.json` and
+never the sandbox file. Both files are local to the checkout and ignored by
+`.gitignore`.
+
+> **Shared-workspace warning.** The sandbox mounts the workspace read-write. Do
+> not later run host `pi`, tests, build, deploy or git hooks in a checkout that
+> an untrusted sandbox has written to. The agent can edit `.pi/mcp.json`,
+> `.pi/extensions`, `AGENTS.md`, git hooks, build metadata and scripts, and
+> ignored files such as `.pi/` do not appear in `git diff`. Use a separate
+> sandbox clone and approved commits, or review every changed and ignored file
+> before host execution. See the open gap in
+> [modernization-plan.md](modernization-plan.md#risks-and-open-questions).
+
+The host development entries run the server as a stdio child of Pi and override
+only the container-specific paths from the installed host config:
+
+```json
+{
+  "mcpServers": {
+    "remote-server": {
+      "command": "uv",
+      "args": [
+        "run", "--project", ".", "--package", "remote-server-mcp",
+        "remote-server-mcp", "--transport", "stdio"
+      ],
+      "cwd": "~/code/server-mcp",
+      "env": {
+        "REMOTE_SERVER_MCP_CONFIG": "${HOME}/.config/server-mcp/remote.yaml",
+        "MCP_HTTP_TOKEN_FILE": "${HOME}/.config/server-mcp/secrets/http-token",
+        "SSH_KEY_PATH": "${HOME}/.config/server-mcp/ssh/id_ed25519",
+        "SSH_KNOWN_HOSTS": "${HOME}/.config/server-mcp/known_hosts",
+        "AUDIT_LOG_PATH": "${HOME}/.local/state/server-mcp/remote.jsonl"
+      }
+    }
+  }
+}
+```
+
+The disk server uses the same pattern with `DISK_HEALTH_MCP_CONFIG`,
+`disk-health-mcp` and `disk.jsonl`. This lets the host process use the installed
+configuration while writing audit records to the host state directory. The
+sandbox file keeps the container endpoints and `${MCP_TOKEN}`.
+
 User-level:
 
 ```bash
