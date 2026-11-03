@@ -12,18 +12,20 @@ removed). Earlier snapshots remain in git history.
   the stale-SMART and short-credential-key fixes. `v0.2.1` was published by
   `.github/workflows/publish.yml` through PyPI trusted publishing with no stored token
   (run `39507146796`), so the steady-state release path is verified.
-  **Current release:** `v0.4.0` (signed, 2026-10-23) ships the serial-based disk identity
-  (P1-19), the live-operation handover fixes in 3.6, the journal-time normalization and the
-  structured error payloads. Publish run `39869621919` uploaded all three packages in
-  library→apps order, and `uvx --no-cache` resolves `0.4.0`. The 3.8 Phase 2 container
-  runtime is implemented and CI-covered (image, Quadlet units, token-file transport,
-  `--check-config`); the next in-repo work is release channel parity (3.9), then multi-target
-  support (3.7). The author sandbox integration and the deployer/approval boundary are
+  **Current release:** `v0.5.0` (signed, 2026-11-03, on `0968abe`) ships the 3.8 Phase 2
+  container runtime (image, Quadlet units, `deploy/install.sh`, token-file transport,
+  `--check-config`), the InfluxDB schema tool and the redaction/dump-refusal fixes. Publish
+  run `41553210132` uploaded all three packages in library→apps order, the image run
+  `41553210242` published `ghcr.io/elmuz/server-mcp:v0.5.0` (index digest
+  `sha256:1f6854eb5949445f80022bee5c55524e570a26c8c5b5e291c4365f610c968c0c`), and
+  `uvx --no-cache` resolves `0.5.0` for both servers. The next in-repo work is multi-target
+  support (3.7); 3.9 release channel parity is now complete except its documentation
+  follow-through. The author sandbox integration and the deployer/approval boundary are
   deployment work outside this repository. The remaining external prerequisites are the
   catafalco items in 3.5 and the host-side self-test privilege in 3.6.
-- **Last updated:** 2026-11-03 (prepares and tags 0.5.0: the release-channel contract, the
-  one-image decision and the corrected release order. 2026-11-02: records the 3.8 Phase 2
-  container runtime as complete, adds 3.9 and reconciles sections 5 and 8)
+- **Last updated:** 2026-11-03 (records the verified `0.5.0` release on both channels and
+  closes 3.9. 2026-11-03, earlier: prepares and tags `0.5.0`. 2026-11-02: the 3.8 Phase 2
+  container runtime, 3.9 and the corrected release order)
 - **Plan retention:** this file remains the single backlog. Completed sections are kept as
   history because they carry live findings and verification evidence; extend the plan
   rather than replacing it with a second document.
@@ -903,6 +905,12 @@ complete; the one host-side prerequisite remains in catafalco.
       redaction. Built from a clean `dist/`, published by the trusted-publishing workflow
       (run `39852335149`) in library→apps order, and verified with `uvx` and installed-package
       smoke calls.
+- [x] **`v0.5.0`.** Signed annotated tag on `0968abe`
+      (`chore(release): 0.5.0`). Bumped the library pin to `>=0.5,<0.6` in both apps before
+      the tag, so the published wheels resolve. `uv publish --dry-run` checked all six
+      artifacts, publish run `41553210132` uploaded library→apps, and image run
+      `41553210242` published `ghcr.io/elmuz/server-mcp:v0.5.0`. `uvx --no-cache`
+      installs `0.5.0` for both servers.
 - [x] **`v0.4.0`.** Signed annotated tag on `37ae9dc` with the live-operation handover fixes,
       journal-time normalization, structured errors and the corrected host-unit defaults.
       The trusted-publishing workflow (run `39869621919`) uploaded all three packages in
@@ -1338,9 +1346,12 @@ while the other is broken or missing.
       `docs/releasing.md` records that one tag publishes PyPI and GHCR from the same commit,
       that the image is the recommended deployment, and that release notes carry the digest.
       The `>=0.5,<0.6` library pin is documented as part of every version bump.
-- [ ] **Verify the fan-out in the release checklist.** For the next release, confirm the
-      three PyPI packages and `ghcr.io/elmuz/server-mcp:vX.Y.Z` come from the same commit,
-      and add the digest to the release notes.
+- [x] **Verify the fan-out in the release checklist.** `v0.5.0` (commit `0968abe`) published
+      all three PyPI packages (run `41553210132`) and
+      `ghcr.io/elmuz/server-mcp:v0.5.0` (run `41553210242`, index digest
+      `sha256:1f6854eb5949445f80022bee5c55524e570a26c8c5b5e291c4365f610c968c0c`) from the
+      same commit. The digest is recorded here and in `docs/releasing.md`; `git describe`
+      on the release commit prints the tag.
 
 #### Acceptance criteria
 
@@ -1401,9 +1412,10 @@ longer tracked here.
    through P2-15). The serial-identity work (P1-19), the canonical device vocabulary
    (P1-20) and the structured-output depth (P2-15) landed through `0.4.0`. The container
    runtime (3.8 Phase 2) is implemented in the current tree.
-2. **Release:** `0.4.0` followed the steady-state path in `docs/releasing.md`: clean build,
-   signed tag, trusted-publishing workflow, then the live smoke checks in 6.3 with the
-   installed packages. The next release uses the same path.
+2. **Release:** `0.5.0` followed the steady-state path in `docs/releasing.md`: clean build,
+   `uv publish --dry-run`, signed tag, trusted-publishing workflow, then the live smoke checks
+   in 6.3 with the installed packages. The next release uses the same path, and now also
+   gates on a successful image build and smoke test (3.9).
 3. **The 3.8 Phase 2 MCP runtime has landed.** Multi-target support (3.7) increases the
    blast radius of one process; do not deploy it next to an untrusted agent before the
    author sandbox integration (Phase 3) and end-to-end isolation checks (Phase 5). The
@@ -1450,8 +1462,8 @@ uv build --all-packages
 | Remote CI | green through the `0.2.1` release and the post-release commits, Python 3.11–3.14 |
 | `uv build --all-packages` | all three wheels/sdists build, `py.typed` included; `dist/` is always rebuilt from scratch |
 | Package version | `0.5.0` in the four `pyproject.toml` files, the three `__version__` values, `uv.lock` and the newest `CHANGELOG.md` section |
-| PyPI | `0.4.0` on all three projects (publish run `39869621919`); `0.5.0` is prepared and publishes on the tag |
-| Container image | `image.yml` builds and smoke-tests every change; GHCR publication is tag-only and has not run yet |
+| PyPI | `0.5.0` on all three projects (publish run `41553210132`); `uvx --no-cache` resolves both servers |
+| Container image | `ghcr.io/elmuz/server-mcp:v0.5.0`, built by run `41553210242`; index digest `sha256:1f6854eb…68c0c` |
 
 ### 6.3 Live smoke checks (read-only)
 

@@ -186,10 +186,14 @@ token has to exist at all: PyPI trusts one specific workflow in a public reposit
 OIDC, and [`.github/workflows/publish.yml`](../.github/workflows/publish.yml) implements it.
 Keep the manual path only as a fallback (§6).
 
-**Verified with `v0.2.1`** (run `39507146796`), **`v0.3.0`** (run `39852335149`) **and
-`v0.4.0`** (run `39869621919`): pushing the signed tag was the only manual step, the job
-passed the tag/version check, tests and all three uploads, and no `UV_PUBLISH_TOKEN` existed
-on the runner or in the repository.
+**Verified with `v0.2.1`** (run `39507146796`), **`v0.3.0`** (run `39852335149`),
+**`v0.4.0`** (run `39869621919`) **and `v0.5.0`** (run `41553210132`): pushing the signed tag
+was the only manual step, the job passed the tag/version check, tests and all three uploads,
+and no `UV_PUBLISH_TOKEN` existed on the runner or in the repository. `v0.5.0` also exercised
+the image gate: run `41553210242` published
+`ghcr.io/elmuz/server-mcp:v0.5.0` (index digest
+`sha256:1f6854eb5949445f80022bee5c55524e570a26c8c5b5e291c4365f610c968c0c`) from the same
+commit.
 
 **Register the publisher** (once per project) in PyPI → the project → *Publishing* → *Add a
 publisher*, configured as:
