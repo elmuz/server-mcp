@@ -113,12 +113,32 @@ jobs:
         run: uv build --all-packages
 
       # Dependency order matters: the apps require server-management-lib>=0.5,<0.6.
-      # --check-url makes a re-run skip files that already uploaded.
+      #
+      # The sdists are not byte-reproducible, so a rebuild of an already published
+      # version has a different hash for the same filename and `--check-url`
+      # rejects it instead of skipping it. Publish only the artifacts PyPI does not
+      # list yet, by filename; `--check-url` stays as a second guard. Re-running a
+      # partial release is then idempotent and continues where it stopped.
       - name: Publish server-management-lib
-        run: uv publish --trusted-publishing always --check-url https://pypi.org/simple/ "dist/server_management_lib-*"
+        run: |
+          python3 scripts/pypi_missing.py server-management-lib > "$RUNNER_TEMP/missing.txt"
+          mapfile -t files < "$RUNNER_TEMP/missing.txt"
+          if [ "${#files[@]}" -eq 0 ]; then echo "server-management-lib: already on PyPI"; exit 0; fi
+          printf 'uploading %s\n' "${files[@]}"
+          uv publish --trusted-publishing always --check-url https://pypi.org/simple/ "${files[@]}"
 
       - name: Publish remote-server-mcp
-        run: uv publish --trusted-publishing always --check-url https://pypi.org/simple/ "dist/remote_server_mcp-*"
+        run: |
+          python3 scripts/pypi_missing.py remote-server-mcp > "$RUNNER_TEMP/missing.txt"
+          mapfile -t files < "$RUNNER_TEMP/missing.txt"
+          if [ "${#files[@]}" -eq 0 ]; then echo "remote-server-mcp: already on PyPI"; exit 0; fi
+          printf 'uploading %s\n' "${files[@]}"
+          uv publish --trusted-publishing always --check-url https://pypi.org/simple/ "${files[@]}"
 
       - name: Publish disk-health-mcp
-        run: uv publish --trusted-publishing always --check-url https://pypi.org/simple/ "dist/disk_health_mcp-*"
+        run: |
+          python3 scripts/pypi_missing.py disk-health-mcp > "$RUNNER_TEMP/missing.txt"
+          mapfile -t files < "$RUNNER_TEMP/missing.txt"
+          if [ "${#files[@]}" -eq 0 ]; then echo "disk-health-mcp: already on PyPI"; exit 0; fi
+          printf 'uploading %s\n' "${files[@]}"
+          uv publish --trusted-publishing always --check-url https://pypi.org/simple/ "${files[@]}"

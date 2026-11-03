@@ -1362,6 +1362,21 @@ while the other is broken or missing.
   PyPI install provides the container's isolation, token middleware or audit guarantees.
 - `scripts/container-smoke.sh` works under Docker (CI) and Podman (local).
 
+#### Follow-up (2026-11-03)
+
+Re-dispatching `publish.yml` against the released `v0.5.0` tag, to exercise the image gate,
+failed at the first upload: `uv publish --check-url` reported "Local file and index file do
+not match" for the wheel, because a rebuild is not byte-identical (setuptools stamps archive
+timestamps; `SOURCE_DATE_EPOCH` makes the wheels reproducible, not the sdists). The gate
+itself passed.
+
+- [x] Publish by filename instead of by hash. `scripts/pypi_missing.py` lists the dist
+      artifacts PyPI does not have, and each workflow step passes only those; `--check-url`
+      stays as the second guard. `docs/releasing.md` documents the retry procedure.
+- [ ] Optional: build with `SOURCE_DATE_EPOCH=$(git log -1 --format=%ct)` so the wheels are
+      reproducible too. Not needed for idempotent publishing, only for artifact-level
+      verification.
+
 #### Deferred decision
 
 Dropping PyPI (container-only support) stays an option but is out of scope. If adopted,

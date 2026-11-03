@@ -155,9 +155,13 @@ unset UV_PUBLISH_TOKEN
 
 - Publish sequentially and **stop at the first failure**. A partial release is recoverable;
   a version that half-exists on PyPI and cannot be installed is not.
-- If a run fails after some files were accepted, retry with
-  `--check-url https://pypi.org/simple/` so already-uploaded files are skipped instead of
-  rejected as duplicates.
+- If a run fails after some files were accepted, select the missing artifacts by filename
+  and publish only those:
+  `python3 scripts/pypi_missing.py <project>` prints nothing when the release is complete.
+  Do **not** rely on `--check-url` alone: the sdists are not byte-reproducible, so a rebuild
+  of the same version hashes differently and `uv` aborts with "Local file and index file do
+  not match" instead of skipping. The workflow uses the same script, so re-running a partial
+  release continues where it stopped.
 - `--token "$UV_PUBLISH_TOKEN"` is equivalent; `uv` derives the username from the token, so
   no `~/.pypirc` is required.
 - The token is a publishing credential. Never write it into the repository, a
@@ -217,10 +221,12 @@ cheapest guard against an accidental release tag.
 - or publish a tag that already exists: *Actions* → *Publish* → *Run workflow*, branch
   `main`, `tag` = `v0.2.0`.
 
-The job checks out the tag, verifies that the tag equals the version in all four
-`pyproject.toml` files (so a mistyped tag fails before any upload), runs the test suite,
-then publishes the library and the two apps in that order with `--check-url` so a re-run
-skips files that were already uploaded.
+The job checks out the tag, builds and smoke-tests the container image, verifies that the
+tag equals the version in all four `pyproject.toml` files (so a mistyped tag fails before any
+upload), runs the test suite, then publishes the library and the two apps in that order.
+Each upload step passes only the artifacts PyPI does not list yet
+(`scripts/pypi_missing.py`), so a re-run of a partially published release continues instead
+of failing on a hash mismatch; `--check-url` stays as the second guard.
 
 **No token is stored.** The job requests an OIDC token (`id-token: write`) and PyPI returns
 an upload token scoped to that single run; `uv publish --trusted-publishing always` uses it
