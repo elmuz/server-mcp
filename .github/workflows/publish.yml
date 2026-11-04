@@ -67,6 +67,21 @@ jobs:
         with:
           ref: ${{ inputs.tag || github.ref }}
 
+      # workflow_dispatch executes this file from the default branch but checks out
+      # the requested tag, so a tag created before scripts/pypi_missing.py existed
+      # has no selector. Running the old "publish every artifact" fallback is unsafe
+      # for an already published version: rebuilds are not byte-reproducible, so
+      # --check-url sees a different hash for the same filename and aborts. Take the
+      # selector from the default branch instead, and never move the tag.
+      - name: Add the PyPI artifact selector for tags that predate it
+        if: ${{ !hashFiles('scripts/pypi_missing.py') }}
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          path: helper
+          sparse-checkout: scripts/pypi_missing.py
+          sparse-checkout-cone-mode: false
+
       - name: Install uv
         uses: astral-sh/setup-uv@v10.3.3
 
@@ -98,6 +113,15 @@ jobs:
       - name: Install the workspace
         run: uv sync --locked --all-packages --all-extras
 
+      - name: Resolve the PyPI artifact selector
+        run: |
+          selector=scripts/pypi_missing.py
+          if [ ! -f "$selector" ]; then
+            selector=helper/scripts/pypi_missing.py
+          fi
+          test -f "$selector" || { echo "::error::$selector not found"; exit 1; }
+          echo "PYPI_SELECTOR=$selector" >> "$GITHUB_ENV"
+
       # PyPI uploads cannot be replaced, so the release gate runs the suite itself
       # instead of trusting a parallel CI run.
       - name: Lint, type check and test
@@ -114,22 +138,15 @@ jobs:
 
       # Dependency order matters: the apps require server-management-lib>=0.5,<0.6.
       #
-      # The sdists are not byte-reproducible, so a rebuild of an already published
-      # version has a different hash for the same filename and `--check-url`
+      # The wheels and sdists are not byte-reproducible, so a rebuild of an already
+      # published version has a different hash for the same filename and `--check-url`
       # rejects it instead of skipping it. Publish only the artifacts PyPI does not
       # list yet, by filename; `--check-url` stays as a second guard. Re-running a
-      # partial release is then idempotent and continues where it stopped.
-      # A workflow_dispatch run executes this file from the default branch but checks
-      # out the tag, so a tag created before the selector existed has no helper. Fall
-      # back to every artifact there, which is the pre-0.5.0 behavior.
+      # partial release is then idempotent and continues where it stopped, and a
+      # re-run of a finished release uploads nothing and exits 0.
       - name: Publish server-management-lib
         run: |
-          if [ -f scripts/pypi_missing.py ]; then
-            python3 scripts/pypi_missing.py server-management-lib > "$RUNNER_TEMP/missing.txt"
-          else
-            echo "::warning::scripts/pypi_missing.py is missing in this tag; publishing every artifact"
-            ls dist/server_management_lib-* > "$RUNNER_TEMP/missing.txt"
-          fi
+          python3 "$PYPI_SELECTOR" server-management-lib > "$RUNNER_TEMP/missing.txt"
           mapfile -t files < "$RUNNER_TEMP/missing.txt"
           if [ "${#files[@]}" -eq 0 ]; then echo "server-management-lib: already on PyPI"; exit 0; fi
           printf 'uploading %s\n' "${files[@]}"
@@ -137,12 +154,7 @@ jobs:
 
       - name: Publish remote-server-mcp
         run: |
-          if [ -f scripts/pypi_missing.py ]; then
-            python3 scripts/pypi_missing.py remote-server-mcp > "$RUNNER_TEMP/missing.txt"
-          else
-            echo "::warning::scripts/pypi_missing.py is missing in this tag; publishing every artifact"
-            ls dist/remote_server_mcp-* > "$RUNNER_TEMP/missing.txt"
-          fi
+          python3 "$PYPI_SELECTOR" remote-server-mcp > "$RUNNER_TEMP/missing.txt"
           mapfile -t files < "$RUNNER_TEMP/missing.txt"
           if [ "${#files[@]}" -eq 0 ]; then echo "remote-server-mcp: already on PyPI"; exit 0; fi
           printf 'uploading %s\n' "${files[@]}"
@@ -150,12 +162,7 @@ jobs:
 
       - name: Publish disk-health-mcp
         run: |
-          if [ -f scripts/pypi_missing.py ]; then
-            python3 scripts/pypi_missing.py disk-health-mcp > "$RUNNER_TEMP/missing.txt"
-          else
-            echo "::warning::scripts/pypi_missing.py is missing in this tag; publishing every artifact"
-            ls dist/disk_health_mcp-* > "$RUNNER_TEMP/missing.txt"
-          fi
+          python3 "$PYPI_SELECTOR" disk-health-mcp > "$RUNNER_TEMP/missing.txt"
           mapfile -t files < "$RUNNER_TEMP/missing.txt"
           if [ "${#files[@]}" -eq 0 ]; then echo "disk-health-mcp: already on PyPI"; exit 0; fi
           printf 'uploading %s\n' "${files[@]}"
