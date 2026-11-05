@@ -102,7 +102,7 @@ def _load_known_hosts(path: Path) -> str | bytes:
     if not kept:
         raise SSHConfigurationError(
             f"No usable host keys in {path}. Remove legacy entries or regenerate "
-            "the file with ssh-keyscan."
+            "the file with a verified ssh-keyscan flow."
         )
     logger.info(
         "Loaded %d known_hosts entries from %s (%d skipped)",
@@ -160,9 +160,10 @@ class SSHManager(ExecutorBase):
         path = Path(str(value)).expanduser()
         if not path.exists():
             raise SSHConfigurationError(
-                f"SSH known_hosts file not found: {path}. Add the host key first "
-                f"(ssh-keyscan -H <host> >> {path}) or set ssh.known_hosts to "
-                "'none' to disable verification (insecure)."
+                f"SSH known_hosts file not found: {path}. Add a verified host key "
+                "first (scan to a temporary file, check the fingerprint with "
+                "ssh-keygen -lf, compare it with the host console, then append) or "
+                "set ssh.known_hosts to 'none' to disable verification (insecure)."
             )
         return _load_known_hosts(path)
 

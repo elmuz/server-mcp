@@ -203,6 +203,11 @@ Host key verification is on by default. If a known_hosts file contains legacy or
 entries that modern cryptography cannot parse, only those lines are skipped and the rest of
 the file is still enforced.
 
+Populate `known_hosts` with an authenticated key. `ssh-keyscan` retrieves a key but does not
+authenticate it, so scan to a temporary file, check the fingerprint with `ssh-keygen -lf`,
+compare it with the value from the host console or inventory, and only then append it. Keep
+verification enabled afterwards; see [getting-started.md](getting-started.md#2-configure).
+
 ## Security
 
 `services_path` is the only directory the service tools may touch. Every service is a

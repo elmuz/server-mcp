@@ -19,6 +19,11 @@ versioning.
 
 ### Changed
 
+- Bootstrap documentation now requires authenticating the SSH host key before it is added
+  to `known_hosts`: scan to a temporary file, check the fingerprint with `ssh-keygen -lf`,
+  compare it with the host console or inventory, then append. `ssh-keyscan` output is no
+  longer presented as sufficient on its own, and the missing-known_hosts error points to
+  the verified flow.
 - The publish workflow builds and smoke-tests the release image before the first PyPI
   upload, so a tag cannot publish packages while the image is broken. GHCR publication stays
   in `image.yml`, from the same tag.

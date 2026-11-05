@@ -434,7 +434,10 @@ class TestConnectionSecurity:
         }
         manager = SSHManager(config, security)
 
-        with pytest.raises(SSHConfigurationError, match="known_hosts file not found"):
+        with pytest.raises(
+            SSHConfigurationError,
+            match=r"known_hosts file not found.*verified host key",
+        ):
             manager.build_connect_kwargs()
 
     def test_known_hosts_skips_unparseable_entries(

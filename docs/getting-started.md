@@ -67,6 +67,20 @@ security:
 With `executor: local` the SSH section is not used. Docker and disk tools run as the user
 that started the MCP process; grant only the permissions that user needs.
 
+Populate `known_hosts` with an authenticated host key, not with whatever the first
+connection returns. Scan to a temporary file, check the fingerprint, compare it with the
+value shown on the host console or in your inventory, and only then append it:
+
+```bash
+ssh-keyscan -H server.example.com > /tmp/server.hostkey
+ssh-keygen -lf /tmp/server.hostkey
+# Compare the SHA256 fingerprint with the host console, then:
+cat /tmp/server.hostkey >> ~/.ssh/known_hosts
+```
+
+Keep host key verification enabled afterwards. The container flow is the same; see
+[container.md](container.md#install).
+
 Config is looked up in this order:
 
 1. `--config PATH`
@@ -153,7 +167,7 @@ risks.
 | Symptom | Check |
 |---|---|
 | Server exits with code 2 | No config found; pass `--config` or set the config env var |
-| `known_hosts file not found` | Add the host key: `ssh-keyscan -H HOST >> ~/.ssh/known_hosts` |
+| `known_hosts file not found` | Add a verified host key: scan to a temporary file, check `ssh-keygen -lf`, compare with the host console, then append (see [Configure](#2-configure)) |
 | `Permission denied (publickey)` | `ssh -v HOST true`, check `key_path` and agent |
 | `smartctl` permission errors | Give the executor user block-device access (for example the `disk` group) or use InfluxDB; the MCP does not use sudo |
 | `Unknown service or container` | Use `list_services()` and `list_containers()`; containers outside `services_path` must be added to `security.allowed_containers` |

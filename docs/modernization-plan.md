@@ -1519,14 +1519,19 @@ maintainability and supply-chain polish. None of these is a known wrong tool res
 
 #### R5 P1 — authenticate SSH host keys at bootstrap
 
+- [x] **Done (2026-11-06).** The container, getting-started, configuration and security
+      docs, the example `known_hosts`, the installer next steps and the missing-file error
+      now require scanning to a temporary file, checking the fingerprint with
+      `ssh-keygen -lf`, comparing it with the host console or inventory, and only then
+      appending. No doc presents `ssh-keyscan >> known_hosts` as sufficient.
 - [ ] **Problem.** `docs/container.md` and `docs/getting-started.md` tell operators to
       append `ssh-keyscan` output to `known_hosts`. That retrieves a key but does not
       authenticate it, so a first-connection MITM can establish the trusted key.
-- [ ] **Change.** Document a verified flow: scan to a temporary file, inspect with
+- [x] **Change.** Document a verified flow: scan to a temporary file, inspect with
       `ssh-keygen -lf`, compare the fingerprint with a value from the host console or
       inventory, and only then append. Keep host-key verification enabled afterwards. Add
       the same note wherever `known_hosts` is populated.
-- [ ] **Acceptance.** No doc presents `ssh-keyscan >> known_hosts` as sufficient on its own;
+- [x] **Acceptance.** No doc presents `ssh-keyscan >> known_hosts` as sufficient on its own;
       the troubleshooting entry also points to the verification step.
 
 #### R6 P1 — make installer `--force` safe

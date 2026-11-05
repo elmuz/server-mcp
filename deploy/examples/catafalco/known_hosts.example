@@ -1,6 +1,13 @@
 # SSH known_hosts for the target.
 #
-# Populate this file on the host before starting the units:
-#   ssh-keyscan -H catafalco.example.com >> ~/.config/server-mcp/known_hosts
+# Populate this file on the host before starting the units, with a key you
+# have authenticated. Do not append ssh-keyscan output blindly: scan to a
+# temporary file, check the fingerprint, compare it with the value from the
+# host console or inventory, and only then append it.
 #
-# Do not disable host key verification.
+#   ssh-keyscan -H catafalco.example.com > /tmp/catafalco.hostkey
+#   ssh-keygen -lf /tmp/catafalco.hostkey
+#   # Compare the SHA256 fingerprint with the host console, then:
+#   cat /tmp/catafalco.hostkey >> ~/.config/server-mcp/known_hosts
+#
+# Keep host key verification enabled. Do not set known_hosts to "none".

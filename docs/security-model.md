@@ -175,6 +175,12 @@ modern cryptography cannot parse are skipped individually with a warning; verifi
 stays enabled for every other host. Disabling verification requires an explicit
 `known_hosts: "none"` and logs a warning.
 
+Bootstrap is the one moment verification cannot protect itself: a key fetched over the
+first connection is not yet trusted. The setup docs therefore require scanning to a
+temporary file, checking the fingerprint with `ssh-keygen -lf`, and comparing it with the
+host console or inventory before appending it to `known_hosts`. `ssh-keyscan` output is
+never presented as sufficient on its own.
+
 The optional `ssh_tunnel` block for InfluxDB and Prometheus uses the same verified SSH
 settings. The local listener must be a loopback address (never `0.0.0.0`), and the remote
 host/port are operator configuration, not model input. Tunnels are opened at server

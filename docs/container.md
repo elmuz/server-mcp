@@ -96,6 +96,9 @@ After installing:
    cat /tmp/catafalco.hostkey >> ~/.config/server-mcp/known_hosts
    ```
 
+   Keep host key verification enabled afterwards. `ssh-keyscan` only retrieves a key;
+   the fingerprint comparison is what authenticates it.
+
 4. Review `~/.config/server-mcp/egress-policy.conf`. It is default-deny and is
    rendered from `remote.yaml`/`disk.yaml` when first installed. Add only the
    destinations the tools need.
