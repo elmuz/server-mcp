@@ -2,8 +2,8 @@
 
 Single source of truth for the Server MCP suite. This document merges the former
 modernization backlog, the live-deployment findings from the `catafalco` host, and the
-2026-10-19 architecture/security review (`docs/next-phase-plan.md` is merged here and
-removed). Earlier snapshots remain in git history.
+2026-10-19 architecture/security review. `docs/next-phase-plan.md` is a short current
+handoff to this plan, not a separate backlog. Earlier snapshots remain in git history.
 
 - **Status:** the releases are out. `v0.2.0` (signed, on `9901974`) and `v0.2.1` (signed, on
   `2a5de15`) are tags pushed to `origin`, and all three packages are published on PyPI at
