@@ -203,7 +203,11 @@ authorization.
 
 All executor output, file contents and HTTP responses pass through `sanitize_output`:
 ANSI/OSC escapes and control characters are stripped, and the result is capped at
-`output.max_bytes` (64 KiB by default). Composite and listing responses (service files,
+`output.max_bytes` (64 KiB by default). The cap is applied while collecting, not only
+after capture: command stdout/stderr are read concurrently through a shared byte budget
+that drains the rest without retaining it, and HTTP bodies are consumed in chunks before
+JSON/text decoding. A command or endpoint that emits hundreds of megabytes therefore
+cannot exhaust the MCP process. Composite and listing responses (service files,
 server health, host-service logs, storage summaries and the full disk report) get a final
 cap over the complete response, not only per command. Truncation is idempotent at the same
 limit, so a nested cap appends a single marker. This limits context flooding and reduces the

@@ -26,7 +26,7 @@ from .base import (
     RemotePathError,
     is_within,
 )
-from .output import sanitize_output
+from .output import BoundedCollector, sanitize_output, truncation_marker
 from .security import SecurityValidator
 
 logger = logging.getLogger(__name__)
@@ -279,22 +279,40 @@ class SSHManager(ExecutorBase):
 
         started = time.monotonic()
         try:
-            result = await self.connection.run(
-                command,
-                check=False,
-                timeout=timeout,
-            )
+            # Stream the process output instead of buffering it in asyncssh.
+            # The collector keeps at most max_output_bytes in memory and drains
+            # the rest, so a chatty command cannot exhaust the MCP process.
+            process = await self.connection.create_process(command, encoding=None)
+            collector = BoundedCollector(self.max_output_bytes)
 
-            output: str = ""
-            if result.stdout:
-                output += str(result.stdout)
-            if result.stderr:
+            async def _collect() -> tuple[bytes, bytes]:
+                stdout, stderr = await asyncio.gather(
+                    collector.read(process.stdout),
+                    collector.read(process.stderr),
+                )
+                await process.wait()
+                return stdout, stderr
+
+            try:
+                stdout, stderr = await asyncio.wait_for(_collect(), timeout=timeout)
+            except TimeoutError:
+                process.kill()
+                await process.wait()
+                self.audit.log("command_timeout", command=command, timeout=timeout)
+                return f"❌ Command timed out after {timeout}s"
+
+            exit_status = process.exit_status
+            output = stdout.decode("utf-8", errors="replace")
+            error_output = stderr.decode("utf-8", errors="replace")
+            if error_output:
                 if output:
                     output += "\n--- STDERR ---\n"
-                output += str(result.stderr)
+                output += error_output
 
-            if result.exit_status != 0:
-                output += f"\n\n⚠️ Exit code: {result.exit_status}"
+            if exit_status != 0:
+                output += f"\n\n⚠️ Exit code: {exit_status}"
+            if collector.truncated:
+                output += truncation_marker("command output", self.max_output_bytes)
 
             sanitized = sanitize_output(
                 output, self.max_output_bytes, label="command output"
@@ -302,10 +320,10 @@ class SSHManager(ExecutorBase):
             self.audit.log(
                 "command",
                 command=command,
-                exit_status=result.exit_status,
+                exit_status=exit_status,
                 duration_ms=round((time.monotonic() - started) * 1000, 1),
                 output_bytes=len(output.encode("utf-8")),
-                truncated=sanitized != output,
+                truncated=collector.truncated or sanitized != output,
             )
             return sanitized
         except (asyncssh.ConnectionLost, asyncssh.DisconnectError) as e:

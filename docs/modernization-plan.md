@@ -21,11 +21,12 @@ snapshots remain in git history.
   `41553210242` published `ghcr.io/elmuz/server-mcp:v0.5.0` (index digest
   `sha256:1f6854eb5949445f80022bee5c55524e570a26c8c5b5e291c4365f610c968c0c`), and
   `uvx --no-cache` resolves `0.5.0` for both servers. 3.9 release channel parity is
-  complete. The next in-repo work is the review hardening in 3.10 (R3/R4 next), then
+  complete. The next in-repo work is the review hardening in 3.10 (R4 next), then
   multi-target support (3.7). The author sandbox integration and the deployer/approval
   boundary are deployment work outside this repository. The remaining external prerequisites
   are the catafalco items in 3.5 and the host-side self-test privilege in 3.6.
-- **Last updated:** 2026-11-05 (lands R1/R2: internal `mcp-egress` plus a default-deny
+- **Last updated:** 2026-11-05 (lands R3: bounded collection in the executors and HTTP
+  clients; earlier the same day landed R1/R2: internal `mcp-egress` plus a default-deny
   policy proxy, and automated author/MCP isolation checks; triages the post-`0.5.0` review
   into 3.10, moves review records to `docs/reviews/`, and removes the
   `next-phase-plan.md` handoff. 2026-11-03:
@@ -1476,16 +1477,24 @@ maintainability and supply-chain polish. None of these is a known wrong tool res
 
 #### R3 P1 — bound bytes while collecting, not only after capture
 
-- [ ] **Problem.** `local_executor.py` uses `process.communicate()` and
-      `ssh_manager.py` uses `connection.run()` before `sanitize_output()`; HTTP clients
-      decode JSON/text before applying the cap. The cap protects the model, not the MCP
-      process: a command or response that emits hundreds of megabytes is fully retained.
-- [ ] **Change.** Read stdout/stderr concurrently and retain at most `max_output_bytes`,
+- [x] **Done (2026-11-05).** `output.BoundedCollector` shares one byte budget across
+      stdout/stderr, retains at most `max_output_bytes` and drains the rest. The local
+      executor reads both pipes concurrently instead of `communicate()`; the SSH executor
+      uses `create_process(..., encoding=None)` and the same collector instead of
+      `connection.run()`. The HTTP clients consume `aiohttp.StreamReader` in chunks before
+      JSON/text decoding and return a clear "exceeded the N-byte output limit" message when
+      a body is capped. Tests cover oversized stdout, stderr, SSH output and JSON/text HTTP
+      responses.
+- [x] **Problem.** `local_executor.py` used `process.communicate()` and `ssh_manager.py`
+      used `connection.run()` before `sanitize_output()`; HTTP clients decoded JSON/text
+      before applying the cap. The cap protected the model, not the MCP process: a command
+      or response that emitted hundreds of megabytes was fully retained.
+- [x] **Change.** Read stdout/stderr concurrently and retain at most `max_output_bytes`,
       marking truncation. For SSH, use a streaming process/channel API with the same bound.
       For aiohttp, enforce a response-byte limit while consuming chunks, before JSON
-      decoding. On reaching the cap, either drain without retaining or cancel the operation.
-      Keep timeout and SQL row limits as separate controls.
-- [ ] **Acceptance.** Tests cover oversized stdout, oversized stderr, oversized SSH output
+      decoding. On reaching the cap, drain without retaining. Keep timeout and SQL row
+      limits as separate controls.
+- [x] **Acceptance.** Tests cover oversized stdout, oversized stderr, oversized SSH output
       and oversized JSON/text HTTP responses; peak retention stays near the configured cap.
       This must land before multi-target 3.7 Phase 2, which multiplies concurrent calls.
 
@@ -1618,7 +1627,8 @@ longer tracked here.
    Ansible deployer is a separate cross-repo workstream.
 4. **The next in-repo work is the rest of the 2026-11-05 review hardening (3.10), then
    multi-target support (3.7).** 3.9 is complete. R1/R2 (real, tested egress and author/MCP
-   boundaries) are done; land R3/R4 (bounded collection and honest redaction) next; R5/R6
+   boundaries) are done; R3 (bounded collection) is done, so land R4 (honest redaction)
+   next; R5/R6
    before the next container release, R7/R8 as maintenance. 3.7 Phase 1 may run in parallel,
    but do not deploy 3.7 next to an untrusted author before 3.8 Phases 3/3b are done. Keep
    the single-target process as the default deployment.

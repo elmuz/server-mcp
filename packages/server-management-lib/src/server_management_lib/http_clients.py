@@ -16,7 +16,11 @@ import sqlparse
 from sqlparse import tokens as sql_tokens
 
 from .audit import AuditLogger
-from .output import DEFAULT_MAX_OUTPUT_BYTES, sanitize_output
+from .output import (
+    DEFAULT_MAX_OUTPUT_BYTES,
+    BoundedCollector,
+    sanitize_output,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -201,10 +205,21 @@ class InfluxDBClient:
                 timeout=self.timeout,
             ) as response:
                 if response.status == 200:
+                    body, truncated = await _read_body(
+                        response, self.max_output_bytes, as_json=True
+                    )
+                    if truncated:
+                        self._log_audit(
+                            sql_query,
+                            db,
+                            response.status,
+                            started,
+                            error="response_too_large",
+                        )
+                        return _too_large_message("InfluxDB", self.max_output_bytes)
                     try:
-                        data = await response.json()
+                        data = json.loads(body)
                     except (aiohttp.ContentTypeError, ValueError):
-                        body = await response.text()
                         if _looks_like_html(response, body):
                             self._log_audit(
                                 sql_query,
@@ -233,7 +248,9 @@ class InfluxDBClient:
                     self._log_audit(sql_query, db, response.status, started)
                     return f"✅ Query successful\n\n{formatted}"
                 else:
-                    body = await response.text()
+                    body, _ = await _read_body(
+                        response, self.max_output_bytes, as_json=False
+                    )
                     if _looks_like_html(response, body):
                         self._log_audit(
                             sql_query,
@@ -383,10 +400,20 @@ class PrometheusClient:
                 timeout=self.timeout,
             ) as response:
                 if response.status == 200:
+                    body, truncated = await _read_body(
+                        response, self.max_output_bytes, as_json=True
+                    )
+                    if truncated:
+                        self._log_audit(
+                            promql,
+                            response.status,
+                            started,
+                            error="response_too_large",
+                        )
+                        return _too_large_message("Prometheus", self.max_output_bytes)
                     try:
-                        data = await response.json()
+                        data = json.loads(body)
                     except (aiohttp.ContentTypeError, ValueError):
-                        body = await response.text()
                         if _looks_like_html(response, body):
                             self._log_audit(
                                 promql, response.status, started, error="html_response"
@@ -422,7 +449,9 @@ class PrometheusClient:
                             f"Error: {error_msg}"
                         )
                 else:
-                    body = await response.text()
+                    body, _ = await _read_body(
+                        response, self.max_output_bytes, as_json=False
+                    )
                     if _looks_like_html(response, body):
                         self._log_audit(
                             promql, response.status, started, error="html_response"
@@ -480,10 +509,17 @@ class PrometheusClient:
                 url, headers=headers, timeout=self.timeout
             ) as response:
                 if response.status == 200:
+                    body, truncated = await _read_body(
+                        response, self.max_output_bytes, as_json=True
+                    )
+                    if truncated:
+                        self._log_targets(
+                            response.status, started, error="response_too_large"
+                        )
+                        return _too_large_message("Prometheus", self.max_output_bytes)
                     try:
-                        data = await response.json()
+                        data = json.loads(body)
                     except (aiohttp.ContentTypeError, ValueError):
-                        body = await response.text()
                         if _looks_like_html(response, body):
                             self._log_targets(
                                 response.status, started, error="html_response"
@@ -520,7 +556,9 @@ class PrometheusClient:
                     self._log_targets("unexpected_response", started)
                     return f"❌ Unexpected response: {json.dumps(data, indent=2)}"
 
-                body = await response.text()
+                body, _ = await _read_body(
+                    response, self.max_output_bytes, as_json=False
+                )
                 if _looks_like_html(response, body):
                     self._log_targets(response.status, started, error="html_response")
                     return _html_response_message(
@@ -577,6 +615,38 @@ def _content_type(response: object) -> str:
     """Return the declared content type when the response exposes one."""
     value = getattr(response, "content_type", None)
     return value if isinstance(value, str) else ""
+
+
+async def _read_body(
+    response: object, limit: int, *, as_json: bool
+) -> tuple[str, bool]:
+    """Read a response body, retaining at most ``limit`` bytes.
+
+    Real aiohttp responses expose a :class:`aiohttp.StreamReader`, so the body
+    is consumed in chunks and never fully buffered. Non-streaming response
+    objects (test doubles) fall back to the aiohttp convenience readers.
+    """
+    content = getattr(response, "content", None)
+    if isinstance(content, aiohttp.StreamReader):
+        collector = BoundedCollector(limit)
+        data = await collector.read(content)
+        return data.decode("utf-8", errors="replace"), collector.truncated
+
+    if as_json:
+        try:
+            payload = await response.json()
+        except (aiohttp.ContentTypeError, ValueError):
+            return await response.text(), False
+        return json.dumps(payload), False
+    return await response.text(), False
+
+
+def _too_large_message(service: str, limit: int) -> str:
+    """Explain that a response was capped before it could be parsed."""
+    return (
+        f"❌ {service} response exceeded the {limit}-byte output limit. "
+        "Narrow the query or raise output.max_bytes."
+    )
 
 
 def _looks_like_html(response: object, body: str) -> bool:

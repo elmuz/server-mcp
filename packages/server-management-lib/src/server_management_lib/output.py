@@ -30,6 +30,45 @@ def strip_ansi(text: str) -> str:
     return ANSI_ESCAPE_PATTERN.sub("", text)
 
 
+def truncation_marker(label: str, max_bytes: int) -> str:
+    """Return the marker appended when output is capped at ``max_bytes``."""
+    return f"\n… [{label} truncated to {max_bytes} bytes]"
+
+
+class BoundedCollector:
+    """Collect at most ``limit`` bytes from one or more async byte streams.
+
+    The budget is shared across streams, so stdout and stderr together cannot
+    exceed the cap. Bytes beyond the cap are drained but not retained, which
+    keeps the process memory bounded even when a command emits gigabytes.
+    A non-positive limit disables the bound, matching :func:`sanitize_output`.
+    """
+
+    def __init__(self, limit: int):
+        self.limit = int(limit)
+        self.remaining = self.limit if self.limit > 0 else None
+        self.truncated = False
+
+    async def read(self, stream) -> bytes:
+        """Read ``stream`` to EOF, retaining at most the shared budget."""
+        chunks: list[bytes] = []
+        while True:
+            chunk = await stream.read(65536)
+            if not chunk:
+                break
+            if self.remaining is None:
+                chunks.append(chunk)
+            elif self.remaining > 0:
+                keep = chunk[: self.remaining]
+                chunks.append(keep)
+                self.remaining -= len(keep)
+                if len(keep) < len(chunk):
+                    self.truncated = True
+            else:
+                self.truncated = True
+        return b"".join(chunks)
+
+
 def sanitize_output(
     text: str,
     max_bytes: int = DEFAULT_MAX_OUTPUT_BYTES,
@@ -58,4 +97,4 @@ def sanitize_output(
         return cleaned
 
     truncated = encoded[:max_bytes].decode("utf-8", errors="ignore")
-    return f"{truncated}\n… [{label} truncated to {max_bytes} bytes]"
+    return f"{truncated}{truncation_marker(label, max_bytes)}"

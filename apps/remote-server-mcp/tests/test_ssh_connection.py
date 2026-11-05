@@ -11,13 +11,49 @@ Run with:
 
 import asyncio
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
 from remote_server_mcp import server as mcp_server
 from server_management_lib import SecurityValidator, load_config
 from server_management_lib.ssh_manager import SSHManager
+
+
+class _FakeReader:
+    def __init__(self, data: bytes):
+        self._data = data
+
+    async def read(self, size: int = -1) -> bytes:
+        if not self._data:
+            return b""
+        if size < 0:
+            chunk, self._data = self._data, b""
+            return chunk
+        chunk, self._data = self._data[:size], self._data[size:]
+        return chunk
+
+
+class _FakeProcess:
+    def __init__(self, stdout: bytes = b"", stderr: bytes = b"", exit_status: int = 0):
+        self.stdout = _FakeReader(stdout)
+        self.stderr = _FakeReader(stderr)
+        self.exit_status = exit_status
+
+    async def wait(self):
+        return None
+
+    def kill(self):
+        return None
+
+
+def _fake_process(stdout="", stderr="", exit_status=0):
+    return _FakeProcess(
+        stdout.encode() if isinstance(stdout, str) else stdout,
+        stderr.encode() if isinstance(stderr, str) else stderr,
+        exit_status,
+    )
+
 
 # ============================================================================
 # Fixtures
@@ -230,7 +266,7 @@ class TestSSHManagerMock:
 
             # Mock the connection
             mock_connection = AsyncMock()
-            mock_connection.run.return_value = MagicMock(
+            mock_connection.create_process.return_value = _fake_process(
                 stdout="test output", stderr="", exit_status=0
             )
             manager.connection = mock_connection
@@ -239,7 +275,7 @@ class TestSSHManagerMock:
 
             assert "test output" in result
             # Verify the command was executed
-            mock_connection.run.assert_called_once()
+            mock_connection.create_process.assert_called_once()
 
         asyncio.run(run_test())
 
@@ -251,7 +287,7 @@ class TestSSHManagerMock:
             manager._connected = True
 
             mock_connection = AsyncMock()
-            mock_connection.run.return_value = MagicMock(
+            mock_connection.create_process.return_value = _fake_process(
                 stdout="partial output", stderr="error message", exit_status=1
             )
             manager.connection = mock_connection
@@ -272,7 +308,7 @@ class TestSSHManagerMock:
             manager._connected = True
 
             mock_connection = AsyncMock()
-            mock_connection.run.side_effect = TimeoutError(30)
+            mock_connection.create_process.side_effect = TimeoutError(30)
             manager.connection = mock_connection
 
             result = await manager.execute_safe_command("docker ps")

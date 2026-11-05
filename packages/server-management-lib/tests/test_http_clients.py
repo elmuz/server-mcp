@@ -1220,3 +1220,96 @@ class TestTimeFilterHintAccuracy:
             )
             is True
         )
+
+
+def _streaming_response(status, body, content_type="application/json"):
+    """Build a response whose body is a real aiohttp StreamReader."""
+    response = MagicMock()
+    response.status = status
+    response.content_type = content_type
+    reader = aiohttp.StreamReader(MagicMock(), 2**16)
+    reader.feed_data(body)
+    reader.feed_eof()
+    response.content = reader
+    return response
+
+
+def _streaming_session(response):
+    mock_cm = AsyncMock()
+    mock_cm.__aenter__ = AsyncMock(return_value=response)
+    mock_cm.__aexit__ = AsyncMock(return_value=None)
+    session = MagicMock()
+    session.post.return_value = mock_cm
+    session.get.return_value = mock_cm
+    return session
+
+
+class TestStreamingResponseBounds:
+    """Real aiohttp bodies are consumed in chunks and capped before parsing."""
+
+    def _query(self, client, query, status, body, content_type="application/json"):
+        async def run():
+            response = _streaming_response(status, body, content_type)
+            session = _streaming_session(response)
+            with patch(
+                "server_management_lib.http_clients.aiohttp.ClientSession",
+                return_value=session,
+            ):
+                return await client.query(query)
+
+        return asyncio.run(run())
+
+    def test_influxdb_oversized_json_is_refused(self):
+        client = InfluxDBClient(
+            host="localhost", database="testdb", max_output_bytes=100
+        )
+        body = json.dumps([{"value": "x" * 10_000}]).encode()
+        result = self._query(client, "SELECT * FROM cpu", 200, body)
+        assert "exceeded the 100-byte output limit" in result
+        assert "Query successful" not in result
+
+    def test_influxdb_normal_streaming_json_parses(self):
+        client = InfluxDBClient(host="localhost", database="testdb")
+        body = json.dumps([{"time": "2024-01-01"}]).encode()
+        result = self._query(client, "SELECT * FROM cpu", 200, body)
+        assert "Query successful" in result
+        assert "2024-01-01" in result
+
+    def test_prometheus_oversized_json_is_refused(self):
+        client = PrometheusClient(host="localhost", max_output_bytes=100)
+        body = json.dumps(
+            {"status": "success", "data": {"result": ["x" * 10_000]}}
+        ).encode()
+        result = self._query(client, "up", 200, body)
+        assert "exceeded the 100-byte output limit" in result
+        assert "Query successful" not in result
+
+    def test_prometheus_targets_oversized_json_is_refused(self):
+        client = PrometheusClient(host="localhost", max_output_bytes=100)
+        body = json.dumps(
+            {
+                "status": "success",
+                "data": {"activeTargets": [{"labels": {"job": "x" * 10_000}}]},
+            }
+        ).encode()
+
+        async def run():
+            response = _streaming_response(200, body)
+            session = _streaming_session(response)
+            with patch(
+                "server_management_lib.http_clients.aiohttp.ClientSession",
+                return_value=session,
+            ):
+                return await client.get_targets()
+
+        result = asyncio.run(run())
+        assert "exceeded the 100-byte output limit" in result
+
+    def test_influxdb_oversized_error_body_is_capped(self):
+        client = InfluxDBClient(
+            host="localhost", database="testdb", max_output_bytes=100
+        )
+        body = b"error " * 10_000
+        result = self._query(client, "SELECT * FROM cpu", 500, body, "text/plain")
+        assert "InfluxDB query failed (HTTP 500)" in result
+        assert len(result.encode("utf-8")) < 500

@@ -21,7 +21,7 @@ from .base import (
     RemotePathError,
     is_within,
 )
-from .output import sanitize_output
+from .output import BoundedCollector, sanitize_output, truncation_marker
 
 logger = logging.getLogger(__name__)
 
@@ -90,10 +90,19 @@ class LocalExecutor(ExecutorBase):
             self.audit.log("command_error", command=command, error=str(e))
             return f"❌ Error executing command: {e}"
 
-        try:
-            stdout, stderr = await asyncio.wait_for(
-                process.communicate(), timeout=timeout
+        assert process.stdout is not None and process.stderr is not None
+        collector = BoundedCollector(self.max_output_bytes)
+
+        async def _collect() -> tuple[bytes, bytes]:
+            stdout, stderr = await asyncio.gather(
+                collector.read(process.stdout),
+                collector.read(process.stderr),
             )
+            await process.wait()
+            return stdout, stderr
+
+        try:
+            stdout, stderr = await asyncio.wait_for(_collect(), timeout=timeout)
         except TimeoutError:
             process.kill()
             await process.wait()
@@ -106,6 +115,8 @@ class LocalExecutor(ExecutorBase):
             output += ("\n--- STDERR ---\n" if output else "") + error_output
         if process.returncode:
             output += f"\n\n⚠️ Exit code: {process.returncode}"
+        if collector.truncated:
+            output += truncation_marker("command output", self.max_output_bytes)
 
         sanitized = sanitize_output(
             output, self.max_output_bytes, label="command output"
@@ -117,7 +128,7 @@ class LocalExecutor(ExecutorBase):
             exit_status=process.returncode,
             duration_ms=round((time.monotonic() - started) * 1000, 1),
             output_bytes=len(output.encode("utf-8")),
-            truncated=sanitized != output,
+            truncated=collector.truncated or sanitized != output,
         )
         return sanitized
 

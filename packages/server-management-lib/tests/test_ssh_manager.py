@@ -23,6 +23,45 @@ from server_management_lib.security import SecurityValidator
 from server_management_lib.ssh_manager import SSHManager
 
 
+class _FakeReader:
+    """Minimal async byte stream for the bounded collector."""
+
+    def __init__(self, data: bytes):
+        self._data = data
+
+    async def read(self, size: int = -1) -> bytes:
+        if not self._data:
+            return b""
+        if size < 0:
+            chunk, self._data = self._data, b""
+            return chunk
+        chunk, self._data = self._data[:size], self._data[size:]
+        return chunk
+
+
+class _FakeProcess:
+    """Stand-in for an asyncssh process with byte streams."""
+
+    def __init__(self, stdout: bytes = b"", stderr: bytes = b"", exit_status: int = 0):
+        self.stdout = _FakeReader(stdout)
+        self.stderr = _FakeReader(stderr)
+        self.exit_status = exit_status
+
+    async def wait(self):
+        return None
+
+    def kill(self):
+        return None
+
+
+def _fake_process(stdout="", stderr="", exit_status=0):
+    return _FakeProcess(
+        stdout.encode() if isinstance(stdout, str) else stdout,
+        stderr.encode() if isinstance(stderr, str) else stderr,
+        exit_status,
+    )
+
+
 class TestSSHManagerInit:
     """Test SSHManager initialization."""
 
@@ -97,7 +136,7 @@ class TestSSHManagerCommandExecution:
             manager._connected = True
 
             mock_conn = AsyncMock()
-            mock_conn.run.return_value = MagicMock(
+            mock_conn.create_process.return_value = _fake_process(
                 stdout="hello", stderr="", exit_status=0
             )
             manager.connection = mock_conn
@@ -157,7 +196,7 @@ class TestSSHManagerCommandExecution:
             manager._connected = True
 
             mock_conn = AsyncMock()
-            mock_conn.run.return_value = MagicMock(
+            mock_conn.create_process.return_value = _fake_process(
                 stdout="stdout output", stderr="stderr output", exit_status=0
             )
             manager.connection = mock_conn
@@ -177,7 +216,7 @@ class TestSSHManagerCommandExecution:
             manager._connected = True
 
             mock_conn = AsyncMock()
-            mock_conn.run.return_value = MagicMock(
+            mock_conn.create_process.return_value = _fake_process(
                 stdout="output", stderr="", exit_status=1
             )
             manager.connection = mock_conn
@@ -197,7 +236,7 @@ class TestSSHManagerCommandExecution:
             manager._connected = True
 
             mock_conn = AsyncMock()
-            mock_conn.run.side_effect = Exception("SSH connection lost")
+            mock_conn.create_process.side_effect = Exception("SSH connection lost")
             manager.connection = mock_conn
 
             with patch.object(manager.security, "is_command_safe", return_value=True):
@@ -217,12 +256,81 @@ class TestSSHManagerCommandExecution:
             manager._connected = True
 
             mock_conn = AsyncMock()
-            mock_conn.run.side_effect = TimeoutError()
+            mock_conn.create_process.side_effect = TimeoutError()
             manager.connection = mock_conn
 
             with patch.object(manager.security, "is_command_safe", return_value=True):
                 result = await manager.execute_safe_command("command", timeout=10)
                 assert "timed out" in result
+
+        asyncio.run(run())
+
+    def test_command_timeout_after_process_start(self, config, security):
+        """A process that starts but never finishes is killed and reported."""
+
+        class SlowProcess(_FakeProcess):
+            def __init__(self):
+                super().__init__()
+                self.killed = False
+
+            async def wait(self):
+                if not self.killed:
+                    await asyncio.sleep(10)
+                return None
+
+            def kill(self):
+                self.killed = True
+
+        async def run():
+            manager = SSHManager(config, security)
+            manager._connected = True
+            mock_conn = AsyncMock()
+            mock_conn.create_process.return_value = SlowProcess()
+            manager.connection = mock_conn
+
+            with patch.object(manager.security, "is_command_safe", return_value=True):
+                result = await manager.execute_safe_command("command", timeout=0.01)
+            assert "timed out" in result
+
+        asyncio.run(run())
+
+    def test_stderr_only_output(self, config, security):
+        """stderr is reported even when stdout is empty."""
+
+        async def run():
+            manager = SSHManager(config, security)
+            manager._connected = True
+            mock_conn = AsyncMock()
+            mock_conn.create_process.return_value = _fake_process(
+                stdout="", stderr="only stderr", exit_status=0
+            )
+            manager.connection = mock_conn
+
+            with patch.object(manager.security, "is_command_safe", return_value=True):
+                result = await manager.execute_safe_command("command")
+            assert result == "only stderr"
+
+        asyncio.run(run())
+
+    def test_oversized_output_is_bounded(self, config, security):
+        """A chatty command must not be fully retained in memory."""
+
+        async def run():
+            manager = SSHManager(config, security)
+            manager._connected = True
+            manager.max_output_bytes = 100
+
+            mock_conn = AsyncMock()
+            mock_conn.create_process.return_value = _fake_process(
+                stdout="x" * 10_000, stderr="", exit_status=0
+            )
+            manager.connection = mock_conn
+
+            with patch.object(manager.security, "is_command_safe", return_value=True):
+                result = await manager.execute_safe_command("echo hi")
+
+            assert "truncated to 100 bytes" in result
+            assert len(result.encode("utf-8")) < 200
 
         asyncio.run(run())
 
@@ -237,7 +345,9 @@ class TestSSHManagerServiceCheck:
 
             mock_conn = AsyncMock()
             # check_service_exists runs: test -d /srv/{service}
-            mock_conn.run.return_value = MagicMock(stdout="", stderr="", exit_status=0)
+            mock_conn.create_process.return_value = _fake_process(
+                stdout="", stderr="", exit_status=0
+            )
             manager.connection = mock_conn
 
             result = await manager.check_service_exists("myapp")
@@ -251,7 +361,9 @@ class TestSSHManagerServiceCheck:
             manager._connected = True
 
             mock_conn = AsyncMock()
-            mock_conn.run.return_value = MagicMock(stdout="", stderr="", exit_status=1)
+            mock_conn.create_process.return_value = _fake_process(
+                stdout="", stderr="", exit_status=1
+            )
             manager.connection = mock_conn
 
             result = await manager.check_service_exists("nonexistent")
@@ -264,7 +376,7 @@ class TestSSHManagerServiceCheck:
             manager = SSHManager(config, security)
             manager._connected = True
             manager.connection = AsyncMock()
-            manager.connection.run.side_effect = Exception("Command failed")
+            manager.connection.create_process.side_effect = Exception("Command failed")
 
             result = await manager.check_service_exists("myapp")
             assert result is False
@@ -281,7 +393,7 @@ class TestSSHManagerContextManager:
             manager._connected = True
 
             mock_conn = AsyncMock()
-            mock_conn.run.return_value = MagicMock(
+            mock_conn.create_process.return_value = _fake_process(
                 stdout="test", stderr="", exit_status=0
             )
             mock_conn.close = MagicMock()
@@ -511,7 +623,7 @@ class TestConnectionLifecycle:
             manager = SSHManager(config, security)
             manager._connected = True
             mock_conn = AsyncMock()
-            mock_conn.run.side_effect = asyncssh.ConnectionLost("gone")
+            mock_conn.create_process.side_effect = asyncssh.ConnectionLost("gone")
             manager.connection = mock_conn
 
             result = await manager.execute_safe_command("echo test")
@@ -774,7 +886,7 @@ class TestCommandAudit:
         manager = SSHManager(config, security)
         manager._connected = True
         manager.connection = AsyncMock()
-        manager.connection.run.return_value = MagicMock(
+        manager.connection.create_process.return_value = _fake_process(
             stdout="ok", stderr="", exit_status=0
         )
 
@@ -808,7 +920,7 @@ class TestCommandAudit:
         manager = SSHManager(config, security)
         manager._connected = True
         manager.connection = AsyncMock()
-        manager.connection.run.return_value = MagicMock(
+        manager.connection.create_process.return_value = _fake_process(
             stdout="\x1b[31mred\x1b[0m\x00", stderr="", exit_status=0
         )
 

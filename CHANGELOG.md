@@ -6,6 +6,14 @@ versioning.
 
 ## [Unreleased]
 
+### Fixed
+
+- Command and HTTP output is now bounded while it is collected, not only after capture.
+  The local and SSH executors read stdout/stderr through a shared byte budget that drains
+  the rest without retaining it, and the InfluxDB/Prometheus clients consume response
+  bodies in chunks before decoding. A command or endpoint that emits hundreds of megabytes
+  can no longer exhaust the MCP process; oversized bodies return a clear limit error.
+
 ### Changed
 
 - The publish workflow builds and smoke-tests the release image before the first PyPI

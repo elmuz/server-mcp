@@ -14,6 +14,22 @@ from server_management_lib import (
 )
 
 
+class _FakeReader:
+    """Minimal async byte stream for the bounded collector."""
+
+    def __init__(self, data: bytes):
+        self._data = data
+
+    async def read(self, size: int = -1) -> bytes:
+        if not self._data:
+            return b""
+        if size < 0:
+            chunk, self._data = self._data, b""
+            return chunk
+        chunk, self._data = self._data[:size], self._data[size:]
+        return chunk
+
+
 def _executor(tmp_path, **overrides):
     config = {
         "executor": "local",
@@ -72,15 +88,14 @@ class TestLocalCommands:
     def test_timeout(self, tmp_path, monkeypatch):
         class SlowProcess:
             returncode = 0
+            stdout = _FakeReader(b"")
+            stderr = _FakeReader(b"")
 
-            async def communicate(self):
+            async def wait(self):
                 await asyncio.sleep(10)
 
             def kill(self):
                 return None
-
-            async def wait(self):
-                return 0
 
         async def slow(*args, **kwargs):
             return SlowProcess()
@@ -94,9 +109,11 @@ class TestLocalCommands:
     def test_nonzero_exit_is_reported(self, tmp_path, monkeypatch):
         class FailedProcess:
             returncode = 1
+            stdout = _FakeReader(b"")
+            stderr = _FakeReader(b"")
 
-            async def communicate(self):
-                return b"", b""
+            async def wait(self):
+                return 0
 
         async def failed(*args, **kwargs):
             return FailedProcess()
@@ -104,6 +121,42 @@ class TestLocalCommands:
         monkeypatch.setattr(asyncio, "create_subprocess_exec", failed)
         result = asyncio.run(_executor(tmp_path).execute_safe_command("echo hi"))
         assert "Exit code: 1" in result
+
+    def test_oversized_stdout_is_bounded(self, tmp_path, monkeypatch):
+        class ChattyProcess:
+            returncode = 0
+            stdout = _FakeReader(b"x" * 10_000)
+            stderr = _FakeReader(b"")
+
+            async def wait(self):
+                return 0
+
+        async def chatty(*args, **kwargs):
+            return ChattyProcess()
+
+        monkeypatch.setattr(asyncio, "create_subprocess_exec", chatty)
+        executor = _executor(tmp_path, output={"max_bytes": 100})
+        result = asyncio.run(executor.execute_safe_command("echo hi"))
+        assert "truncated to 100 bytes" in result
+        assert len(result.encode("utf-8")) < 200
+
+    def test_oversized_stderr_is_bounded(self, tmp_path, monkeypatch):
+        class ChattyProcess:
+            returncode = 0
+            stdout = _FakeReader(b"")
+            stderr = _FakeReader(b"e" * 10_000)
+
+            async def wait(self):
+                return 0
+
+        async def chatty(*args, **kwargs):
+            return ChattyProcess()
+
+        monkeypatch.setattr(asyncio, "create_subprocess_exec", chatty)
+        executor = _executor(tmp_path, output={"max_bytes": 100})
+        result = asyncio.run(executor.execute_safe_command("echo hi"))
+        assert "truncated to 100 bytes" in result
+        assert len(result.encode("utf-8")) < 200
 
 
 class TestLocalServices:
