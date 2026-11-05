@@ -21,11 +21,12 @@ _ASSIGNMENT_PATTERN = re.compile(
 def redact_env_content(text: str) -> str:
     """Mask every assignment value in a dotenv file (strict variant).
 
-    Comments and blank lines are kept unchanged. Recognized assignments keep
-    their key and separator (``KEY=***``). Any other non-empty line is treated
-    as a value or a continuation of one (for example a multi-line quoted
-    secret) and is masked entirely, so no value text can leak. A trailing
-    newline in the input is preserved.
+    Comments and blank lines are kept, but a recognized credential inside a
+    comment (``# API_TOKEN=...``) is masked. Recognized assignments keep their
+    key and separator (``KEY=***``). Any other non-empty line is treated as a
+    value or a continuation of one (for example a multi-line quoted secret) and
+    is masked entirely, so no value text can leak. A trailing newline in the
+    input is preserved.
 
     This is the stricter whole-file variant. The MCP server uses
     :func:`redact_secrets` for ``.env`` reads so benign keys stay readable;
@@ -43,8 +44,11 @@ def redact_env_content(text: str) -> str:
     lines: list[str] = []
     for line in text.splitlines():
         stripped = line.lstrip()
-        if not stripped or stripped.startswith("#"):
+        if not stripped:
             lines.append(line)
+            continue
+        if stripped.startswith("#"):
+            lines.append(_redact_line(line))
             continue
 
         match = _ASSIGNMENT_PATTERN.match(line)
@@ -131,6 +135,18 @@ _URL_PASSWORD = re.compile(
     re.IGNORECASE,
 )
 
+# A comment line. The marker is kept so the comment stays recognizable while
+# its body is still checked for credentials.
+_COMMENT_LINE = re.compile(r"^(?P<indent>\s*)(?P<marker>#|;|//)(?P<body>.*)$")
+
+# YAML block scalar header (``key: |``, ``key: >-``, ``key: |2``). The value
+# lives on the following, more-indented lines, so the header alone is not
+# enough to hide it.
+_BLOCK_SCALAR = re.compile(
+    r"^(?P<indent>\s*)(?:-\s*)?(?P<key>\"?[A-Za-z0-9_.-]+\"?)\s*[:=]\s*"
+    r"(?P<indicator>[|>](?:[+-]?\d?|\d?[+-]?))\s*(?:#.*)?$"
+)
+
 
 def _key_words(key: str) -> list[str]:
     """Split a normalized key into lowercase words on non-alphanumerics."""
@@ -159,12 +175,9 @@ def _is_sensitive_key(key: str) -> bool:
     return any(word.endswith(_SENSITIVE_KEY_WORDS) for word in words)
 
 
-def _redact_line(line: str) -> str:
+def _redact_content(line: str) -> str:
+    """Redact credentials in a single line of non-comment content."""
     if not line:
-        return line
-
-    stripped = line.lstrip()
-    if stripped.startswith(("#", ";", "//")):
         return line
 
     json_changed = False
@@ -208,6 +221,24 @@ def _redact_line(line: str) -> str:
     return line
 
 
+def _redact_line(line: str) -> str:
+    """Redact a line, including credentials inside a comment.
+
+    The comment marker and indentation are preserved so ordinary comments stay
+    readable, but a commented-out assignment such as ``# API_TOKEN=...`` is
+    still masked.
+    """
+    if not line:
+        return line
+
+    comment = _COMMENT_LINE.match(line)
+    if comment is not None:
+        body = _redact_content(comment.group("body"))
+        return f"{comment.group('indent')}{comment.group('marker')}{body}"
+
+    return _redact_content(line)
+
+
 def redact_secrets(text: str) -> str:
     """Mask credentials in service config files and host status/log output.
 
@@ -215,6 +246,13 @@ def redact_secrets(text: str) -> str:
     flags, inline ``KEY=value`` pairs, ``Authorization: Bearer`` values, JWT
     shapes and credentials embedded in URLs. Keys, comments and the surrounding
     structure stay readable; only the value is replaced with ``***``.
+
+    Comment bodies are checked too, so a commented-out credential such as
+    ``# API_TOKEN=...`` is masked while ordinary comments stay readable. YAML
+    block scalars (``api_token: |``) are followed onto their indented value
+    lines, which are masked entirely. Unknown formats are handled
+    conservatively: a sensitive key followed by a block-scalar indicator masks
+    the indented lines even when the surrounding syntax is not YAML.
 
     This is deliberately applied in addition to, not instead of, the sensitive
     file policy. Real key material and credential stores are still refused
@@ -229,7 +267,27 @@ def redact_secrets(text: str) -> str:
     if not text:
         return text
 
-    lines = [_redact_line(line) for line in text.splitlines()]
+    lines: list[str] = []
+    block_indent: int | None = None
+    for line in text.splitlines():
+        if block_indent is not None:
+            if not line.strip():
+                # Blank lines are part of the scalar but carry no secret.
+                lines.append(line)
+                continue
+            indent = len(line) - len(line.lstrip())
+            if indent > block_indent:
+                lines.append(REDACTED_VALUE)
+                continue
+            # Dedented: the block scalar ended before this line.
+            block_indent = None
+
+        lines.append(_redact_line(line))
+
+        header = _BLOCK_SCALAR.match(line)
+        if header is not None and _is_sensitive_key(header.group("key")):
+            block_indent = len(header.group("indent"))
+
     redacted = "\n".join(lines)
     if text.endswith("\n"):
         redacted += "\n"

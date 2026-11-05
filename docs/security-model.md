@@ -135,7 +135,8 @@ are the primary way to debug a compose stack whose `compose.yml` only contains `
 Credential values are masked by key name (for example `DB_PASSWORD=***`,
 `JWT_SECRET=***`, `API_KEY=***`) while benign settings such as `TZ` and `DB_HOST` stay
 readable; non-assignment lines are still masked and `data.redacted_keys` lists the keys
-that changed. Keys, comments and blank lines are preserved.
+that changed. Keys, comments and blank lines are preserved, but a commented-out
+credential such as `# API_TOKEN=...` is still masked.
 
 Redaction does not stop at dotenv files. Other readable service files pass through a
 general key/value redactor before they are returned: YAML, JSON, INI and command-line
@@ -144,7 +145,11 @@ are masked while the key and file structure stay readable. Keys are split on sep
 and matched per word, so `POSTGRES_PASSWORD`, `api_key`, `apiKey`, `db-pass`, `dbpass`
 and a bare INI `pass` or `pw` are all recognized, while `tokenizer` and `keyboard` stay
 readable. `Authorization: Bearer ...` headers, JWT-shaped values and credentials embedded
-in URLs are masked as well.
+in URLs are masked as well. Comment bodies are checked too, so a commented-out
+credential is masked while ordinary comments stay readable. YAML block scalars such as
+`api_token: |` are followed onto their indented value lines, which are masked entirely;
+the same conservative rule applies to an unknown format that uses a block-scalar
+indicator after a sensitive key.
 `systemctl status` and `journalctl -u` output is passed through the same redactor, because
 `--full` command lines and journal tails can contain tokens.
 

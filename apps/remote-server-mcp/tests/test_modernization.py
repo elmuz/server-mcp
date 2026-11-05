@@ -561,6 +561,20 @@ class TestHandoverRoutingAndActions:
             "API_KEY",
         ]
 
+    def test_env_redaction_masks_commented_credentials(self, patched):
+        patched.read_remote_file.return_value = (
+            "# compose stack\n# API_TOKEN=commented-secret\nTZ=Europe/Rome\n"
+        )
+        tool = server.mcp._tool_manager.get_tool("get_service_file")
+
+        response = asyncio.run(tool.fn(service="app", file_path=".env"))
+
+        assert "# compose stack" in response.text
+        assert "# API_TOKEN=***" in response.text
+        assert "commented-secret" not in response.text
+        assert "TZ=Europe/Rome" in response.text
+        assert response.data["redacted_keys"] == ["API_TOKEN"]
+
 
 class TestJournalTimeNormalization:
     """journalctl wants relative windows with a leading minus."""

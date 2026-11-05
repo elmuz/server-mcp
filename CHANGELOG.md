@@ -8,6 +8,9 @@ versioning.
 
 ### Fixed
 
+- Secret redaction now covers commented-out credentials (`# API_TOKEN=...`) and YAML
+  block scalars (`api_token: |`), whose indented value lines were previously returned
+  verbatim. Ordinary comments and non-secret block scalars stay readable.
 - Command and HTTP output is now bounded while it is collected, not only after capture.
   The local and SSH executors read stdout/stderr through a shared byte budget that drains
   the rest without retaining it, and the InfluxDB/Prometheus clients consume response

@@ -351,12 +351,16 @@ directory or add its name to `security.allowed_containers`.
 - `get_service_file` redacts credential values in `.env` files by key name (for example
   `DB_PASSWORD=***`, `JWT_SECRET=***`, `API_KEY=***`) while benign settings such as `TZ` and
   `DB_HOST` stay readable; non-assignment lines are still masked and `data.redacted_keys`
-  lists the keys that were changed. Private keys, credential stores and secret-named paths
-  are refused with a specific sensitive-file error. Matching is per path component and
-  extension, so `monkey.txt` and `tokenizer.json` are readable.
+  lists the keys that were changed. A commented-out credential such as
+  `# API_TOKEN=...` is masked too, while ordinary comments stay readable. Private keys,
+  credential stores and secret-named paths are refused with a specific sensitive-file
+  error. Matching is per path component and extension, so `monkey.txt` and
+  `tokenizer.json` are readable.
   Other readable config files (YAML/JSON/INI/command-line shapes) are passed through a
   secret redactor: password/secret/token/API-key/authorization values (including short
   spellings such as `pass`, `pw`, `passphrase` and `db_pass`), bearer headers, JWTs and
-  URL passwords are replaced with `***` while keys and structure stay readable.
+  URL passwords are replaced with `***` while keys and structure stay readable. Comment
+  bodies are checked as well, and YAML block scalars such as `api_token: |` have their
+  indented value lines masked entirely.
   `get_host_service_status` and `get_host_service_logs` apply the same redaction because
   `systemctl status --full` and journal tails can contain command-line tokens.

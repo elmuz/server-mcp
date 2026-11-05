@@ -26,6 +26,16 @@ class TestRedactEnvContent:
         assert "export DB_NAME=" in result
         assert "app # inline" not in result
 
+    def test_commented_credentials_are_masked(self):
+        text = "# compose stack\n# API_TOKEN=commented-secret\nDB_HOST=db\n"
+
+        result = redact_env_content(text)
+
+        assert "# compose stack" in result
+        assert "# API_TOKEN=***" in result
+        assert "commented-secret" not in result
+        assert "DB_HOST=***" in result
+
     def test_quoted_and_spaced_values_are_masked(self):
         text = 'A="secret value"\nB = spaced\nC=\n'
 
@@ -133,10 +143,61 @@ class TestRedactSecrets:
 
         assert redact_secrets(text) == text
 
-    def test_comments_and_unrelated_keys_are_preserved(self):
+    def test_commented_credentials_are_masked_but_comments_stay_readable(self):
         from server_management_lib.redaction import redact_secrets
 
-        text = "# token=comment\nmonkey.txt is readable\n"
+        text = (
+            "# compose stack\n"
+            "# API_TOKEN=commented-secret\n"
+            "# token=comment\n"
+            "monkey.txt is readable\n"
+        )
+
+        result = redact_secrets(text)
+
+        assert "# compose stack" in result
+        assert "# API_TOKEN=***" in result
+        assert "# token=***" in result
+        assert "commented-secret" not in result
+        assert "comment" not in result
+        assert "monkey.txt is readable" in result
+
+    def test_yaml_block_scalar_secret_is_masked(self):
+        from server_management_lib.redaction import redact_secrets
+
+        text = (
+            "api_token: |\n  first-secret-line\n  second-secret-line\nname: visible\n"
+        )
+
+        result = redact_secrets(text)
+
+        assert "first-secret-line" not in result
+        assert "second-secret-line" not in result
+        assert result.splitlines() == [
+            f"api_token: {REDACTED_VALUE}",
+            REDACTED_VALUE,
+            REDACTED_VALUE,
+            "name: visible",
+        ]
+
+    def test_yaml_block_scalar_with_chomping_indicator_is_masked(self):
+        from server_management_lib.redaction import redact_secrets
+
+        text = "  db_password: >-\n    folded-secret\n  user: bob\n"
+
+        result = redact_secrets(text)
+
+        assert "folded-secret" not in result
+        assert result.splitlines() == [
+            f"  db_password: {REDACTED_VALUE}",
+            REDACTED_VALUE,
+            "  user: bob",
+        ]
+
+    def test_non_secret_block_scalar_is_preserved(self):
+        from server_management_lib.redaction import redact_secrets
+
+        text = "description: |\n  ordinary text\n  more text\n"
 
         assert redact_secrets(text) == text
 

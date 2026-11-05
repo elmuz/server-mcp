@@ -400,8 +400,18 @@ def _redact_env_file(content: str) -> tuple[str, list[str]]:
     redacted_keys: list[str] = []
     for line in content.splitlines():
         stripped = line.lstrip()
-        if not stripped or stripped.startswith("#"):
+        if not stripped:
             lines.append(line)
+            continue
+        if stripped.startswith("#"):
+            # A commented-out credential is still a credential. Keep the
+            # comment readable but mask a recognized assignment inside it.
+            redacted = redact_secrets(line)
+            if redacted != line:
+                match = _ENV_ASSIGNMENT_PATTERN.match(stripped[1:].lstrip())
+                if match is not None:
+                    redacted_keys.append(match.group("key"))
+            lines.append(redacted)
             continue
 
         match = _ENV_ASSIGNMENT_PATTERN.match(line)

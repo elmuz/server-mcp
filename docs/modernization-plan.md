@@ -21,13 +21,14 @@ snapshots remain in git history.
   `41553210242` published `ghcr.io/elmuz/server-mcp:v0.5.0` (index digest
   `sha256:1f6854eb5949445f80022bee5c55524e570a26c8c5b5e291c4365f610c968c0c`), and
   `uvx --no-cache` resolves `0.5.0` for both servers. 3.9 release channel parity is
-  complete. The next in-repo work is the review hardening in 3.10 (R4 next), then
+  complete. The next in-repo work is the review hardening in 3.10 (R5/R6 next), then
   multi-target support (3.7). The author sandbox integration and the deployer/approval
   boundary are deployment work outside this repository. The remaining external prerequisites
   are the catafalco items in 3.5 and the host-side self-test privilege in 3.6.
-- **Last updated:** 2026-11-05 (lands R3: bounded collection in the executors and HTTP
-  clients; earlier the same day landed R1/R2: internal `mcp-egress` plus a default-deny
-  policy proxy, and automated author/MCP isolation checks; triages the post-`0.5.0` review
+- **Last updated:** 2026-11-06 (lands R4: comment and YAML block-scalar redaction; earlier
+  landed R3: bounded collection in the executors and HTTP clients; R1/R2: internal
+  `mcp-egress` plus a default-deny policy proxy, and automated author/MCP isolation checks;
+  triages the post-`0.5.0` review
   into 3.10, moves review records to `docs/reviews/`, and removes the
   `next-phase-plan.md` handoff. 2026-11-03:
   verified `0.5.0` release on both channels and closed 3.9. 2026-11-02: the 3.8 Phase 2
@@ -1500,19 +1501,21 @@ maintainability and supply-chain polish. None of these is a known wrong tool res
 
 #### R4 P1 — close the redaction gaps or narrow the claim
 
-- [ ] **Problem.** `_redact_line()` returns comment lines unchanged, so a commented-out
-      credential is returned verbatim. The matcher is line-oriented, so a YAML block scalar
-      such as `api_token: |` masks the key line but not the indented value lines. The
-      current docs/tests document the comment behaviour as intended.
-- [ ] **Change.** Choose one: (a) redact recognized secret keys inside comments and handle
-      multiline values for the config formats we expose, with conservative handling for
-      unknown formats; or (b) keep the behaviour and narrow every security/redaction claim
-      to "line-oriented, non-comment, best effort". Option (a) is preferred for service
-      config files. Update the comment-preservation test so a secret value is hidden while
-      ordinary comments remain readable.
-- [ ] **Acceptance.** `# API_TOKEN=...` and a YAML block-scalar secret are masked (if a);
-      otherwise no document claims arbitrary configuration or logs cannot disclose
-      credentials (if b). Add a regression test either way.
+- [x] **Done (2026-11-06).** Option (a): comment bodies are redacted while the marker and
+      ordinary text stay readable, and a sensitive key followed by a YAML block-scalar
+      indicator masks the indented value lines. The dotenv path applies the same comment
+      rule. Tests cover `# API_TOKEN=...`, `|`/`>-` block scalars, non-secret block
+      scalars and the dotenv comment case; docs and the changelog describe the new scope.
+- [x] **Problem.** `_redact_line()` returned comment lines unchanged, so a commented-out
+      credential was returned verbatim. The matcher was line-oriented, so a YAML block
+      scalar such as `api_token: |` masked the key line but not the indented value lines.
+      The docs/tests documented the comment behaviour as intended.
+- [x] **Change.** Redact recognized secret keys inside comments and handle multiline
+      values for the config formats we expose, with conservative handling for unknown
+      formats. The comment-preservation test now hides a secret value while ordinary
+      comments remain readable.
+- [x] **Acceptance.** `# API_TOKEN=...` and a YAML block-scalar secret are masked, with
+      regression tests in the library and the remote-server app.
 
 #### R5 P1 — authenticate SSH host keys at bootstrap
 
@@ -1627,9 +1630,8 @@ longer tracked here.
    Ansible deployer is a separate cross-repo workstream.
 4. **The next in-repo work is the rest of the 2026-11-05 review hardening (3.10), then
    multi-target support (3.7).** 3.9 is complete. R1/R2 (real, tested egress and author/MCP
-   boundaries) are done; R3 (bounded collection) is done, so land R4 (honest redaction)
-   next; R5/R6
-   before the next container release, R7/R8 as maintenance. 3.7 Phase 1 may run in parallel,
+   boundaries) are done; R3 (bounded collection) and R4 (honest redaction) are done, so
+   land R5/R6 before the next container release, R7/R8 as maintenance. 3.7 Phase 1 may run in parallel,
    but do not deploy 3.7 next to an untrusted author before 3.8 Phases 3/3b are done. Keep
    the single-target process as the default deployment.
 5. **Remaining external work is outside this repository:** the catafalco prerequisites in
@@ -1795,7 +1797,7 @@ label (for example `watchtower`, `wud`, `socket-proxy`) still need
    (3.8 Phases 3, 3b, 4, 5) remain deployment work. The remaining open work outside this
    repository is the catafalco prerequisites in 3.5 and the host-side self-test privilege
    in 3.6.
-2. For new in-repo work, start with 3.10 R3/R4 (R1/R2 are done), then 3.7 Phase 1. Add new items
+2. For new in-repo work, start with 3.10 R5/R6 (R1–R4 are done), then 3.7 Phase 1. Add new items
    to section 3 with a checkbox that names the file or area to change; do not create a
    second backlog in `docs/reviews/`. The 3.8 Phase 2 runtime is done; Phase 3 (author
    sandbox) and Phase 5 (isolation verification) are deployment work.
