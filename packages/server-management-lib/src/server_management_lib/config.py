@@ -63,6 +63,9 @@ DEFAULT_CONFIG: dict[str, Any] = {
         # Path to known_hosts, or "none" to disable verification (insecure).
         "known_hosts": "~/.ssh/known_hosts",
         "connect_timeout": 10,
+        # Optional argv for an SSH ProxyCommand. The container deployment uses
+        # this to force SSH through the policy-enforcing egress proxy.
+        "proxy_command": None,
     },
     "security": {
         # Service directory base path (for remote-server-mcp)

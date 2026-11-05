@@ -73,6 +73,7 @@ The installer:
 - creates `~/.config/server-mcp` and `~/.local/state/server-mcp/audit` with private modes;
 - installs the example configs, `.env`, `known_hosts` and SSH-key placeholder if missing;
 - generates `secrets/http-token` if missing;
+- renders `egress-policy.conf` from the installed configs when it is missing;
 - installs the Quadlet units (`.container`, `.network`) under
   `~/.config/containers/systemd/` and the `server-mcp.target` user unit under
   `~/.config/systemd/user/` (Quadlet ignores plain `.target` files).
@@ -83,14 +84,23 @@ After installing:
 
 1. Set `ssh.host` and `ssh.username` in `remote.yaml` and `disk.yaml`.
 2. Replace `~/.config/server-mcp/ssh/id_ed25519` with the target key.
-3. Populate `~/.config/server-mcp/known_hosts`:
+3. Populate `~/.config/server-mcp/known_hosts` with a verified host key. Do not
+   append `ssh-keyscan` output blindly: scan to a temporary file, inspect the
+   fingerprint with `ssh-keygen -lf`, and compare it with the value from the
+   host console or inventory before appending.
 
    ```bash
-   ssh-keyscan -H catafalco.example.com >> ~/.config/server-mcp/known_hosts
+   ssh-keyscan -H catafalco.example.com > /tmp/catafalco.hostkey
+   ssh-keygen -lf /tmp/catafalco.hostkey
+   # Compare the SHA256 fingerprint with the host console, then:
+   cat /tmp/catafalco.hostkey >> ~/.config/server-mcp/known_hosts
    ```
 
-4. Set the image in both `.container` units, preferably by digest.
-5. Start the stack:
+4. Review `~/.config/server-mcp/egress-policy.conf`. It is default-deny and is
+   rendered from `remote.yaml`/`disk.yaml` when first installed. Add only the
+   destinations the tools need.
+5. Set the image in the `.container` units, preferably by digest.
+6. Start the stack:
 
    ```bash
    systemctl --user daemon-reload
@@ -113,8 +123,20 @@ host installation are:
 - `executor: ssh`; `local` is rejected inside the container;
 - `key_path: /run/secrets/ssh_key`;
 - `known_hosts: /etc/server-mcp/known_hosts`;
+- `ssh.proxy_command` points at `server-mcp-connect`, `mcp-egress-proxy`, port `3128`,
+  and the same target host/port as `ssh.host`/`ssh.port`;
 - `transport.token_file: /run/secrets/mcp_token`;
 - `audit.path: /var/lib/server-mcp/<service>.jsonl`.
+
+When you change `ssh.host` or `ssh.port`, update the matching `proxy_command` arguments
+and re-render the egress policy (the installer renders it only when it is missing):
+
+```bash
+uv run --frozen --no-dev --all-packages python deploy/render-egress-policy.py \
+  --remote ~/.config/server-mcp/remote.yaml \
+  --disk ~/.config/server-mcp/disk.yaml \
+  --output ~/.config/server-mcp/egress-policy.conf
+```
 
 `SERVER_MCP_CONTAINER=1` is baked into the image. It makes startup reject
 `executor: local` and require the audit directory to be mounted.
@@ -140,16 +162,29 @@ Use `disk-health-mcp` for the disk service.
 
 ## Networks
 
-The Quadlet units own two networks:
+The Quadlet units own three networks:
 
 | Network | Purpose |
 |---|---|
 | `pi-control` | Internal, no gateway. Author container to MCP only. |
-| `mcp-egress` | MCP to the target SSH/metric endpoints. Not shared with the author. |
+| `mcp-egress` | Internal, no gateway. MCP to the policy proxy only. |
+| `mcp-egress-uplink` | The proxy's route to the allowed destinations. |
 
 The MCP services listen on `0.0.0.0:8000` inside the container but publish no host port.
 They are reachable by DNS name `mcp-remote` and `mcp-disk` on `pi-control`. The author
 container must not join `mcp-egress`; the MCP must not join the author's egress network.
+
+`mcp-egress` is internal and has no direct route out. The only member with an uplink is
+`mcp-egress-proxy`, which applies `~/.config/server-mcp/egress-policy.conf` (default deny).
+The MCP containers use the proxy for HTTP(S) and for SSH through
+`ssh.proxy_command`/`server-mcp-connect`. The policy file is mounted read-only into the
+proxy and is not visible to the MCP containers. The policy syntax is shared with
+pi-sandbox: `default deny`, `allow <host|IP|CIDR> [port]`, `deny ...`.
+
+The proxy resolves hostnames at request time, so DNS changes and multiple A/AAAA records
+are handled by the same policy. IPv6 is subject to the same rules; there is no separate
+IPv4-only path. If a destination is not explicitly allowed, the proxy returns 403 and logs
+the decision.
 
 ## Token
 
@@ -191,6 +226,19 @@ request without the token gets `401`, and verifies that an authenticated request
 rejected by the middleware. It uses Docker in CI and Podman on a rootless host; set
 `CONTAINER_ENGINE=docker|podman` to force one.
 
+The boundary checks are separate because they need a real container runtime:
+
+```bash
+scripts/isolation-smoke.sh localhost/server-mcp:dev
+scripts/egress-smoke.sh localhost/server-mcp:dev
+```
+
+`isolation-smoke.sh` proves the author cannot reach `mcp-egress`, read the MCP
+config/key/known_hosts/token or a runtime socket, and that the MCP cannot read an author
+workspace path. `egress-smoke.sh` proves an allowed target is reachable through the proxy,
+an unrelated target is refused, direct routes fail, and the policy file is not visible to
+the MCP container. Both fail if the corresponding boundary is removed.
+
 ## Residual risks
 
 - **Destructive tools remain available.** `confirm=true` is a model-supplied safety
@@ -201,6 +249,9 @@ rejected by the middleware. It uses Docker in CI and Podman on a rootless host; 
   outside both containers.
 - **The author can exfiltrate its own credentials.** Provider and GitHub tokens are mounted
   into the author sandbox by design. Use disposable, narrowly scoped tokens.
+- **The egress proxy is a policy boundary, not a sandbox escape.** A compromised MCP
+  process can still use any destination the policy allows, and the proxy itself runs on
+  the same host. Keep the policy narrow and review it when a target changes.
 - **A shared writable workspace is not a trust boundary.** The sandbox mounts the project
   read-write. If the operator runs host `pi`, tests, build, deploy or git hooks in that same
   checkout later, files written by the agent execute on the host. This includes

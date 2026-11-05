@@ -171,3 +171,10 @@ start_and_check() {
 
 start_and_check remote 18000 remote-server-mcp
 start_and_check disk 18001 disk-health-mcp
+
+# The boundary checks need the same image and a real runtime. They are part of
+# the smoke test so a removed network or mount boundary fails CI, not only a
+# manual review.
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+CONTAINER_ENGINE="$engine" "$script_dir/egress-smoke.sh" "$image"
+CONTAINER_ENGINE="$engine" "$script_dir/isolation-smoke.sh" "$image"

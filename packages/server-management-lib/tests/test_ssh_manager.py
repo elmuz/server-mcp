@@ -429,6 +429,57 @@ class TestConnectionSecurity:
         kwargs = manager.build_connect_kwargs()
         assert not kwargs["client_keys"][0].startswith("~")
 
+    def test_proxy_command_list_is_passed_through(self, security):
+        command = [
+            "/usr/local/bin/server-mcp-connect",
+            "mcp-egress-proxy",
+            "3128",
+            "example.com",
+            "22",
+        ]
+        config = {
+            "ssh": {
+                "host": "example.com",
+                "known_hosts": "none",
+                "proxy_command": command,
+            },
+            "security": {"services_path": "/srv"},
+        }
+        manager = SSHManager(config, security)
+
+        kwargs = manager.build_connect_kwargs()
+        assert kwargs["proxy_command"] == command
+
+    def test_proxy_command_string_is_passed_through(self, security):
+        config = {
+            "ssh": {
+                "host": "example.com",
+                "known_hosts": "none",
+                "proxy_command": "server-mcp-connect proxy 3128 example.com 22",
+            },
+            "security": {"services_path": "/srv"},
+        }
+        manager = SSHManager(config, security)
+
+        kwargs = manager.build_connect_kwargs()
+        assert kwargs["proxy_command"].startswith("server-mcp-connect")
+
+    def test_invalid_proxy_command_is_rejected(self, security):
+        from server_management_lib import SSHConfigurationError
+
+        config = {
+            "ssh": {
+                "host": "example.com",
+                "known_hosts": "none",
+                "proxy_command": ["ok", 1],
+            },
+            "security": {"services_path": "/srv"},
+        }
+        manager = SSHManager(config, security)
+
+        with pytest.raises(SSHConfigurationError, match="proxy_command"):
+            manager.build_connect_kwargs()
+
 
 class TestServicePathHandling:
     """The configured services_path must be used everywhere."""

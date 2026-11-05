@@ -1,7 +1,7 @@
 [Unit]
 Description=Server MCP stack
-Wants=mcp-remote.service mcp-disk.service
-After=mcp-remote.service mcp-disk.service
+Wants=mcp-egress-proxy.service mcp-remote.service mcp-disk.service
+After=mcp-egress-proxy.service mcp-remote.service mcp-disk.service
 
 [Install]
 WantedBy=default.target

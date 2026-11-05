@@ -144,11 +144,13 @@ rejected; there is no fall-through to a permissive default.
 The optional container deployment keeps the MCP process outside the coding-agent sandbox.
 One image contains both console scripts, and Quadlet runs them as `mcp-remote` and
 `mcp-disk` under `server-mcp.target`. The services listen on Streamable HTTP with a bearer
-token read from a file, join an internal `pi-control` network for the author and a separate
-`mcp-egress` network for the target, and publish no host ports. Configuration, SSH key,
-`known_hosts` and token are read-only mounts; the audit directory is the only writable
-state. The image runs non-root with `cap_drop: ALL`, `no-new-privileges` and a read-only
-root filesystem. See [container.md](container.md).
+token read from a file, join an internal `pi-control` network for the author and an internal
+`mcp-egress` network for the target, and publish no host ports. The only route out of
+`mcp-egress` is `mcp-egress-proxy`, which applies a host-owned default-deny policy to the
+SSH and metric destinations. Configuration, SSH key, `known_hosts` and token are read-only
+mounts; the audit directory is the only writable state. The image runs non-root with
+`cap_drop: ALL`, `no-new-privileges` and a read-only root filesystem. See
+[container.md](container.md).
 
 The container path does not add a generic command tool and does not change the operation
 catalog or command policy. `executor: local` is rejected in container mode.

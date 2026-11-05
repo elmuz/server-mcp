@@ -73,6 +73,12 @@ RUN groupadd --gid "${GID}" mcp \
 
 COPY --from=builder /opt/venv /opt/venv
 
+# Egress policy proxy and the SSH ProxyCommand helper. Both are plain Python
+# scripts so the same image can run the proxy container without a second build.
+COPY container/egress_proxy.py /usr/local/bin/egress-proxy.py
+COPY container/connect_proxy.py /usr/local/bin/server-mcp-connect
+RUN chmod 0755 /usr/local/bin/egress-proxy.py /usr/local/bin/server-mcp-connect
+
 # The config directory only holds operator-mounted files and must be traversable
 # by whatever UID the container runs as; the files themselves stay 0600.
 RUN install -d -o "${UID}" -g "${GID}" -m 0755 /etc/server-mcp \

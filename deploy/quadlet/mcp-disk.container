@@ -23,6 +23,10 @@ Volume=%h/.config/server-mcp/ssh/id_ed25519:/run/secrets/ssh_key:ro
 Volume=%h/.config/server-mcp/known_hosts:/etc/server-mcp/known_hosts:ro
 Volume=%h/.config/server-mcp/secrets/http-token:/run/secrets/mcp_token:ro
 Volume=%h/.local/state/server-mcp/audit:/var/lib/server-mcp:rw
+Environment=HTTP_PROXY=http://mcp-egress-proxy:3128
+Environment=HTTPS_PROXY=http://mcp-egress-proxy:3128
+Environment=ALL_PROXY=http://mcp-egress-proxy:3128
+Environment=NO_PROXY=localhost,127.0.0.1,::1,mcp-remote,mcp-disk
 Exec=disk-health-mcp --config /etc/server-mcp/config.yaml --transport streamable-http --http-host 0.0.0.0 --http-port 8000
 HealthCmd=python -c "import socket; socket.create_connection(('127.0.0.1', 8000), 2).close()"
 HealthInterval=30s

@@ -2,8 +2,10 @@
 
 Single source of truth for the Server MCP suite. This document merges the former
 modernization backlog, the live-deployment findings from the `catafalco` host, and the
-2026-10-19 architecture/security review (`docs/next-phase-plan.md` is merged here and
-removed). Earlier snapshots remain in git history.
+architecture/security reviews. Point-in-time review records live in
+[`docs/reviews/`](reviews/README.md); accepted findings are merged here and the snapshot is
+frozen. The former `docs/next-phase-plan.md` handoff is merged here and removed. Earlier
+snapshots remain in git history.
 
 - **Status:** the releases are out. `v0.2.0` (signed, on `9901974`) and `v0.2.1` (signed, on
   `2a5de15`) are tags pushed to `origin`, and all three packages are published on PyPI at
@@ -18,13 +20,16 @@ removed). Earlier snapshots remain in git history.
   run `41553210132` uploaded all three packages in library→apps order, the image run
   `41553210242` published `ghcr.io/elmuz/server-mcp:v0.5.0` (index digest
   `sha256:1f6854eb5949445f80022bee5c55524e570a26c8c5b5e291c4365f610c968c0c`), and
-  `uvx --no-cache` resolves `0.5.0` for both servers. The next in-repo work is multi-target
-  support (3.7); 3.9 release channel parity is now complete except its documentation
-  follow-through. The author sandbox integration and the deployer/approval boundary are
-  deployment work outside this repository. The remaining external prerequisites are the
-  catafalco items in 3.5 and the host-side self-test privilege in 3.6.
-- **Last updated:** 2026-11-03 (records the verified `0.5.0` release on both channels and
-  closes 3.9. 2026-11-03, earlier: prepares and tags `0.5.0`. 2026-11-02: the 3.8 Phase 2
+  `uvx --no-cache` resolves `0.5.0` for both servers. 3.9 release channel parity is
+  complete. The next in-repo work is the review hardening in 3.10 (R3/R4 next), then
+  multi-target support (3.7). The author sandbox integration and the deployer/approval
+  boundary are deployment work outside this repository. The remaining external prerequisites
+  are the catafalco items in 3.5 and the host-side self-test privilege in 3.6.
+- **Last updated:** 2026-11-05 (lands R1/R2: internal `mcp-egress` plus a default-deny
+  policy proxy, and automated author/MCP isolation checks; triages the post-`0.5.0` review
+  into 3.10, moves review records to `docs/reviews/`, and removes the
+  `next-phase-plan.md` handoff. 2026-11-03:
+  verified `0.5.0` release on both channels and closed 3.9. 2026-11-02: the 3.8 Phase 2
   container runtime, 3.9 and the corrected release order)
 - **Plan retention:** this file remains the single backlog. Completed sections are kept as
   history because they carry live findings and verification evidence; extend the plan
@@ -1287,11 +1292,14 @@ the MCP loads, the split provides no protection.
 - [ ] **Phase 5 — verification and release.** Add a repeatable smoke test that starts the
       MCP container, calls read-only tools over HTTP, verifies the author cannot read the
       MCP config/key or the Docker socket, verifies the MCP cannot read the author
-      workspace, and checks the audit volume. Update `docs/configuration.md`,
-      `docs/architecture.md`, `docs/security-model.md`, `README.md` and `CHANGELOG.md`.
-- **Partial:** `scripts/container-smoke.sh` already starts the image, exercises both entry
+      workspace, checks that `mcp-egress` reaches only the configured endpoints, and checks
+      the audit volume. Update `docs/configuration.md`, `docs/architecture.md`,
+      `docs/security-model.md`, `README.md` and `CHANGELOG.md`. The executable scope is
+      tracked as R1 and R2 in 3.10; the author-side companion is the pi-sandbox roadmap.
+- **Done (2026-11-05):** `scripts/container-smoke.sh` starts the image, exercises both entry
   points, the token file, `--check-config` and the HTTP bearer-token middleware under Docker
-  and Podman. The author/MCP isolation directions are still verified by hand.
+  and Podman, then runs `scripts/egress-smoke.sh` and `scripts/isolation-smoke.sh`. The
+  egress allowlist and author/MCP isolation directions are therefore automated (R1/R2).
 
 #### Acceptance criteria
 
@@ -1404,6 +1412,162 @@ change, and say so explicitly in the README.
 - A single gate lengthens the publish run; the image build is cached, so the cost is the
   smoke test, not a cold rebuild.
 
+### 3.10 Post-0.5.0 review follow-up (2026-11-05)
+
+**Source:** [the 2026-11-05 project review](reviews/2026-11-05-project-review.md). The review
+was static (no live host) and is preserved as a snapshot; this subsection is the only
+actionable copy. IDs `R1`–`R8` are stable for commit messages and cross-repo references.
+
+Ranking rule: **P0** means the documented trust boundary or a security claim is wrong;
+**P1** means a realistic resource-exhaustion, disclosure or operator-footgun path; **P2** is
+maintainability and supply-chain polish. None of these is a known wrong tool result.
+
+#### R1 P0 — `mcp-egress` must allowlist destinations, not just name a network
+
+- [x] **Done (2026-11-05).** `mcp-egress` is internal; `mcp-egress-proxy` is the only
+      dual-homed member and applies a host-owned default-deny policy. The MCP units use the
+      proxy for HTTP(S) and SSH (`server-mcp-connect`), and `deploy/render-egress-policy.py`
+      derives the allow rules from the configs. `scripts/egress-smoke.sh` proves the
+      reachable/blocked pair, direct-route denial and that the policy is not visible to the
+      MCP container. The policy syntax is shared with pi-sandbox.
+- [x] **Problem.** `deploy/quadlet/mcp-egress.network` only sets `NetworkName=mcp-egress`.
+      `docs/container.md` and `README.md` describe the network as the MCP's route to the
+      target and metric endpoints, but a Podman bridge with NAT reaches the LAN and the host
+      by default. A compromised MCP process or dependency can therefore connect anywhere
+      the host can, regardless of the tool catalog.
+- [x] **Change.** Make `mcp-egress` default-deny except for the destinations derived from
+      the target configuration: `ssh.host` on `ssh.port`, the InfluxDB/Prometheus endpoints
+      when enabled, and DNS if the deployment needs it. Enforce it with a host firewall
+      rule set or a small egress proxy/policy container; do not rely on the network name or
+      on `--internal`. Translate endpoint names to addresses deliberately (DNS changes,
+      multiple A/AAAA records, IPv6), and keep the policy outside the MCP container.
+- **Reasoning.** The pi-sandbox egress proxy already implements the same
+      default-deny-plus-allowlist model for the author. Reuse that policy vocabulary where
+      practical so the two repos do not drift into two incompatible definitions of "allowed".
+- [x] **Acceptance.** A container test (or documented opt-in host test) proves that the
+      configured SSH/metrics endpoints are reachable, an unrelated endpoint on the same
+      network is blocked, IPv6 is not an accidental bypass, and the policy is not writable
+      from inside the MCP container. `scripts/container-smoke.sh` grows the reachable/
+      blocked pair. **Verified 2026-11-05** with `scripts/egress-smoke.sh` on Podman: the
+      allowed target and the SSH `CONNECT` helper succeed, the blocked target returns 403,
+      direct routes fail, an unlisted IPv6 literal is denied, and the probe cannot see the
+      host-owned policy file.
+
+#### R2 P0 — automate the author/MCP isolation checks
+
+- [x] **Done (2026-11-05).** `scripts/isolation-smoke.sh` checks the author cannot reach
+      `mcp-egress`, read the MCP config/key/known_hosts/token or a runtime socket, and that
+      the MCP cannot read an author workspace path; the audit volume is the only writable
+      mount. `scripts/container-smoke.sh` now runs both boundary scripts, so removing a
+      boundary fails CI.
+- [x] **Problem.** 3.8 Phase 5 is still verified by hand. The container smoke test proves
+      startup and token middleware, not that the author cannot read MCP secrets or that the
+      MCP cannot read the author workspace.
+- [x] **Change.** Extend the smoke/isolation script into a repeatable check: the author
+      cannot reach `mcp-egress`, read the MCP config/key/known_hosts/token or the Docker
+      socket; the MCP cannot read the author workspace; the audit volume is writable only
+      where intended. Keep it opt-in when it needs a real container runtime, and document
+      the exact prerequisites.
+- [x] **Acceptance.** The check fails when any boundary is removed (negative test), not
+      only when the happy path breaks. Results are recorded in this plan's verification
+      section after a release. **Verified 2026-11-05** with `scripts/isolation-smoke.sh` on
+      Podman: the author cannot reach `mcp-egress` or read MCP secrets/runtime sockets, the
+      MCP cannot read the author workspace, and only the audit volume is writable.
+
+#### R3 P1 — bound bytes while collecting, not only after capture
+
+- [ ] **Problem.** `local_executor.py` uses `process.communicate()` and
+      `ssh_manager.py` uses `connection.run()` before `sanitize_output()`; HTTP clients
+      decode JSON/text before applying the cap. The cap protects the model, not the MCP
+      process: a command or response that emits hundreds of megabytes is fully retained.
+- [ ] **Change.** Read stdout/stderr concurrently and retain at most `max_output_bytes`,
+      marking truncation. For SSH, use a streaming process/channel API with the same bound.
+      For aiohttp, enforce a response-byte limit while consuming chunks, before JSON
+      decoding. On reaching the cap, either drain without retaining or cancel the operation.
+      Keep timeout and SQL row limits as separate controls.
+- [ ] **Acceptance.** Tests cover oversized stdout, oversized stderr, oversized SSH output
+      and oversized JSON/text HTTP responses; peak retention stays near the configured cap.
+      This must land before multi-target 3.7 Phase 2, which multiplies concurrent calls.
+
+#### R4 P1 — close the redaction gaps or narrow the claim
+
+- [ ] **Problem.** `_redact_line()` returns comment lines unchanged, so a commented-out
+      credential is returned verbatim. The matcher is line-oriented, so a YAML block scalar
+      such as `api_token: |` masks the key line but not the indented value lines. The
+      current docs/tests document the comment behaviour as intended.
+- [ ] **Change.** Choose one: (a) redact recognized secret keys inside comments and handle
+      multiline values for the config formats we expose, with conservative handling for
+      unknown formats; or (b) keep the behaviour and narrow every security/redaction claim
+      to "line-oriented, non-comment, best effort". Option (a) is preferred for service
+      config files. Update the comment-preservation test so a secret value is hidden while
+      ordinary comments remain readable.
+- [ ] **Acceptance.** `# API_TOKEN=...` and a YAML block-scalar secret are masked (if a);
+      otherwise no document claims arbitrary configuration or logs cannot disclose
+      credentials (if b). Add a regression test either way.
+
+#### R5 P1 — authenticate SSH host keys at bootstrap
+
+- [ ] **Problem.** `docs/container.md` and `docs/getting-started.md` tell operators to
+      append `ssh-keyscan` output to `known_hosts`. That retrieves a key but does not
+      authenticate it, so a first-connection MITM can establish the trusted key.
+- [ ] **Change.** Document a verified flow: scan to a temporary file, inspect with
+      `ssh-keygen -lf`, compare the fingerprint with a value from the host console or
+      inventory, and only then append. Keep host-key verification enabled afterwards. Add
+      the same note wherever `known_hosts` is populated.
+- [ ] **Acceptance.** No doc presents `ssh-keyscan >> known_hosts` as sufficient on its own;
+      the troubleshooting entry also points to the verification step.
+
+#### R6 P1 — make installer `--force` safe
+
+- [ ] **Problem.** `deploy/install.sh` applies `--force` to configs, `.env`,
+      `known_hosts`, the SSH-key placeholder and units alike, so refreshing units can
+      overwrite operator configuration with examples. `systemctl --user daemon-reload ||
+      true` can also hide a failed install.
+- [ ] **Change.** Separate "refresh units" from "replace config/secrets". For a config or
+      key overwrite, require an explicit flag and keep a timestamped backup (or print a
+      diff/preview and refuse non-interactively). Report `daemon-reload` failure and exit
+      non-zero when a reload was required.
+- [ ] **Acceptance.** `--force` unit refresh leaves `remote.yaml`, `disk.yaml`, `.env`,
+      `known_hosts` and `ssh/id_ed25519` unchanged; replacing a config requires the
+      explicit flag; a failing `daemon-reload` makes the installer fail. Tests use a
+      temporary `HOME`/`XDG_*` tree.
+
+#### R7 P2 — pin the image base by digest
+
+- [ ] **Problem.** `container/Dockerfile` defaults `PYTHON_IMAGE` to the mutable
+      `python:3.13-slim` tag, so rebuilding the same source revision can silently change
+      the OS/Python base.
+- [ ] **Change.** Default to an approved multi-platform digest
+      (`python:3.13-slim@sha256:...`) and update it through a reviewed dependency bump. Keep
+      the build arg override for local experiments, but CI and release builds use the
+      pinned default.
+- [ ] **Acceptance.** The Dockerfile and the image workflow reference the same digest; a
+      comment records how to refresh it and which platforms were verified.
+
+#### R8 P2 — keep the app modules maintainable as the surface grows
+
+- [ ] **Problem.** The two app modules mix tool handlers, orchestration and output shaping
+      and have grown to thousands of lines. The application coverage floors (60% and 65%)
+      are far below the library's 90%, so behavior changes are less protected.
+- [ ] **Change.** When adding a tool, extract domain handlers (service lifecycle, metrics,
+      disk diagnostics) behind the existing registration layer instead of adding more
+      branches to one module. Raise each floor when the extracted area has tests; never
+      lower a floor to land a change. Do not move policy out of the library.
+- [ ] **Acceptance.** New domain modules have focused tests; the coverage floors move up
+      with the extracted code; no tool bypasses the executor/security interface.
+
+#### Recommended sequence
+
+1. R1 + R2, together with 3.8 Phase 5 (the boundary must be real and tested before it is
+   recommended). Coordinate the policy vocabulary with the pi-sandbox egress work.
+2. R3 + R4 (memory bound and redaction) before 3.7 Phase 2 multiplies concurrent calls.
+3. R5 + R6 (operator bootstrap and installer) before the next container release.
+4. R7 + R8 as normal maintenance; R7 can land with any image change.
+
+3.7 Phase 1 (config and target registry) is independent and may proceed in parallel. Do not
+*deploy* multi-target support next to an untrusted author until R1, R2 and 3.8 Phases 3/3b
+are complete.
+
 ## 4. Documentation drift
 
 These are part of their parent items; do not close a parent until the documentation is
@@ -1434,13 +1598,16 @@ longer tracked here.
   forward over the executor SSH connection and reconnects on drop.
 - **All tool changes:** update `README.md`, `docs/tools.md`, `docs/configuration.md`,
   `docs/security-model.md` and `CHANGELOG.md` in the same change.
+- **Review records:** `docs/reviews/` holds frozen snapshots. When a review is triaged, add
+  its accepted items to section 3 (or a `3.x` subsection), mark the snapshot status in
+  [`docs/reviews/README.md`](reviews/README.md), and do not keep a parallel TODO list there.
 
 ## 5. Implementation order
 
-1. **All P0, P1 and P2 items are complete** (P0-1 through P0-8, P1-1 through P1-20, P2-1
-   through P2-15). The serial-identity work (P1-19), the canonical device vocabulary
-   (P1-20) and the structured-output depth (P2-15) landed through `0.4.0`. The container
-   runtime (3.8 Phase 2) is implemented in the current tree.
+1. **All pre-0.5.0 P0, P1 and P2 items are complete** (P0-1 through P0-8, P1-1 through
+   P1-20, P2-1 through P2-15). The serial-identity work (P1-19), the canonical device
+   vocabulary (P1-20) and the structured-output depth (P2-15) landed through `0.4.0`. The
+   container runtime (3.8 Phase 2) is implemented in the current tree.
 2. **Release:** `0.5.0` followed the steady-state path in `docs/releasing.md`: clean build,
    `uv publish --dry-run`, signed tag, trusted-publishing workflow, then the live smoke checks
    in 6.3 with the installed packages. The next release uses the same path, and now also
@@ -1449,15 +1616,17 @@ longer tracked here.
    blast radius of one process; do not deploy it next to an untrusted agent before the
    author sandbox integration (Phase 3) and end-to-end isolation checks (Phase 5). The
    Ansible deployer is a separate cross-repo workstream.
-4. **The next in-repo work is release channel parity (3.9), then multi-target support
-   (3.7).** 3.9 first, because it closes the gap where one tag can publish the PyPI packages
-   and the container image from different states. For 3.7, start with Phase 1 (config and
-   registry), then Phase 2 (remote-server-mcp) and Phase 3 (disk-health-mcp), keeping the
-   single-target process as the default deployment. 3.8 Phase 3 and Phase 5 continue as
-   deployment work.
-5. **Remaining work is outside this repository:** the catafalco prerequisites in 3.5.
-6. **P2-15 is complete** (structured host/status data and SnapRAID parsing). The remaining
-   open work is the catafalco host-side self-test privilege wrapper in 3.6.
+4. **The next in-repo work is the rest of the 2026-11-05 review hardening (3.10), then
+   multi-target support (3.7).** 3.9 is complete. R1/R2 (real, tested egress and author/MCP
+   boundaries) are done; land R3/R4 (bounded collection and honest redaction) next; R5/R6
+   before the next container release, R7/R8 as maintenance. 3.7 Phase 1 may run in parallel,
+   but do not deploy 3.7 next to an untrusted author before 3.8 Phases 3/3b are done. Keep
+   the single-target process as the default deployment.
+5. **Remaining external work is outside this repository:** the catafalco prerequisites in
+   3.5.
+6. **P2-15 is complete** (structured host/status data and SnapRAID parsing). The only
+   remaining item from the pre-0.5.0 backlog is the catafalco host-side self-test privilege
+   wrapper in 3.6.
 
 There is no pending PR split; the branch history is linear on `main`.
 
@@ -1591,8 +1760,12 @@ label (for example `watchtower`, `wud`, `socket-proxy`) still need
 - Redaction is defense-in-depth for files the operator intentionally exposes (`.env`,
   compose/config files). Real credential stores remain blocked.
 - `docs/modernization-plan.md` is the only backlog. Review/handoff documents are merged here
-  rather than kept as parallel plans. The plan is extended, not replaced: completed sections
-  remain as history because they carry live findings and verification evidence.
+  rather than kept as parallel plans; frozen reviews live in `docs/reviews/` and carry no
+  open TODOs. The plan is extended, not replaced: completed sections remain as history
+  because they carry live findings and verification evidence.
+- Container egress is allowlisted by destination, not implied by a network name. The
+  pi-sandbox egress proxy and the server-mcp `mcp-egress` policy should share one policy
+  vocabulary so an operator can reason about both boundaries together.
 - The MCP policy is not a boundary against a local agent that can edit the MCP or use a
   host shell. The fix is separate trust domains (3.8), not another confirmation prompt.
 - Do not add a generic `ansible-playbook` or deployment tool to `server-mcp`. Deployment is a
@@ -1606,15 +1779,16 @@ label (for example `watchtower`, `wud`, `socket-proxy`) still need
 
 ## 8. Resume instructions
 
-1. The in-repo backlog is complete except release channel parity in 3.9 and multi-target
-   support in 3.7, in that order. The 3.8 Phase 2 container runtime is implemented; the
-   author sandbox integration, deployer and end-to-end isolation checks remain deployment
-   work. The remaining open work outside this repository is the catafalco prerequisites in
-   3.5.
-2. For new in-repo work, the next item is 3.9 (release channel parity), then 3.7
-   (multi-target). The 3.8 Phase 2 runtime is done; Phase 3 (author sandbox) and Phase 5
-   (isolation verification) are deployment work. Add new items to section 3 with a checkbox
-   that names the file or area to change.
+1. The in-repo open work is the review hardening in 3.10 (R1–R8) and multi-target support
+   in 3.7. Release channel parity (3.9) is complete. The 3.8 Phase 2 container runtime is
+   implemented; the author sandbox integration, deployer and end-to-end isolation checks
+   (3.8 Phases 3, 3b, 4, 5) remain deployment work. The remaining open work outside this
+   repository is the catafalco prerequisites in 3.5 and the host-side self-test privilege
+   in 3.6.
+2. For new in-repo work, start with 3.10 R3/R4 (R1/R2 are done), then 3.7 Phase 1. Add new items
+   to section 3 with a checkbox that names the file or area to change; do not create a
+   second backlog in `docs/reviews/`. The 3.8 Phase 2 runtime is done; Phase 3 (author
+   sandbox) and Phase 5 (isolation verification) are deployment work.
 3. Read the relevant code/doc section before editing; keep the security model in
    `docs/security-model.md` intact.
 4. Add or update tests in the same PR (P0 items require regression tests).

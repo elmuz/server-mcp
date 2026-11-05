@@ -190,6 +190,19 @@ class SSHManager(ExecutorBase):
         if connect_timeout:
             kwargs["connect_timeout"] = int(connect_timeout)
 
+        proxy_command = self.ssh_config.get("proxy_command")
+        if proxy_command:
+            if isinstance(proxy_command, str):
+                kwargs["proxy_command"] = proxy_command
+            elif isinstance(proxy_command, (list, tuple)) and all(
+                isinstance(part, str) for part in proxy_command
+            ):
+                kwargs["proxy_command"] = list(proxy_command)
+            else:
+                raise SSHConfigurationError(
+                    "ssh.proxy_command must be a string or a list of strings"
+                )
+
         # Explicitly pass known_hosts so that a missing file cannot silently
         # degrade to "no verification" (asyncssh does that by default).
         kwargs["known_hosts"] = self._known_hosts_option()

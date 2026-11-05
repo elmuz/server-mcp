@@ -113,7 +113,10 @@ class InfluxDBClient:
     def _get_session(self) -> aiohttp.ClientSession:
         """Return the client's shared HTTP session, creating it on demand."""
         if self._session is None:
-            self._session = aiohttp.ClientSession()
+            # The container deployment sets HTTP(S)_PROXY to the policy proxy.
+            # trust_env makes aiohttp use it; NO_PROXY keeps loopback tunnels
+            # and the MCP control network direct.
+            self._session = aiohttp.ClientSession(trust_env=True)
         return self._session
 
     async def close(self) -> None:
@@ -315,7 +318,10 @@ class PrometheusClient:
     def _get_session(self) -> aiohttp.ClientSession:
         """Return the client's shared HTTP session, creating it on demand."""
         if self._session is None:
-            self._session = aiohttp.ClientSession()
+            # The container deployment sets HTTP(S)_PROXY to the policy proxy.
+            # trust_env makes aiohttp use it; NO_PROXY keeps loopback tunnels
+            # and the MCP control network direct.
+            self._session = aiohttp.ClientSession(trust_env=True)
         return self._session
 
     async def close(self) -> None:

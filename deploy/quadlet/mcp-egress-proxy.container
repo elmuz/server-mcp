@@ -1,0 +1,31 @@
+[Unit]
+Description=Server MCP egress policy proxy
+PartOf=server-mcp.target
+
+[Container]
+Image=localhost/server-mcp:dev
+ContainerName=mcp-egress-proxy
+Network=mcp-egress.network
+Network=mcp-egress-uplink.network
+UserNS=keep-id
+User=1000
+Group=1000
+ReadOnly=true
+DropCapability=ALL
+NoNewPrivileges=true
+RunInit=true
+PidsLimit=128
+Memory=256m
+Tmpfs=/tmp:rw,nosuid,nodev,size=16m
+Volume=%h/.config/server-mcp/egress-policy.conf:/etc/server-mcp/egress-policy.conf:ro
+Exec=python /usr/local/bin/egress-proxy.py --listen 0.0.0.0 --port 3128 --policy /etc/server-mcp/egress-policy.conf
+HealthCmd=python -c "import socket; socket.create_connection(('127.0.0.1', 3128), 2).close()"
+HealthInterval=30s
+HealthTimeout=5s
+HealthStartPeriod=10s
+HealthRetries=3
+
+[Service]
+Restart=always
+RestartSec=5
+TimeoutStopSec=30

@@ -7,6 +7,7 @@
 #
 # The install is idempotent. Existing configuration, keys and tokens are never
 # overwritten unless --force is given; --force also replaces installed units.
+# The egress policy is rendered from the installed configs when it is missing.
 
 set -euo pipefail
 
@@ -67,6 +68,22 @@ install_if_missing \
   "${REPO_DIR}/deploy/examples/catafalco/ssh/id_ed25519.example" \
   "${CONFIG_DIR}/ssh/id_ed25519" 0600
 
+# The egress proxy policy is host-owned and read-only in the proxy container.
+# Derive it from the same configs the MCP services use when it is missing.
+if [[ ! -e "${CONFIG_DIR}/egress-policy.conf" ]]; then
+  if command -v uv >/dev/null 2>&1; then
+    uv run --frozen --no-dev --all-packages --directory "${REPO_DIR}" \
+      python "${REPO_DIR}/deploy/render-egress-policy.py" \
+      --remote "${CONFIG_DIR}/remote.yaml" \
+      --disk "${CONFIG_DIR}/disk.yaml" \
+      --output "${CONFIG_DIR}/egress-policy.conf" >/dev/null
+  else
+    install -m 0600 \
+      "${REPO_DIR}/deploy/examples/catafalco/egress-policy.conf" \
+      "${CONFIG_DIR}/egress-policy.conf"
+  fi
+fi
+
 if [[ ! -e "${CONFIG_DIR}/secrets/http-token" ]]; then
   umask 077
   head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n' \
@@ -78,6 +95,8 @@ fi
 for unit in \
   pi-control.network \
   mcp-egress.network \
+  mcp-egress-uplink.network \
+  mcp-egress-proxy.container \
   mcp-remote.container \
   mcp-disk.container; do
   install_if_missing "${REPO_DIR}/deploy/quadlet/${unit}" "${UNIT_DIR}/${unit}" 0644
@@ -102,8 +121,9 @@ echo
 echo "Next steps:"
 echo "  1. Set ssh.host in ${CONFIG_DIR}/remote.yaml and disk.yaml."
 echo "  2. Replace ${CONFIG_DIR}/ssh/id_ed25519 and populate known_hosts."
-echo "  3. Build or pull the image and set Image= in the two .container units."
-echo "  4. Start the stack:"
+echo "  3. Review ${CONFIG_DIR}/egress-policy.conf; it is default-deny."
+echo "  4. Build or pull the image and set Image= in the .container units."
+echo "  5. Start the stack:"
 echo "       systemctl --user enable --now server-mcp.target"
 echo
 echo "The bearer token is ${CONFIG_DIR}/secrets/http-token."

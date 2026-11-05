@@ -128,8 +128,10 @@ elsewhere. Disk diagnostics work the same way with `disk-health-mcp` and
 
 For a coding-agent sandbox that is separate from the privileged MCP process, the repository
 ships one image and Quadlet units for both servers. The MCP runs as a systemd user service,
-with read-only configuration/key/token mounts, an internal `pi-control` network and a
-separate target-facing `mcp-egress` network.
+with read-only configuration/key/token mounts, an internal `pi-control` network and an
+internal `mcp-egress` network whose only route out is a default-deny policy proxy. The
+proxy allows only the SSH and metric destinations derived from the configs; see
+[container deployment](docs/container.md#networks).
 
 ```bash
 podman build -f container/Dockerfile -t localhost/server-mcp:dev .
