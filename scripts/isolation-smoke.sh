@@ -160,6 +160,7 @@ pass "author cannot read MCP secrets or a runtime socket"
   --read-only \
   --cap-drop=ALL \
   --security-opt=no-new-privileges \
+  --user "$(id -u):$(id -g)" \
   "${engine_opts[@]}" \
   --mount "type=bind,src=$tmp/config.yaml,dst=/etc/server-mcp/config.yaml,ro" \
   --mount "type=bind,src=$tmp/token,dst=/run/secrets/mcp_token,ro" \
@@ -181,6 +182,7 @@ pass "MCP cannot read the author workspace"
   --read-only \
   --cap-drop=ALL \
   --security-opt=no-new-privileges \
+  --user "$(id -u):$(id -g)" \
   "${engine_opts[@]}" \
   --mount "type=bind,src=$tmp/config.yaml,dst=/etc/server-mcp/config.yaml,ro" \
   --mount "type=bind,src=$tmp/token,dst=/run/secrets/mcp_token,ro" \

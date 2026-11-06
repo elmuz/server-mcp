@@ -21,7 +21,9 @@ versioning.
 - The container smoke test attaches the egress proxy to the internal network and
   then connects the uplink, instead of passing two `--network` flags to `docker run`.
   Docker only honours one at creation time, so the previous form left the proxy off
-  the internal network and the probe failed with a DNS error.
+  the internal network and the probe failed with a DNS error. The proxy and the MCP
+  isolation probes run as the invoking UID, so they can read the 0600 policy, config,
+  key and token files and write the audit volume on Docker as well as Podman.
 
 ### Changed
 

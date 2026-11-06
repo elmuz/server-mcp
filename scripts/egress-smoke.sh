@@ -132,6 +132,7 @@ chmod 0600 "$tmp/egress-policy.conf"
   --read-only \
   --cap-drop=ALL \
   --security-opt=no-new-privileges \
+  --user "$(id -u):$(id -g)" \
   "${engine_opts[@]}" \
   --mount "type=bind,src=$tmp/egress-policy.conf,dst=/etc/server-mcp/egress-policy.conf,ro" \
   --entrypoint python \
