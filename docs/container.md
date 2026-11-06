@@ -78,7 +78,13 @@ The installer:
   `~/.config/containers/systemd/` and the `server-mcp.target` user unit under
   `~/.config/systemd/user/` (Quadlet ignores plain `.target` files).
 
-It never overwrites existing configuration, keys or tokens unless `--force` is given.
+It never overwrites existing configuration, keys or tokens. `--force` refreshes the
+installed units only. `--replace-config` replaces existing configs, `.env`, `known_hosts`
+and the SSH-key placeholder, keeping a timestamped `.bak.<UTC timestamp>` next to each
+replaced file. The bearer token and the egress policy are never replaced.
+
+When it installs or refreshes units, the installer runs `systemctl --user daemon-reload`
+and exits non-zero if the reload fails.
 
 After installing:
 

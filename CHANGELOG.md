@@ -19,6 +19,10 @@ versioning.
 
 ### Changed
 
+- `deploy/install.sh` separates unit refresh from configuration replacement. `--force`
+  now refreshes installed units only, while `--replace-config` replaces configs, `.env`,
+  `known_hosts` and the SSH-key placeholder with a timestamped backup. A failed
+  `systemctl --user daemon-reload` is reported and makes the installer exit non-zero.
 - Bootstrap documentation now requires authenticating the SSH host key before it is added
   to `known_hosts`: scan to a temporary file, check the fingerprint with `ssh-keygen -lf`,
   compare it with the host console or inventory, then append. `ssh-keyscan` output is no

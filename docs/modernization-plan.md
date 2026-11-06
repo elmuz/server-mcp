@@ -21,11 +21,12 @@ snapshots remain in git history.
   `41553210242` published `ghcr.io/elmuz/server-mcp:v0.5.0` (index digest
   `sha256:1f6854eb5949445f80022bee5c55524e570a26c8c5b5e291c4365f610c968c0c`), and
   `uvx --no-cache` resolves `0.5.0` for both servers. 3.9 release channel parity is
-  complete. The next in-repo work is the review hardening in 3.10 (R5/R6 next), then
+  complete. The next in-repo work is the review hardening in 3.10 (R7/R8 next), then
   multi-target support (3.7). The author sandbox integration and the deployer/approval
   boundary are deployment work outside this repository. The remaining external prerequisites
   are the catafalco items in 3.5 and the host-side self-test privilege in 3.6.
-- **Last updated:** 2026-11-06 (lands R4: comment and YAML block-scalar redaction; earlier
+- **Last updated:** 2026-11-06 (lands R6: installer unit refresh is separate from
+  configuration replacement; earlier
   landed R3: bounded collection in the executors and HTTP clients; R1/R2: internal
   `mcp-egress` plus a default-deny policy proxy, and automated author/MCP isolation checks;
   triages the post-`0.5.0` review
@@ -1536,15 +1537,22 @@ maintainability and supply-chain polish. None of these is a known wrong tool res
 
 #### R6 P1 — make installer `--force` safe
 
-- [ ] **Problem.** `deploy/install.sh` applies `--force` to configs, `.env`,
+- [x] **Done (2026-11-06).** `--force` now refreshes installed units only.
+      `--replace-config` is the explicit opt-in for replacing `remote.yaml`, `disk.yaml`,
+      `.env`, `known_hosts` and the SSH-key placeholder, and each replaced file keeps a
+      timestamped `.bak.<UTC timestamp>` backup. The token and egress policy are never
+      replaced. A failed `systemctl --user daemon-reload` is reported and exits non-zero.
+      `scripts/test-install.sh` covers the three behaviors against a temporary
+      `HOME`/`XDG_*` tree and runs in CI.
+- [x] **Problem.** `deploy/install.sh` applies `--force` to configs, `.env`,
       `known_hosts`, the SSH-key placeholder and units alike, so refreshing units can
       overwrite operator configuration with examples. `systemctl --user daemon-reload ||
       true` can also hide a failed install.
-- [ ] **Change.** Separate "refresh units" from "replace config/secrets". For a config or
+- [x] **Change.** Separate "refresh units" from "replace config/secrets". For a config or
       key overwrite, require an explicit flag and keep a timestamped backup (or print a
       diff/preview and refuse non-interactively). Report `daemon-reload` failure and exit
       non-zero when a reload was required.
-- [ ] **Acceptance.** `--force` unit refresh leaves `remote.yaml`, `disk.yaml`, `.env`,
+- [x] **Acceptance.** `--force` unit refresh leaves `remote.yaml`, `disk.yaml`, `.env`,
       `known_hosts` and `ssh/id_ed25519` unchanged; replacing a config requires the
       explicit flag; a failing `daemon-reload` makes the installer fail. Tests use a
       temporary `HOME`/`XDG_*` tree.

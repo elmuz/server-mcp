@@ -10,6 +10,8 @@ Quadlet units and example configuration for the containerized MCP services.
   the default-deny `egress-policy.conf`.
 - `render-egress-policy.py` — derives the proxy allow rules from the installed configs.
 - `install.sh` — creates the user config/state directories, token, policy and units.
+  `--force` refreshes units only; `--replace-config` replaces configuration with a
+  timestamped backup.
 
 See [docs/container.md](../docs/container.md) for the full deployment, token, network and
 verification instructions.

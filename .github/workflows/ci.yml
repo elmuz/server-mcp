@@ -26,5 +26,6 @@ jobs:
       - run: uv run --directory packages/server-management-lib pytest -q
       - run: uv run --directory apps/remote-server-mcp pytest -q
       - run: uv run --directory apps/disk-health-mcp pytest -q
+      - run: scripts/test-install.sh
       - run: uv run pymarkdown -c .pymarkdown scan .
       - run: uv run python scripts/check_md_links.py
