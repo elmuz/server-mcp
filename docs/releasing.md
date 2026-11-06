@@ -191,12 +191,14 @@ OIDC, and [`.github/workflows/publish.yml`](../.github/workflows/publish.yml) im
 Keep the manual path only as a fallback (§6).
 
 **Verified with `v0.2.1`** (run `39507146796`), **`v0.3.0`** (run `39852335149`),
-**`v0.4.0`** (run `39869621919`) **and `v0.5.0`** (run `41553210132`): pushing the signed tag
-was the only manual step, the job passed the tag/version check, tests and all three uploads,
-and no `UV_PUBLISH_TOKEN` existed on the runner or in the repository. `v0.5.0` also exercised
-the image gate: run `41553210242` published
-`ghcr.io/elmuz/server-mcp:v0.5.0` (index digest
-`sha256:1f6854eb5949445f80022bee5c55524e570a26c8c5b5e291c4365f610c968c0c`) from the same
+**`v0.4.0`** (run `39869621919`), **`v0.5.0`** (run `41553210132`) **and `v0.6.0`**
+(run `42306355613`): pushing the signed tag was the only manual step, the job passed the
+tag/version check, tests and all three uploads, and no `UV_PUBLISH_TOKEN` existed on the
+runner or in the repository. `v0.5.0` and `v0.6.0` also exercised the image gate: run
+`41553210242` published `ghcr.io/elmuz/server-mcp:v0.5.0` (index digest
+`sha256:1f6854eb5949445f80022bee5c55524e570a26c8c5b5e291c4365f610c968c0c`) and run
+`42306355659` published `ghcr.io/elmuz/server-mcp:v0.6.0` (index digest
+`sha256:23efd814f012c2c5bfdd9de99fc95d6e3be1d8c60d19b1a2b9b44cabf3a1dc55`) from the same
 commit.
 
 **Register the publisher** (once per project) in PyPI → the project → *Publishing* → *Add a

@@ -14,19 +14,20 @@ snapshots remain in git history.
   the stale-SMART and short-credential-key fixes. `v0.2.1` was published by
   `.github/workflows/publish.yml` through PyPI trusted publishing with no stored token
   (run `39507146796`), so the steady-state release path is verified.
-  **Current release:** `v0.5.0` (signed, 2026-11-03, on `0968abe`) ships the 3.8 Phase 2
-  container runtime (image, Quadlet units, `deploy/install.sh`, token-file transport,
-  `--check-config`), the InfluxDB schema tool and the redaction/dump-refusal fixes. Publish
-  run `41553210132` uploaded all three packages in library→apps order, the image run
-  `41553210242` published `ghcr.io/elmuz/server-mcp:v0.5.0` (index digest
-  `sha256:1f6854eb5949445f80022bee5c55524e570a26c8c5b5e291c4365f610c968c0c`), and
-  `uvx --no-cache` resolves `0.5.0` for both servers. 3.9 release channel parity is
+  **Current release:** `v0.6.0` (signed, 2026-11-06, on `dd4da88`) ships the default-deny
+  egress policy and author/MCP isolation checks, bounded command/HTTP collection, the
+  commented/block-scalar secret-redaction fixes, the installer unit/config split and the
+  verified SSH host-key bootstrap. Publish run `42306355613` uploaded all three packages in
+  library→apps order, the image run `42306355659` published
+  `ghcr.io/elmuz/server-mcp:v0.6.0` (index digest
+  `sha256:23efd814f012c2c5bfdd9de99fc95d6e3be1d8c60d19b1a2b9b44cabf3a1dc55`), and
+  `uvx --no-cache` resolves `0.6.0` for both servers. 3.9 release channel parity is
   complete. The next in-repo work is the review hardening in 3.10 (R7/R8 next), then
   multi-target support (3.7). The author sandbox integration and the deployer/approval
   boundary are deployment work outside this repository. The remaining external prerequisites
   are the catafalco items in 3.5 and the host-side self-test privilege in 3.6.
-- **Last updated:** 2026-11-06 (lands R6: installer unit refresh is separate from
-  configuration replacement; earlier
+- **Last updated:** 2026-11-06 (released `0.6.0` on both channels; lands R6: installer unit
+  refresh is separate from configuration replacement; earlier
   landed R3: bounded collection in the executors and HTTP clients; R1/R2: internal
   `mcp-egress` plus a default-deny policy proxy, and automated author/MCP isolation checks;
   triages the post-`0.5.0` review
@@ -913,6 +914,15 @@ complete; the one host-side prerequisite remains in catafalco.
       redaction. Built from a clean `dist/`, published by the trusted-publishing workflow
       (run `39852335149`) in library→apps order, and verified with `uvx` and installed-package
       smoke calls.
+- [x] **`v0.6.0`.** Signed annotated tag on `dd4da88`
+      (`chore(release): 0.6.0`). Bumped the library pin to `>=0.6,<0.7` in both apps before
+      the tag. Publish run `42306355613` uploaded library→apps, and image run
+      `42306355659` published `ghcr.io/elmuz/server-mcp:v0.6.0` (index digest
+      `sha256:23efd814f012c2c5bfdd9de99fc95d6e3be1d8c60d19b1a2b9b44cabf3a1dc55`).
+      `uvx --no-cache` installs `0.6.0` for both servers. The first tag attempt failed
+      before publishing because the new egress smoke test used two `--network` flags and
+      the image's default UID on Docker; the unpublished tag was recreated on the fixed
+      commit and the rerun passed.
 - [x] **`v0.5.0`.** Signed annotated tag on `0968abe`
       (`chore(release): 0.5.0`). Bumped the library pin to `>=0.5,<0.6` in both apps before
       the tag, so the published wheels resolve. `uv publish --dry-run` checked all six
