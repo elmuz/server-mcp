@@ -6,6 +6,8 @@ versioning.
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-11-06
+
 ### Fixed
 
 - Secret redaction now covers commented-out credentials (`# API_TOKEN=...`) and YAML

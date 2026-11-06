@@ -1,13 +1,13 @@
 [project]
 name = "remote-server-mcp"
-version = "0.5.0"
+version = "0.6.0"
 description = "Security-first MCP server for managing Docker services on a remote server or on the local host."
 readme = "README.md"
 license = "MIT"
 requires-python = ">=3.11"
 dependencies = [
     "mcp>=2.3,<3",
-    "server-management-lib>=0.5,<0.6",
+    "server-management-lib>=0.6,<0.7",
 ]
 
 authors = [
