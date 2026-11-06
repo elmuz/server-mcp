@@ -1303,6 +1303,8 @@ the MCP loads, the split provides no protection.
   points, the token file, `--check-config` and the HTTP bearer-token middleware under Docker
   and Podman, then runs `scripts/egress-smoke.sh` and `scripts/isolation-smoke.sh`. The
   egress allowlist and author/MCP isolation directions are therefore automated (R1/R2).
+  The author-side launcher checks live in the pi-sandbox isolation self-test; this
+  repository verifies the MCP side with a representative author container.
 
 #### Acceptance criteria
 
@@ -1432,7 +1434,9 @@ maintainability and supply-chain polish. None of these is a known wrong tool res
       proxy for HTTP(S) and SSH (`server-mcp-connect`), and `deploy/render-egress-policy.py`
       derives the allow rules from the configs. `scripts/egress-smoke.sh` proves the
       reachable/blocked pair, direct-route denial and that the policy is not visible to the
-      MCP container. The policy syntax is shared with pi-sandbox.
+      MCP container. The policy syntax is shared with pi-sandbox; the pi-sandbox proxy
+      copy is kept in sync with this implementation, and its live isolation test now covers
+      an unlisted public host, an unlisted IPv6 literal and policy invisibility.
 - [x] **Problem.** `deploy/quadlet/mcp-egress.network` only sets `NetworkName=mcp-egress`.
       `docs/container.md` and `README.md` describe the network as the MCP's route to the
       target and metric endpoints, but a Podman bridge with NAT reaches the LAN and the host
@@ -1462,7 +1466,10 @@ maintainability and supply-chain polish. None of these is a known wrong tool res
       `mcp-egress`, read the MCP config/key/known_hosts/token or a runtime socket, and that
       the MCP cannot read an author workspace path; the audit volume is the only writable
       mount. `scripts/container-smoke.sh` now runs both boundary scripts, so removing a
-      boundary fails CI.
+      boundary fails CI. The author in that script is a representative container; the real
+      launcher's companion checks are in pi-sandbox `scripts/isolation-test.sh`
+      (sensitive-path guard, `pi-egress`/`pi-control` reachability, `mcp-egress`
+      unreachability).
 - [x] **Problem.** 3.8 Phase 5 is still verified by hand. The container smoke test proves
       startup and token middleware, not that the author cannot read MCP secrets or that the
       MCP cannot read the author workspace.
