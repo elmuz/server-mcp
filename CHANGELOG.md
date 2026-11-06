@@ -18,6 +18,10 @@ versioning.
   the rest without retaining it, and the InfluxDB/Prometheus clients consume response
   bodies in chunks before decoding. A command or endpoint that emits hundreds of megabytes
   can no longer exhaust the MCP process; oversized bodies return a clear limit error.
+- The container smoke test attaches the egress proxy to the internal network and
+  then connects the uplink, instead of passing two `--network` flags to `docker run`.
+  Docker only honours one at creation time, so the previous form left the proxy off
+  the internal network and the probe failed with a DNS error.
 
 ### Changed
 

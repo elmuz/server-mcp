@@ -124,9 +124,11 @@ allow $echo_ip 19000
 POLICY
 chmod 0600 "$tmp/egress-policy.conf"
 
+# Docker accepts only one --network at creation time, so attach the proxy to
+# the internal network first and connect the uplink afterwards. Podman accepts
+# both forms; using network connect keeps the two engines on one path.
 "$engine" run -d --name "$proxy" \
   --network "$egress_net" \
-  --network "$uplink_net" \
   --read-only \
   --cap-drop=ALL \
   --security-opt=no-new-privileges \
@@ -137,16 +139,30 @@ chmod 0600 "$tmp/egress-policy.conf"
     --listen 0.0.0.0 --port 3128 \
     --policy /etc/server-mcp/egress-policy.conf \
   >/dev/null
+"$engine" network connect "$uplink_net" "$proxy" >/dev/null
 
-# Wait for the proxy to listen.
+# Wait for the proxy to listen. A proxy that never starts must fail here with
+# its logs, not later as an opaque DNS error in the probe.
+proxy_ready=0
 for _ in $(seq 1 30); do
   if "$engine" exec "$proxy" python -c \
     "import socket; socket.create_connection(('127.0.0.1', 3128), 1).close()" \
     >/dev/null 2>&1; then
+    proxy_ready=1
     break
   fi
   sleep 1
 done
+if [[ "$proxy_ready" -ne 1 ]]; then
+  "$engine" logs "$proxy" >&2 || true
+  fail "egress proxy did not start listening"
+fi
+
+# Address the proxy by its internal-network IP. Container-name DNS is not
+# guaranteed on every engine/network combination, and the probe only needs
+# the internal side.
+proxy_ip="$("$engine" inspect -f "{{(index .NetworkSettings.Networks \"$egress_net\").IPAddress}}" "$proxy")"
+[[ -n "$proxy_ip" ]] || fail "could not determine the proxy address on $egress_net"
 
 probe="$(cat <<'PY'
 import os
@@ -246,8 +262,8 @@ PY
   --cap-drop=ALL \
   --security-opt=no-new-privileges \
   "${engine_opts[@]}" \
-  --env "PROXY=http://$proxy:3128" \
-  --env "PROXY_HOST=$proxy" \
+  --env "PROXY=http://$proxy_ip:3128" \
+  --env "PROXY_HOST=$proxy_ip" \
   --env "ALLOWED=$allowed_ip:18080" \
   --env "BLOCKED=$blocked_ip:18081" \
   --env "ECHO=$echo_ip:19000" \
