@@ -127,7 +127,8 @@ remote-server-mcp --transport streamable-http --http-host 127.0.0.1 --http-port 
 
 The endpoint is `/mcp` by default (`transport.path`). A non-loopback bind address is
 refused unless a bearer token is configured. Every HTTP request must then send
-`Authorization: Bearer <token>`.
+`Authorization: Bearer <token>`. The client is responsible for expanding any environment
+variable into that header; the server only validates the resulting bearer value.
 
 The token can come from:
 

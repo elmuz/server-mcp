@@ -207,6 +207,12 @@ The file must be mode `0600` (or `0400`). The server refuses to start with a
 group/other-readable token file. The Pi sandbox reads the same file with `MCP_TOKEN_FILE`
 and sends it as `Authorization: Bearer <token>`.
 
+The client is responsible for expanding the token into the header. Pi expands
+`${MCP_TOKEN}` in `headers`; the pi-sandbox launcher exports it and never writes the value
+into the config. If the variable is missing, Pi refuses to connect instead of sending the
+literal text. The server only validates the resulting bearer value. See the pi-sandbox
+[MCP client contract](https://github.com/elmuz/pi-sandbox/blob/main/docs/mcp.md#client-header-expansion).
+
 Rotate the token by replacing the file and restarting the target:
 
 ```bash

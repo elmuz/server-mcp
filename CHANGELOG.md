@@ -6,6 +6,13 @@ versioning.
 
 ## [Unreleased]
 
+### Changed
+
+- The MCP client auth contract is now explicit: the client expands environment variables
+  into the `Authorization` header, and the server only validates the resulting bearer
+  value. The harness and container docs cross-link the pi-sandbox contract, which records
+  that Pi expands `${MCP_TOKEN}` and fails closed when the variable is missing.
+
 ## [0.6.0] - 2026-11-06
 
 ### Fixed

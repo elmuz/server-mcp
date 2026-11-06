@@ -116,7 +116,16 @@ only the container-specific paths from the installed host config:
 The disk server uses the same pattern with `DISK_HEALTH_MCP_CONFIG`,
 `disk-health-mcp` and `disk.jsonl`. This lets the host process use the installed
 configuration while writing audit records to the host state directory. The
-sandbox file keeps the container endpoints and `${MCP_TOKEN}`.
+sandbox file keeps the container endpoints and
+`"Authorization": "Bearer ${MCP_TOKEN}"`.
+
+Pi expands `${NAME}` in `headers` and `env` values from the environment. The
+pi-sandbox launcher exports `MCP_TOKEN` and never writes the value into the
+config. If the variable is missing, Pi refuses to connect instead of sending
+the literal text. See the pi-sandbox
+[MCP client contract](https://github.com/elmuz/pi-sandbox/blob/main/docs/mcp.md#client-header-expansion).
+The server only validates the resulting bearer value; it does not expand
+variables.
 
 User-level:
 
