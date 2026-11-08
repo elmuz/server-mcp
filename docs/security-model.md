@@ -282,10 +282,13 @@ model cannot choose the transport or the token.
   keeps the agent away from host credentials during the session, but it does not protect
   files the operator later executes on the host. An untrusted agent can write
   `.pi/mcp.json`, `.pi/extensions`, `AGENTS.md`, git hooks, test configuration, build
-  metadata or scripts into the shared checkout. Running host `pi`, tests, build, deploy or
+  metadata or scripts into a shared checkout. Running host `pi`, tests, build, deploy or
   `pre-commit` from that checkout then runs agent-controlled files as the host user, and
-  ignored files such as `.pi/` do not appear in `git diff`. Use a separate sandbox clone
-  and approved commits, or review every changed and ignored file before host execution.
+  ignored files such as `.pi/` do not appear in `git diff`. Use
+  `pi-sandbox --workspace-mode ephemeral` for untrusted sessions: it copies the checkout
+  into launcher-owned state, mounts only the copy, and never writes the host checkout.
+  The parked copy remains untrusted output, so review it before executing anything inside
+  it. `rw` remains the explicit shared-checkout mode for trusted use.
 - **Containers need a service directory or an allowlist entry.** A service directory
   resolves to its containers through the `com.docker.compose.project` label (with a
   same-name fallback). A standalone container that has no directory under `services_path`

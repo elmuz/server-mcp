@@ -23,11 +23,13 @@ snapshots remain in git history.
   `sha256:23efd814f012c2c5bfdd9de99fc95d6e3be1d8c60d19b1a2b9b44cabf3a1dc55`), and
   `uvx --no-cache` resolves `0.6.0` for both servers. 3.9 release channel parity is
   complete. The next in-repo work is the review hardening in 3.10 (R7/R8 next), then
-  multi-target support (3.7). The author sandbox integration and the deployer/approval
-  boundary are deployment work outside this repository. The remaining external prerequisites
+  multi-target support (3.7). The author sandbox contract and workspace isolation
+  (3.8 Phases 3/3b) are implemented by pi-sandbox; the deployer/approval boundary and
+  final deployment verification remain external deployment work. The remaining external prerequisites
   are the catafalco items in 3.5 and the host-side self-test privilege in 3.6.
-- **Last updated:** 2026-11-06 (released `0.6.0` on both channels; lands R6: installer unit
-  refresh is separate from configuration replacement; earlier
+- **Last updated:** 2026-11-07 (pi-sandbox `--workspace-mode ephemeral` closes the
+  author-sandbox workspace gap; released `0.6.0` on both channels; lands R6: installer
+  unit refresh is separate from configuration replacement; earlier
   landed R3: bounded collection in the executors and HTTP clients; R1/R2: internal
   `mcp-egress` plus a default-deny policy proxy, and automated author/MCP isolation checks;
   triages the post-`0.5.0` review
@@ -1185,9 +1187,10 @@ B. Add this only after the registry is stable:
 
 ### 3.8 Containerized trust domains (runtime implemented, 2026-10-27)
 
-**Status:** the MCP runtime is implemented. The author sandbox integration, deployer and
-end-to-end isolation verification remain deployment work. This section extends the plan; it
-does not replace 3.7 or the completed history.
+**Status:** the MCP runtime is implemented. The author sandbox contract and workspace
+isolation (Phases 3/3b) are implemented by `pi-sandbox --workspace-mode ephemeral`. The
+deployer/approval boundary and final deployment verification remain deployment work. This
+section extends the plan; it does not replace 3.7 or the completed history.
 
 **Why:** the controls in [security-model.md](security-model.md) assume the agent reaches the
 target only through the MCP server. A coding agent with a shell on the control node can edit
@@ -1216,7 +1219,7 @@ credential boundaries. The human approval for deployment must live outside both.
 Host / human approval
 │
 ├── author container (untrusted model)
-│     - workspace read-write, no host home
+│     - workspace ephemeral copy read-write, no host home
 │     - no SSH keys, vault password, MCP config or Docker socket
 │     - no host PID/network/IPC; non-root; dropped capabilities
 │     - reaches only the model API and the MCP endpoint
@@ -1284,18 +1287,24 @@ the MCP loads, the split provides no protection.
   smoke-tests and publishes the image with provenance and an SBOM. The units use
   `localhost/server-mcp:dev` for local builds; replace it with the GHCR digest printed by
   the release workflow. See [container.md](container.md).
-- [ ] **Phase 3 — author sandbox.** Document a harness-agnostic sandbox template: workspace
-      read-write, no host home, no SSH keys, no vault password, no Docker socket, restricted
-      egress and the MCP endpoint as the only control-plane destination. Client-specific
-      setup stays in `docs/harnesses.md`; root docs stay harness-agnostic.
-- [ ] **Phase 3b — isolate the sandbox workspace.** The current `pi-sandbox` mounts the
-      project directory read-write, so an untrusted author can plant files that a host-side
+- [x] **Phase 3 — author sandbox.** Document a harness-agnostic sandbox template: no host
+      home, no SSH keys, no vault password, no Docker socket, restricted egress and the MCP
+      endpoint as the only control-plane destination, with an ephemeral workspace for
+      untrusted sessions. The implemented template is `pi-sandbox`; its
+      [usage](https://github.com/elmuz/pi-sandbox/blob/main/docs/usage.md) and
+      [security](https://github.com/elmuz/pi-sandbox/blob/main/docs/security.md#workspace-exposure-modes)
+      pages are the generic contract. Client-specific setup stays in `docs/harnesses.md`.
+      **Done (2026-11-07).**
+- [x] **Phase 3b — isolate the sandbox workspace.** The old `rw` mode mounted the project
+      directory read-write, so an untrusted author could plant files that a host-side
       process later executes: `.pi/mcp.json`, `.pi/extensions`, `AGENTS.md`, git hooks, test
       configuration, build metadata and scripts. Ignored paths such as `.pi/` do not appear
-      in `git diff`. Add a disposable clone or ephemeral workspace copy for sandbox
-      sessions, or make the host checkout read-only when the sandbox runs. Until then,
-      document the interim rule: never run host `pi`, tests, build, deploy or `pre-commit`
-      in a checkout an untrusted sandbox has written to without a separate review.
+      in `git diff`. `pi-sandbox --workspace-mode ephemeral` now copies the full working
+      tree, including `.git`, uncommitted changes and untracked files, into launcher-owned
+      state and mounts only the copy; the host checkout is never written. The copy is
+      parked on exit (or discarded with `--workspace-discard`) and remains untrusted output.
+      `rw` stays the explicit shared-checkout mode for trusted use. The pi-sandbox
+      `workspace-test.sh` and `isolation-test.sh` prove the contract. **Done (2026-11-07).**
 - [ ] **Phase 4 — deployer and approval.** If Ansible deployment is added, build it as a
       separate deployer, not as a `server-mcp` tool. The deployer reads only an approved
       commit, maps service names to fixed tags, runs the fixed playbook from a clean
@@ -1345,9 +1354,10 @@ the MCP loads, the split provides no protection.
   let the author container write the playbook or role that the deployer runs. The approved
   commit is the boundary.
 - **Shared writable workspace.** The author sandbox and the host development checkout can
-  be the same directory. The container prevents direct host access during the session, but
-  it cannot prevent the operator from later executing agent-written files in that checkout
-  as the host user. Treat the sandbox workspace as untrusted output until Phase 3b lands.
+  be the same directory in `rw` mode. The container prevents direct host access during the
+  session, but it cannot prevent the operator from later executing agent-written files in
+  that checkout as the host user. Use `--workspace-mode ephemeral` for untrusted sessions;
+  the parked copy is still untrusted output and must be reviewed before execution.
 - **Supply chain.** Pin image digests, build from the locked workspace, and publish the
   image only from CI. Do not let the author build the image the deployer trusts.
 - **Decided:** one image with two entry points (`remote-server-mcp` and `disk-health-mcp`),
@@ -1608,7 +1618,7 @@ maintainability and supply-chain polish. None of these is a known wrong tool res
 
 3.7 Phase 1 (config and target registry) is independent and may proceed in parallel. Do not
 *deploy* multi-target support next to an untrusted author until R1, R2 and 3.8 Phases 3/3b
-are complete.
+are complete. Those phases are now complete.
 
 ## 4. Documentation drift
 
@@ -1656,14 +1666,16 @@ longer tracked here.
    gates on a successful image build and smoke test (3.9).
 3. **The 3.8 Phase 2 MCP runtime has landed.** Multi-target support (3.7) increases the
    blast radius of one process; do not deploy it next to an untrusted agent before the
-   author sandbox integration (Phase 3) and end-to-end isolation checks (Phase 5). The
-   Ansible deployer is a separate cross-repo workstream.
+   author sandbox is deployed with `pi-sandbox --workspace-mode ephemeral` (Phases 3/3b
+   are complete) and end-to-end isolation checks (Phase 5). The Ansible deployer is a
+   separate cross-repo workstream.
 4. **The next in-repo work is the rest of the 2026-11-05 review hardening (3.10), then
    multi-target support (3.7).** 3.9 is complete. R1/R2 (real, tested egress and author/MCP
    boundaries) are done; R3 (bounded collection) and R4 (honest redaction) are done, so
    land R5/R6 before the next container release, R7/R8 as maintenance. 3.7 Phase 1 may run in parallel,
-   but do not deploy 3.7 next to an untrusted author before 3.8 Phases 3/3b are done. Keep
-   the single-target process as the default deployment.
+   but do not deploy 3.7 next to an untrusted author before the author sandbox is deployed with
+   `pi-sandbox --workspace-mode ephemeral` (3.8 Phases 3/3b are complete). Keep the
+   single-target process as the default deployment.
 5. **Remaining external work is outside this repository:** the catafalco prerequisites in
    3.5.
 6. **P2-15 is complete** (structured host/status data and SnapRAID parsing). The only
@@ -1823,14 +1835,16 @@ label (for example `watchtower`, `wud`, `socket-proxy`) still need
 
 1. The in-repo open work is the review hardening in 3.10 (R1–R8) and multi-target support
    in 3.7. Release channel parity (3.9) is complete. The 3.8 Phase 2 container runtime is
-   implemented; the author sandbox integration, deployer and end-to-end isolation checks
-   (3.8 Phases 3, 3b, 4, 5) remain deployment work. The remaining open work outside this
+   implemented; the author sandbox contract and workspace isolation (3.8 Phases 3/3b) are
+   complete. The deployer and final deployment verification (3.8 Phases 4/5) remain
+   deployment work. The remaining open work outside this
    repository is the catafalco prerequisites in 3.5 and the host-side self-test privilege
    in 3.6.
 2. For new in-repo work, start with 3.10 R5/R6 (R1–R4 are done), then 3.7 Phase 1. Add new items
    to section 3 with a checkbox that names the file or area to change; do not create a
-   second backlog in `docs/reviews/`. The 3.8 Phase 2 runtime is done; Phase 3 (author
-   sandbox) and Phase 5 (isolation verification) are deployment work.
+   second backlog in `docs/reviews/`. The 3.8 Phase 2 runtime is done; the author sandbox
+   and workspace isolation (Phases 3/3b) are documented and implemented by pi-sandbox.
+   Phase 5 (final deployment verification) remains deployment work.
 3. Read the relevant code/doc section before editing; keep the security model in
    `docs/security-model.md` intact.
 4. Add or update tests in the same PR (P0 items require regression tests).

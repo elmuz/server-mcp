@@ -79,14 +79,18 @@ The two modes use different files:
 never the sandbox file. Both files are local to the checkout and ignored by
 `.gitignore`.
 
-> **Shared-workspace warning.** The sandbox mounts the workspace read-write. Do
-> not later run host `pi`, tests, build, deploy or git hooks in a checkout that
-> an untrusted sandbox has written to. The agent can edit `.pi/mcp.json`,
-> `.pi/extensions`, `AGENTS.md`, git hooks, build metadata and scripts, and
-> ignored files such as `.pi/` do not appear in `git diff`. Use a separate
-> sandbox clone and approved commits, or review every changed and ignored file
-> before host execution. See the open gap in
-> [modernization-plan.md](modernization-plan.md#risks-and-open-questions).
+> **Use an ephemeral workspace for untrusted sessions.** Run
+> `pi-sandbox --workspace-mode ephemeral` (the pi-sandbox default remains
+> `none`). The launcher copies the full working tree, including `.git`,
+> uncommitted changes and untracked files, under its state directory and mounts
+> only that copy. The host checkout is never written. On exit the copy is parked
+> and its path is printed; `--workspace-discard` removes it instead. A parked
+> copy is untrusted agent output: do not run host `pi`, tests, build, deploy,
+> `pre-commit` or git hooks inside it without reviewing it first, and copy
+> changes back intentionally. `rw` remains the explicit shared-checkout mode for
+> trusted use. See the pi-sandbox
+> [workspace documentation](https://github.com/elmuz/pi-sandbox/blob/main/docs/usage.md#workspaces)
+> and [security model](https://github.com/elmuz/pi-sandbox/blob/main/docs/security.md#workspace-exposure-modes).
 
 The host development entries run the server as a stdio child of Pi and override
 only the container-specific paths from the installed host config:

@@ -267,12 +267,14 @@ the MCP container. Both fail if the corresponding boundary is removed.
 - **The egress proxy is a policy boundary, not a sandbox escape.** A compromised MCP
   process can still use any destination the policy allows, and the proxy itself runs on
   the same host. Keep the policy narrow and review it when a target changes.
-- **A shared writable workspace is not a trust boundary.** The sandbox mounts the project
-  read-write. If the operator runs host `pi`, tests, build, deploy or git hooks in that same
-  checkout later, files written by the agent execute on the host. This includes
-  `.pi/mcp.json`, `.pi/extensions`, `AGENTS.md`, `.git/hooks`, build metadata and scripts;
-  ignored files such as `.pi/` do not appear in `git diff`. Use a separate sandbox clone and
-  approved commits until workspace isolation is implemented.
+- **A shared writable workspace is not a trust boundary.** The `rw` sandbox mode mounts
+  the project read-write. If the operator runs host `pi`, tests, build, deploy or git hooks
+  in that same checkout later, files written by the agent execute on the host. This
+  includes `.pi/mcp.json`, `.pi/extensions`, `AGENTS.md`, `.git/hooks`, build metadata and
+  scripts; ignored files such as `.pi/` do not appear in `git diff`. Use
+  `pi-sandbox --workspace-mode ephemeral` for untrusted sessions; it copies the checkout
+  into launcher-owned state and mounts only the copy. The parked copy remains untrusted
+  output, and `rw` remains the explicit shared-checkout mode for trusted use.
 - **Docker/Podman shares the host kernel.** A runtime or kernel escape defeats the split.
   Use a VM or a separate machine for fully hostile code.
 - **The transport has one shared token.** It is not a multi-user auth system and has no

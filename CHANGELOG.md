@@ -12,6 +12,10 @@ versioning.
   into the `Authorization` header, and the server only validates the resulting bearer
   value. The harness and container docs cross-link the pi-sandbox contract, which records
   that Pi expands `${MCP_TOKEN}` and fails closed when the variable is missing.
+- The author sandbox contract now recommends `pi-sandbox --workspace-mode ephemeral` for
+  untrusted sessions. The sandbox copies the checkout into launcher-owned state and mounts
+  only the copy, so agent writes do not reach the host checkout; the parked copy remains
+  untrusted output. `rw` is documented as the explicit shared-checkout mode.
 
 ## [0.6.0] - 2026-11-06
 
