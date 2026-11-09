@@ -13,6 +13,12 @@ on:
 permissions:
   contents: read
 
+# Keep this digest identical to container/Dockerfile and publish.yml. The
+# Dockerfile default is the same value; passing it explicitly makes the image
+# workflow the reviewed pin for every build.
+env:
+  PYTHON_IMAGE: python:3.13-slim@sha256:e48f59cdba69a3cbd9ed2cf0f348d90d45a8d350d98134cf1070bc106ee9ed90
+
 concurrency:
   group: image-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
@@ -38,6 +44,17 @@ jobs:
           scandir: .
           severity: warning
 
+      - name: Verify the base digest is pinned in every build path
+        run: |
+          digest=$(grep -oE 'python:3\.13-slim@sha256:[0-9a-f]+' container/Dockerfile | head -1)
+          test -n "$digest" || { echo "Dockerfile has no pinned python base digest" >&2; exit 1; }
+          for file in .github/workflows/image.yml .github/workflows/publish.yml; do
+            grep -qF "$digest" "$file" || {
+              echo "$file does not use $digest" >&2
+              exit 1
+            }
+          done
+
   build:
     name: Build and smoke-test image
     runs-on: ubuntu-latest
@@ -58,6 +75,7 @@ jobs:
           load: true
           tags: localhost/server-mcp:ci
           build-args: |
+            PYTHON_IMAGE=${{ env.PYTHON_IMAGE }}
             VERSION=ci
             REVISION=${{ github.sha }}
           cache-from: type=gha
@@ -109,6 +127,7 @@ jobs:
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           build-args: |
+            PYTHON_IMAGE=${{ env.PYTHON_IMAGE }}
             VERSION=${{ github.ref_name }}
             REVISION=${{ github.sha }}
           provenance: true

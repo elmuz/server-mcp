@@ -27,6 +27,10 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
+    # Must match container/Dockerfile and image.yml. A release image built on a
+    # different base must fail review before it can be published.
+    env:
+      PYTHON_IMAGE: python:3.13-slim@sha256:e48f59cdba69a3cbd9ed2cf0f348d90d45a8d350d98134cf1070bc106ee9ed90
     steps:
       - name: Check out the release tag
         uses: actions/checkout@v7
@@ -45,6 +49,7 @@ jobs:
           load: true
           tags: localhost/server-mcp:release
           build-args: |
+            PYTHON_IMAGE=${{ env.PYTHON_IMAGE }}
             VERSION=${{ inputs.tag || github.ref_name }}
             REVISION=${{ github.sha }}
           cache-from: type=gha

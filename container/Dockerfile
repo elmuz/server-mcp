@@ -9,7 +9,20 @@
 # Build from the repository root:
 #   docker build -f container/Dockerfile -t localhost/server-mcp:dev .
 
-ARG PYTHON_IMAGE=python:3.13-slim
+# Pin the base to the multi-platform index digest, not the mutable tag. Rebuild
+# the same revision then cannot silently pick up a different OS/Python base.
+#
+# Refresh procedure (reviewed dependency bump):
+#   docker buildx imagetools inspect python:3.13-slim
+# Copy the ``Digest:`` value into PYTHON_IMAGE here and into PYTHON_IMAGE in
+# .github/workflows/image.yml and .github/workflows/publish.yml. Keep the tag
+# prefix for readability; the digest is authoritative.
+#
+# Platforms in the pinned index: linux/amd64, linux/arm64, linux/arm/v7,
+# linux/386, linux/ppc64le, linux/riscv64, linux/s390x. CI builds and smoke
+# tests linux/amd64; the release workflow does not yet build the other
+# platforms, so do not claim them as tested until it does.
+ARG PYTHON_IMAGE=python:3.13-slim@sha256:e48f59cdba69a3cbd9ed2cf0f348d90d45a8d350d98134cf1070bc106ee9ed90
 
 FROM ${PYTHON_IMAGE} AS builder
 

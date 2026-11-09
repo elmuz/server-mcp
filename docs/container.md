@@ -46,6 +46,17 @@ The build uses the locked uv workspace. It never resolves dependencies at runtim
 runtime image is non-root, has no Docker socket and no host home. CI builds the same
 Dockerfile with Docker; the image is OCI and runs under rootless Podman.
 
+The default `PYTHON_IMAGE` is a multi-platform digest, not the mutable `python:3.13-slim`
+tag. `.github/workflows/image.yml` and `publish.yml` pass the same digest explicitly, and
+the image lint job rejects a mismatch. Override the build arg only for local experiments:
+
+```bash
+podman build --build-arg PYTHON_IMAGE=python:3.13-slim -f container/Dockerfile .
+```
+
+Refresh the pin with `docker buildx imagetools inspect python:3.13-slim`, then update the
+Dockerfile, both workflows and this note in one reviewed change.
+
 Podman builds OCI images by default, so it prints `HEALTHCHECK is not supported for OCI
 image format and will be ignored`. That is expected: container health is defined by
 `HealthCmd=` in the Quadlet units, not by the image. Build with
