@@ -22,7 +22,7 @@ snapshots remain in git history.
   `ghcr.io/elmuz/server-mcp:v0.6.0` (index digest
   `sha256:23efd814f012c2c5bfdd9de99fc95d6e3be1d8c60d19b1a2b9b44cabf3a1dc55`), and
   `uvx --no-cache` resolves `0.6.0` for both servers. 3.9 release channel parity is
-  complete. The next in-repo work is the review hardening in 3.10 (R7/R8 next), then
+  complete. The review hardening in 3.10 (R1-R8) is complete; the next in-repo work is
   multi-target support (3.7). The author sandbox contract and workspace isolation
   (3.8 Phases 3/3b) are implemented by pi-sandbox; the deployer/approval boundary and
   final deployment verification remain external deployment work. The remaining external prerequisites
@@ -1586,26 +1586,40 @@ maintainability and supply-chain polish. None of these is a known wrong tool res
 
 #### R7 P2 — pin the image base by digest
 
-- [ ] **Problem.** `container/Dockerfile` defaults `PYTHON_IMAGE` to the mutable
+- [x] **Done (2026-11-08).** `container/Dockerfile` defaults `PYTHON_IMAGE` to
+      `python:3.13-slim@sha256:e48f59cd...ee9ed90`, the current multi-platform index digest.
+      `image.yml` and `publish.yml` pass the same value explicitly, and the image lint job
+      fails when the three copies drift. The Dockerfile comment records the refresh
+      procedure and the platforms in the index; CI smoke-tests `linux/amd64`, and the
+      comment does not claim the other architectures are tested. The build-arg override
+      remains for local experiments.
+- [x] **Problem.** `container/Dockerfile` defaults `PYTHON_IMAGE` to the mutable
       `python:3.13-slim` tag, so rebuilding the same source revision can silently change
       the OS/Python base.
-- [ ] **Change.** Default to an approved multi-platform digest
+- [x] **Change.** Default to an approved multi-platform digest
       (`python:3.13-slim@sha256:...`) and update it through a reviewed dependency bump. Keep
       the build arg override for local experiments, but CI and release builds use the
       pinned default.
-- [ ] **Acceptance.** The Dockerfile and the image workflow reference the same digest; a
+- [x] **Acceptance.** The Dockerfile and the image workflow reference the same digest; a
       comment records how to refresh it and which platforms were verified.
 
 #### R8 P2 — keep the app modules maintainable as the surface grows
 
-- [ ] **Problem.** The two app modules mix tool handlers, orchestration and output shaping
+- [x] **Done (2026-11-08).** The remote metrics handlers moved to
+      `remote_server_mcp/metrics.py` and the ZFS/RAID/SnapRAID/mount/I/O handlers to
+      `disk_health_mcp/storage.py`. The server modules keep the MCP registration wrappers
+      and pass the current config, validator, executor/runner and output cap in explicitly,
+      so module-level test patches keep working and no policy moved out of the library.
+      Focused tests cover both new modules, and the application coverage floors rose from
+      60%/65% to 80%/80% (measured 85.27% and 83.38% at this commit).
+- [x] **Problem.** The two app modules mix tool handlers, orchestration and output shaping
       and have grown to thousands of lines. The application coverage floors (60% and 65%)
       are far below the library's 90%, so behavior changes are less protected.
-- [ ] **Change.** When adding a tool, extract domain handlers (service lifecycle, metrics,
+- [x] **Change.** When adding a tool, extract domain handlers (service lifecycle, metrics,
       disk diagnostics) behind the existing registration layer instead of adding more
       branches to one module. Raise each floor when the extracted area has tests; never
       lower a floor to land a change. Do not move policy out of the library.
-- [ ] **Acceptance.** New domain modules have focused tests; the coverage floors move up
+- [x] **Acceptance.** New domain modules have focused tests; the coverage floors move up
       with the extracted code; no tool bypasses the executor/security interface.
 
 #### Recommended sequence
@@ -1706,8 +1720,8 @@ uv build --all-packages
 | Check | Result |
 |---|---|
 | `server-management-lib` tests | 531 passed, 91.03% coverage (gate 90%) |
-| `remote-server-mcp` tests | 297 passed (+17 integration opt-in), 84.44% coverage (gate 60%) |
-| `disk-health-mcp` tests | 224 passed, 82.93% coverage (gate 65%) |
+| `remote-server-mcp` tests | 306 passed (+17 integration opt-in), 85.27% coverage (gate 80%) |
+| `disk-health-mcp` tests | 232 passed, 83.38% coverage (gate 80%) |
 | Python version used locally | 3.12.16 |
 | `ruff check`, `ruff format --check`, `ty check` | passing on the `0.5.0` tree |
 | `pre-commit run --all-files` | passing on the `0.5.0` tree (ruff, ty, per-package pytest, pymarkdown, link check) |

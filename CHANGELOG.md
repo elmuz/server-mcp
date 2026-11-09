@@ -8,6 +8,16 @@ versioning.
 
 ### Changed
 
+- The container image base is pinned to the multi-platform
+  `python:3.13-slim@sha256:e48f59cd...ee9ed90` index digest instead of the mutable
+  `python:3.13-slim` tag. `image.yml` and `publish.yml` pass the same digest, the image
+  lint job rejects a mismatch, and `PYTHON_IMAGE` remains overridable for local builds.
+  Rebuilding a revision can no longer silently change its OS/Python base.
+- The remote metrics and disk storage-stack handlers now live in focused
+  `metrics.py`/`storage.py` modules behind the existing registration layer. The server
+  modules pass config, policy, executor and output cap explicitly, so no security policy
+  moved out of the library. Focused tests were added, and the application coverage gates
+  rose from 60%/65% to 80%/80%.
 - The MCP client auth contract is now explicit: the client expands environment variables
   into the `Authorization` header, and the server only validates the resulting bearer
   value. The harness and container docs cross-link the pi-sandbox contract, which records
