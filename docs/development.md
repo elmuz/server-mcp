@@ -38,8 +38,8 @@ working while using the shared workspace environment.
 | Package | Gate |
 |---|---|
 | `server-management-lib` | 90% |
-| `remote-server-mcp` | 60% |
-| `disk-health-mcp` | 65% |
+| `remote-server-mcp` | 80% |
+| `disk-health-mcp` | 80% |
 
 Raise a gate when adding tests; do not lower it to make a change pass.
 
@@ -47,11 +47,14 @@ Raise a gate when adding tests; do not lower it to make a change pass.
 
 ```text
 apps/remote-server-mcp/src/remote_server_mcp/
-├── server.py          tools and input validation
+├── server.py          tool registration and input validation
+├── metrics.py         InfluxDB/Prometheus handlers
+├── resolution.py      service/container resolution
 └── operations.py      typed argv templates
 
 apps/disk-health-mcp/src/disk_health_mcp/
-├── server.py          tools and formatting
+├── server.py          tool registration, device resolution and SMART handlers
+├── storage.py         ZFS/RAID/SnapRAID/mount/I/O handlers
 ├── operations.py      typed argv templates
 ├── smart_parser.py    smartctl JSON/text parsing
 └── smartdb.py         generated SMART attribute database

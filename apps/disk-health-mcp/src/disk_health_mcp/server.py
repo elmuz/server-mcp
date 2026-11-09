@@ -59,14 +59,9 @@ from server_management_lib.security import (
     NVME_CONTROLLER_PATTERN,
 )
 
+from . import storage
 from .operations import (
-    CAT_MDSTAT,
-    DF_REAL_FILESYSTEMS,
-    FINDMNT_MERGERFS,
-    FINDMNT_MOUNTS,
-    IOSTAT,
     LIST_DISKS,
-    MDADM_DETAIL,
     NVME_CLI_PATH,
     NVME_SMART_LOG,
     SMART_INFO,
@@ -77,9 +72,6 @@ from .operations import (
     SMART_TEST_NVME,
     SMART_TEXT,
     SMARTCTL_PATH,
-    SNAPRAID_STATUS,
-    ZPOOL_LIST,
-    ZPOOL_STATUS,
 )
 from .smart_parser import (
     SmartDevice,
@@ -2209,32 +2201,11 @@ async def get_zfs_status() -> str | ToolOutput:
     Returns:
         ZFS pool status and health information
     """
-    if not config.get("host", {}).get("enabled", False):
-        return (
-            "❌ Host data source is not enabled.\n"
-            "Set 'host.enabled: true' in config.yaml."
-        )
-
-    parts = [
-        ("ZFS Pool Status", ZPOOL_STATUS.render()),
-        ("ZFS Pool List", ZPOOL_LIST.render()),
-    ]
-    for _, cmd in parts:
-        if not security.is_command_safe(cmd):
-            return "❌ Command not in safe whitelist"
-
-    results = []
-    outputs: dict[str, str] = {}
-    for title, cmd in parts:
-        output = await _run_command(cmd)
-        outputs[title] = output
-        results.append(f"=== {title} ===\n{output}")
-    return ToolOutput(
-        _cap_composite("\n\n".join(results)),
-        data={
-            "pool_status": outputs.get("ZFS Pool Status", ""),
-            "pool_list": outputs.get("ZFS Pool List", ""),
-        },
+    return await storage.get_zfs_status(
+        config=config,
+        security=security,
+        run_command=_run_command,
+        cap=_cap_composite,
     )
 
 
@@ -2248,32 +2219,11 @@ async def get_raid_status() -> str | ToolOutput:
     Returns:
         RAID array status and health information
     """
-    if not config.get("host", {}).get("enabled", False):
-        return (
-            "❌ Host data source is not enabled.\n"
-            "Set 'host.enabled: true' in config.yaml."
-        )
-
-    parts = [
-        ("MDSTAT", CAT_MDSTAT.render()),
-        ("MDADM Detail", MDADM_DETAIL.render()),
-    ]
-    for _, cmd in parts:
-        if not security.is_command_safe(cmd):
-            return "❌ Command not in safe whitelist"
-
-    results = []
-    outputs: dict[str, str] = {}
-    for title, cmd in parts:
-        output = await _run_command(cmd)
-        outputs[title] = output
-        results.append(f"=== {title} ===\n{output}")
-    return ToolOutput(
-        _cap_composite("\n\n".join(results)),
-        data={
-            "mdstat": outputs.get("MDSTAT", ""),
-            "mdadm_detail": outputs.get("MDADM Detail", ""),
-        },
+    return await storage.get_raid_status(
+        config=config,
+        security=security,
+        run_command=_run_command,
+        cap=_cap_composite,
     )
 
 
@@ -2288,23 +2238,13 @@ async def get_snapraid_status() -> str | ToolOutput:
     Returns:
         SnapRAID status (parity age, sync state, disk errors)
     """
-    if not config.get("host", {}).get("enabled", False):
-        return (
-            "❌ Host data source is not enabled.\n"
-            "Set 'host.enabled: true' in config.yaml."
-        )
-
-    cmd = SNAPRAID_STATUS.render()
-    if not security.is_command_safe(cmd):
-        return "❌ Command not in safe whitelist"
-    output = await _run_command(cmd)
-    return ToolOutput(
-        _cap_composite(output),
-        ok=not _command_failed(output),
-        data={
-            "status": output,
-            "parsed": _parse_snapraid_status(output),
-        },
+    return await storage.get_snapraid_status(
+        config=config,
+        security=security,
+        run_command=_run_command,
+        cap=_cap_composite,
+        command_failed=_command_failed,
+        parse_status=_parse_snapraid_status,
     )
 
 
@@ -2319,34 +2259,11 @@ async def get_mount_status() -> str | ToolOutput:
     Returns:
         Mount, mergerFS and usage summary
     """
-    if not config.get("host", {}).get("enabled", False):
-        return (
-            "❌ Host data source is not enabled.\n"
-            "Set 'host.enabled: true' in config.yaml."
-        )
-
-    parts = [
-        ("Mounted Filesystems", FINDMNT_MOUNTS.render()),
-        ("mergerFS Pools", FINDMNT_MERGERFS.render()),
-        ("Filesystem Usage", DF_REAL_FILESYSTEMS.render()),
-    ]
-    for _, cmd in parts:
-        if not security.is_command_safe(cmd):
-            return "❌ Command not in safe whitelist"
-
-    results = []
-    outputs: dict[str, str] = {}
-    for title, cmd in parts:
-        output = await _run_command(cmd)
-        outputs[title] = output
-        results.append(f"=== {title} ===\n{output}")
-    return ToolOutput(
-        _cap_composite("\n\n".join(results)),
-        data={
-            "mounts": outputs.get("Mounted Filesystems", ""),
-            "mergerfs": outputs.get("mergerFS Pools", ""),
-            "usage": outputs.get("Filesystem Usage", ""),
-        },
+    return await storage.get_mount_status(
+        config=config,
+        security=security,
+        run_command=_run_command,
+        cap=_cap_composite,
     )
 
 
@@ -2360,17 +2277,12 @@ async def get_io_stats() -> str | ToolOutput:
     Returns:
         Extended I/O statistics for all devices
     """
-    if not config.get("host", {}).get("enabled", False):
-        return (
-            "❌ Host data source is not enabled.\n"
-            "Set 'host.enabled: true' in config.yaml."
-        )
-
-    cmd = IOSTAT.render()
-    if not security.is_command_safe(cmd):
-        return "❌ Command not in safe whitelist"
-    output = await _run_command(cmd)
-    return ToolOutput(_cap_composite(output), data={"iostat": output})
+    return await storage.get_io_stats(
+        config=config,
+        security=security,
+        run_command=_run_command,
+        cap=_cap_composite,
+    )
 
 
 # ============================================================================

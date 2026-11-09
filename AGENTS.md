@@ -128,7 +128,7 @@ Config resolution: `--config` → env var (`REMOTE_SERVER_MCP_CONFIG` /
 
 - Unit tests must not require a real host or network.
 - Integration tests use the `integration` marker and are excluded by default.
-- Coverage gates: lib 90%, remote 60%, disk 65%. Raise them when adding tests, never lower.
+- Coverage gates: lib 90%, remote 80%, disk 80%. Raise them when adding tests, never lower.
 - Security tests should assert the behavior we want, not merely document current behavior.
 
 ## Documentation

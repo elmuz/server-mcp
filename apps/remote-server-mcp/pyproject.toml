@@ -61,6 +61,7 @@ python_functions = ["test_*"]
 markers = [
     "integration: marks integration tests that require real SSH/DB access",
 ]
+asyncio_mode = "auto"
 # Keep the default suite deterministic. Run integration tests explicitly with:
 #   uv run pytest -m integration
 addopts = "-m 'not integration' --cov=src/remote_server_mcp --cov-report=term-missing"
@@ -70,6 +71,6 @@ source = ["remote_server_mcp"]
 branch = true
 
 [tool.coverage.report]
-fail_under = 60
+fail_under = 80
 show_missing = true
 skip_covered = true

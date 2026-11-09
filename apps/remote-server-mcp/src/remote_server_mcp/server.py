@@ -39,7 +39,6 @@ from server_management_lib import (
     create_audit_logger,
     create_executor,
     create_rate_limiter,
-    influxdb_group_by_advisory,
     load_config,
     make_structured_tool,
     open_metric_tunnels,
@@ -51,6 +50,7 @@ from server_management_lib import (
     sanitize_output,
 )
 
+from . import metrics
 from .operations import (
     DISK_USAGE,
     ECHO_CONNECTION,
@@ -1526,22 +1526,6 @@ async def search_service_logs(
         return f"❌ Error searching logs: {e}"
 
 
-QUERY_SUCCESS_PREFIX = "✅ Query successful"
-
-
-def _query_data(result: str) -> dict:
-    """Extract the JSON payload from a query response, when there is one."""
-    if not result.startswith(QUERY_SUCCESS_PREFIX):
-        return {}
-    try:
-        payload = json.loads(result.split("\n\n", 1)[1])
-    except (json.JSONDecodeError, IndexError):
-        return {}
-    if isinstance(payload, list):
-        return {"rows": payload, "row_count": len(payload)}
-    return {"result": payload}
-
-
 @structured_tool(READ_ONLY)
 async def query_influxdb(query: str, database: str | None = None) -> str | ToolOutput:
     """Query InfluxDB v3 using SQL (read-only).
@@ -1561,39 +1545,14 @@ async def query_influxdb(query: str, database: str | None = None) -> str | ToolO
     Returns:
         Query results in JSON format
     """
-    influxdb_config = config.get("influxdb", {})
-    if not influxdb_config.get("enabled", False):
-        return (
-            "❌ InfluxDB queries are not enabled.\n"
-            "Set 'influxdb.enabled: true' in config.yaml and configure host/port."
-        )
-
-    # Validate the query
-    validated_query = security.validate_influxdb_query(query)
-    if validated_query is None:
-        _audit("query_blocked", kind="influxdb", query_length=len(query))
-        return (
-            "❌ Invalid query. Queries must:\n"
-            "- Be a single SELECT (read-only only)\n"
-            "- Not contain SQL comments (-- or /* */)\n"
-            "- Not contain control characters"
-        )
-
-    db = database or influxdb_config.get("database")
-    if not db:
-        return (
-            "❌ No database specified. Provide 'database' parameter or set "
-            "'influxdb.database' in config.yaml."
-        )
-
-    client = _get_influxdb_client()
-    result = await client.query(validated_query, database=db)
-    advisory = influxdb_group_by_advisory(validated_query)
-    text = result if advisory is None else f"{result}\n\n💡 {advisory}"
-    data: dict = {"database": db, **_query_data(result)}
-    if advisory is not None:
-        data["advisory"] = advisory
-    return ToolOutput(text, data=data)
+    return await metrics.query_influxdb(
+        query,
+        database,
+        config=config,
+        security=security,
+        audit=_audit,
+        get_client=_get_influxdb_client,
+    )
 
 
 @structured_tool(READ_ONLY)
@@ -1615,39 +1574,14 @@ async def get_influxdb_schema(
     Returns:
         Table list or column metadata as JSON
     """
-    influxdb_config = config.get("influxdb", {})
-    if not influxdb_config.get("enabled", False):
-        return (
-            "❌ InfluxDB queries are not enabled.\n"
-            "Set 'influxdb.enabled: true' in config.yaml and configure host/port."
-        )
-
-    validated_table: str | None = None
-    if table is not None:
-        validated_table = security.validate_influxdb_table_name(table)
-        if validated_table is None:
-            _audit("schema_blocked", kind="influxdb", table=table)
-            return (
-                f"❌ Invalid table name: {table}\n"
-                "Use a plain name or schema.table (letters, digits, underscore, "
-                "and one dot). No quotes or spaces."
-            )
-
-    db = database or influxdb_config.get("database")
-    if not db:
-        return (
-            "❌ No database specified. Provide 'database' parameter or set "
-            "'influxdb.database' in config.yaml."
-        )
-
-    client = _get_influxdb_client()
-    result = await client.schema(validated_table, database=db)
-    data: dict = {
-        "database": db,
-        "table": validated_table,
-        **_query_data(result),
-    }
-    return ToolOutput(result, data=data)
+    return await metrics.get_influxdb_schema(
+        table,
+        database,
+        config=config,
+        security=security,
+        audit=_audit,
+        get_client=_get_influxdb_client,
+    )
 
 
 @structured_tool(READ_ONLY)
@@ -1664,26 +1598,14 @@ async def query_prometheus(query: str, time: str | None = None) -> str | ToolOut
     Returns:
         Query results in JSON format
     """
-    prometheus_config = config.get("prometheus", {})
-    if not prometheus_config.get("enabled", False):
-        return (
-            "❌ Prometheus queries are not enabled.\n"
-            "Set 'prometheus.enabled: true' in config.yaml and configure host/port."
-        )
-
-    validated_query = security.validate_prometheus_query(query)
-    if validated_query is None:
-        _audit("query_blocked", kind="prometheus", query_length=len(query))
-        return (
-            "❌ Invalid query. Queries must:\n"
-            "- Not contain null bytes or control characters other than newline/tab\n"
-            "- Be at most 5000 characters\n"
-            "- Be a single PromQL expression"
-        )
-
-    client = _get_prometheus_client()
-    result = await client.query(validated_query, time)
-    return ToolOutput(result, data=_query_data(result))
+    return await metrics.query_prometheus(
+        query,
+        time,
+        config=config,
+        security=security,
+        audit=_audit,
+        get_client=_get_prometheus_client,
+    )
 
 
 @structured_tool(READ_ONLY)
@@ -1696,16 +1618,10 @@ async def get_prometheus_targets() -> str | ToolOutput:
     Returns:
         List of scrape targets with their status
     """
-    prometheus_config = config.get("prometheus", {})
-    if not prometheus_config.get("enabled", False):
-        return (
-            "❌ Prometheus queries are not enabled.\n"
-            "Set 'prometheus.enabled: true' in config.yaml and configure host/port."
-        )
-
-    client = _get_prometheus_client()
-    result = await client.get_targets()
-    return ToolOutput(result, data=_query_data(result))
+    return await metrics.get_prometheus_targets(
+        config=config,
+        get_client=_get_prometheus_client,
+    )
 
 
 @structured_tool(READ_ONLY)
