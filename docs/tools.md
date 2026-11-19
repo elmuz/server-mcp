@@ -361,6 +361,8 @@ directory or add its name to `security.allowed_containers`.
   spellings such as `pass`, `pw`, `passphrase` and `db_pass`), bearer headers, JWTs and
   URL passwords are replaced with `***` while keys and structure stay readable. Comment
   bodies are checked as well, and YAML block scalars such as `api_token: |` have their
-  indented value lines masked entirely.
+  indented value lines masked entirely. A header with a trailing comment and a
+  commented-out header (`# api_token: |`) both keep their value lines in scope, so a
+  disabled credential cannot leak through a comment.
   `get_host_service_status` and `get_host_service_logs` apply the same redaction because
   `systemctl status --full` and journal tails can contain command-line tokens.

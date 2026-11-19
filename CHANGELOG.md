@@ -27,6 +27,14 @@ versioning.
   only the copy, so agent writes do not reach the host checkout; the parked copy remains
   untrusted output. `rw` is documented as the explicit shared-checkout mode.
 
+### Fixed
+
+- Redaction now follows a block scalar whose header carries a trailing comment
+  (`api_token: |  # rotate quarterly`) and a commented-out header
+  (`# api_token: |`). Both previously masked the key line but returned the indented
+  value lines, so a disabled credential stayed readable. Non-secret and commented-out
+  ordinary block scalars are still preserved.
+
 ## [0.6.0] - 2026-11-06
 
 ### Fixed

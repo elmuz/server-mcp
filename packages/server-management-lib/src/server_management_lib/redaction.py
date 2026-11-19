@@ -221,6 +221,54 @@ def _redact_content(line: str) -> str:
     return line
 
 
+# A block-scalar header can itself be commented out, so a credential that was
+# disabled in the file (``# api_token: |``) still owns the value lines below it.
+# The header's key column is measured after the comment marker, and a value line
+# is part of the scalar when its own content starts further right.
+def _content_column(line: str) -> int:
+    """Return the column where the line's content starts, ignoring a comment marker."""
+    comment = _COMMENT_LINE.match(line)
+    if comment is None:
+        return len(line) - len(line.lstrip())
+    body = comment.group("body")
+    return (
+        len(comment.group("indent"))
+        + len(comment.group("marker"))
+        + len(body)
+        - len(body.lstrip())
+    )
+
+
+def _block_scalar_header(line: str) -> tuple[int, str] | None:
+    """Return ``(key column, key)`` when the line opens a block scalar."""
+    header = _BLOCK_SCALAR.match(line)
+    if header is not None:
+        return len(header.group("indent")), header.group("key")
+
+    comment = _COMMENT_LINE.match(line)
+    if comment is None:
+        return None
+    header = _BLOCK_SCALAR.match(comment.group("body"))
+    if header is None:
+        return None
+    marker_end = len(comment.group("indent")) + len(comment.group("marker"))
+    return marker_end + len(header.group("indent")), header.group("key")
+
+
+# A masked value line inside a commented-out scalar keeps its marker and
+# indentation, so the shape of the file stays readable and the leaked value does
+# not. Non-comment value lines are masked entirely, as before.
+def _masked_block_value(line: str) -> str:
+    comment = _COMMENT_LINE.match(line)
+    if comment is None:
+        return REDACTED_VALUE
+    body = comment.group("body")
+    spacing = body[: len(body) - len(body.lstrip())]
+    return (
+        f"{comment.group('indent')}{comment.group('marker')}{spacing}{REDACTED_VALUE}"
+    )
+
+
 def _redact_line(line: str) -> str:
     """Redact a line, including credentials inside a comment.
 
@@ -250,7 +298,9 @@ def redact_secrets(text: str) -> str:
     Comment bodies are checked too, so a commented-out credential such as
     ``# API_TOKEN=...`` is masked while ordinary comments stay readable. YAML
     block scalars (``api_token: |``) are followed onto their indented value
-    lines, which are masked entirely. Unknown formats are handled
+    lines, which are masked entirely; a trailing comment on the header and a
+    commented-out header (``# api_token: |``) both keep the value lines in
+    scope. Unknown formats are handled
     conservatively: a sensitive key followed by a block-scalar indicator masks
     the indented lines even when the surrounding syntax is not YAML.
 
@@ -275,18 +325,17 @@ def redact_secrets(text: str) -> str:
                 # Blank lines are part of the scalar but carry no secret.
                 lines.append(line)
                 continue
-            indent = len(line) - len(line.lstrip())
-            if indent > block_indent:
-                lines.append(REDACTED_VALUE)
+            if _content_column(line) > block_indent:
+                lines.append(_masked_block_value(line))
                 continue
             # Dedented: the block scalar ended before this line.
             block_indent = None
 
         lines.append(_redact_line(line))
 
-        header = _BLOCK_SCALAR.match(line)
-        if header is not None and _is_sensitive_key(header.group("key")):
-            block_indent = len(header.group("indent"))
+        header = _block_scalar_header(line)
+        if header is not None and _is_sensitive_key(header[1]):
+            block_indent = header[0]
 
     redacted = "\n".join(lines)
     if text.endswith("\n"):

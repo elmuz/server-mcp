@@ -149,7 +149,9 @@ in URLs are masked as well. Comment bodies are checked too, so a commented-out
 credential is masked while ordinary comments stay readable. YAML block scalars such as
 `api_token: |` are followed onto their indented value lines, which are masked entirely;
 the same conservative rule applies to an unknown format that uses a block-scalar
-indicator after a sensitive key.
+indicator after a sensitive key. A header may carry a trailing comment, and a
+commented-out header (`# api_token: |`) still owns the value lines below it, so a
+disabled credential cannot leak through a comment marker.
 `systemctl status` and `journalctl -u` output is passed through the same redactor, because
 `--full` command lines and journal tails can contain tokens.
 

@@ -194,6 +194,50 @@ class TestRedactSecrets:
             "  user: bob",
         ]
 
+    def test_block_scalar_header_with_trailing_comment_is_masked(self):
+        """A comment on the header must not end the scalar.
+
+        Regression from interactive run ``f460a943`` in elmuz/symposium: the
+        accepted spec only tested a bare ``api_token: |`` header, so the
+        trailing-comment variant leaked its value lines past the loop.
+        """
+        from server_management_lib.redaction import redact_secrets
+
+        text = "api_token: |  # rotate quarterly\n  s3cr3t-value\n"
+
+        result = redact_secrets(text)
+
+        assert "s3cr3t-value" not in result
+        assert "rotate quarterly" not in result
+        assert result.splitlines() == [f"api_token: {REDACTED_VALUE}", REDACTED_VALUE]
+
+    def test_commented_out_block_scalar_secret_is_masked(self):
+        """A commented-out header still owns the value lines below it.
+
+        Same run as the test above: ``# api_token: |`` masked the key line but
+        left the commented value lines readable, which is the task's own
+        failure mode (a commented-out credential leaked).
+        """
+        from server_management_lib.redaction import redact_secrets
+
+        text = "# api_token: |\n#   s3cr3t-value\n# name: visible\n"
+
+        result = redact_secrets(text)
+
+        assert "s3cr3t-value" not in result
+        assert result.splitlines() == [
+            f"# api_token: {REDACTED_VALUE}",
+            f"#   {REDACTED_VALUE}",
+            "# name: visible",
+        ]
+
+    def test_commented_out_non_secret_block_scalar_is_preserved(self):
+        from server_management_lib.redaction import redact_secrets
+
+        text = "# description: |\n#   ordinary text\n"
+
+        assert redact_secrets(text) == text
+
     def test_non_secret_block_scalar_is_preserved(self):
         from server_management_lib.redaction import redact_secrets
 

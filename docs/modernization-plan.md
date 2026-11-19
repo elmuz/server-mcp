@@ -1544,6 +1544,15 @@ maintainability and supply-chain polish. None of these is a known wrong tool res
       comments remain readable.
 - [x] **Acceptance.** `# API_TOKEN=...` and a YAML block-scalar secret are masked, with
       regression tests in the library and the remote-server app.
+- [x] **Follow-up (2026-11-19).** A benchmark run in elmuz/symposium approved a spec whose
+      criteria only tested a bare `api_token: |` header, so two variants slipped past the
+      gate: a header with a trailing comment and a commented-out header. Both leaked the
+      indented value lines. The header is now recognized after a comment marker, its key
+      column is measured from there, and a masked value line inside a commented-out
+      scalar keeps its marker and indentation (`#   ***`). Tests:
+      `test_block_scalar_header_with_trailing_comment_is_masked`,
+      `test_commented_out_block_scalar_secret_is_masked`, and the non-secret comment case
+      that must stay readable.
 
 #### R5 P1 — authenticate SSH host keys at bootstrap
 
